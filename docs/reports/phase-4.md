@@ -79,8 +79,7 @@ kcat -b localhost:9092 -G mygroup mytopic
   for ever would pass.
 - **Simulated members all offer the same single protocol.** Protocol
   choice with differing lists is covered by a unit test only.
-- **One Java test run in about ten failed once and could not be
-  reproduced.** See the note at the end of this report.
+- **One Java test run in 34 failed and could not be reproduced.** See the note at the end of this report.
 - **Real-client coverage is narrow**: one version of each client, default
   settings, at most two members, no static membership, no
   `group.protocol=consumer`, no client-side assignor other than the
@@ -137,6 +136,8 @@ pass/fail lines before anyone looked, so the message is lost. It ran for
 the same 8 s as a passing run, which means every phase of the test
 completed and one of the last checks failed: either a record was delivered
 twice, or the Java client sent a JoinGroup after the broker restart.
-Further runs are recorded in the pull request. Until it is reproduced and
+It did not happen again in 33 further runs of that test (and 28 of the
+franz-go one). A failing run prints the broker's full log, so the next
+occurrence, locally or in CI, can be diagnosed. Until it is reproduced and
 explained, treat "no rebalance after a broker restart" for the Java client
 as usually true, not proven.
