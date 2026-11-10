@@ -314,3 +314,13 @@ func TestParseBatchRejects(t *testing.T) {
 		}
 	}
 }
+
+// librdkafka rejects a null record set in a fetch response, so "nothing to
+// return" must be encoded with length 0, not -1.
+func TestFetchResponseEncodesNoRecordsAsEmpty(t *testing.T) {
+	var w Writer
+	(&FetchResponse{Topics: []FetchTopicResponse{{Name: "t", Partitions: []FetchPartitionResponse{{HighWatermark: 3}}}}}).Encode(&w, 11)
+	if !bytes.HasSuffix(w.B, []byte{0, 0, 0, 0}) {
+		t.Fatalf("empty record set not encoded as length 0: % x", w.B[len(w.B)-8:])
+	}
+}
