@@ -58,8 +58,17 @@ type BatchInfo struct {
 
 // ParseBatch validates the record batch at the start of b without looking
 // inside its records, which may be compressed. It returns a Kafka error
-// code, ErrNone if the batch is acceptable. maxSize bounds the batch size.
+// code, ErrNone if the batch is acceptable; on any other code the BatchInfo
+// is zero. maxSize bounds the batch size.
 func ParseBatch(b []byte, maxSize int) (BatchInfo, int16) {
+	info, code := parseBatch(b, maxSize)
+	if code != ErrNone {
+		return BatchInfo{}, code // never hand out a size taken from rejected bytes
+	}
+	return info, ErrNone
+}
+
+func parseBatch(b []byte, maxSize int) (BatchInfo, int16) {
 	var info BatchInfo
 	if len(b) < batchMagicAt+1 {
 		return info, ErrCorruptMessage

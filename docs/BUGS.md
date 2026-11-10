@@ -10,6 +10,26 @@ None yet. Phase 1's storage engine passed the crash property test once the
 model bug below was fixed. That is weaker evidence than it sounds: see
 "what is untested or weak" in `docs/reports/phase-1.md`.
 
+## Bugs found by fuzzing
+
+### F1. Negative batch length crashed the produce handler (Phase 2)
+
+- **Found by:** `FuzzNodeInput` within six seconds; the input is kept in
+  `internal/broker/testdata/fuzz/FuzzNodeInput/`.
+- **Symptom:** panic, slice bounds out of range, in `Node.produce`.
+- **Root cause:** a record batch whose length field is negative was
+  correctly rejected by `wire.ParseBatch`, but `ParseBatch` still returned
+  the size it had computed from that field, and the handler advanced by it
+  before looking at the error code. A negative size became a negative slice
+  index. One malformed produce request from any client would have killed
+  the broker: exactly what architecture rule 4 forbids.
+- **Fix:** the handler stops at the first rejected batch, and `ParseBatch`
+  returns a zero `BatchInfo` with any error, so the mistake cannot be
+  repeated by another caller.
+- **Lesson:** the unit tests covered "corrupt batch" with a bit flip, which
+  fails the checksum with a sane length. An error path that returns
+  partially filled data is a trap.
+
 ## Bugs in the simulator and tests
 
 ### M1. Torn block destroyed bytes that had been synced (Phase 1)
