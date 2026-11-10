@@ -12,7 +12,10 @@ Sole developer, Apple Silicon MacBook Air. Everything runs locally; no cloud
 infrastructure. The developer must be able to defend every design decision in
 an interview, so explain the why, not only the what.
 
-The phase plan lives in `docs/PLAN.md`. Read it before starting work.
+The phase plan lives in `docs/PLAN.md`; Phase 4 onwards and the work beyond
+the plan are specified in `docs/ROADMAP.md`. Read both before starting work.
+The shared architecture: every state change is a command in one log, applied
+in order to a deterministic state machine (ADR 0005).
 
 ## Goals
 
@@ -49,6 +52,16 @@ allowlist of standard-library packages, may use nothing from `time` except
 `Duration`, and may not contain `go` or `select` statements (ADR 0003).
 
 ## Process
+
+**Standing instruction (2026-11-10):** the developer delegated approvals:
+"approve yourself and continue coding till either there is any blocker or
+the project is done, keep everything documented and I will review all
+later". So: do not stop between phases. For each phase still write the
+design doc, review it critically as a second pass (record the findings in
+the doc), open a PR, merge only on green CI, and write the end-of-phase
+report to `docs/reports/phase-N.md`. Stop only for a real blocker. The
+"wait for approval" lines below describe the original process and apply
+again if the developer withdraws this instruction.
 
 - Phases 0–3 are the MVP. **Stop after every phase and wait for approval.**
 - At the start of each phase, write `docs/design/phase-N.md`: the concepts
