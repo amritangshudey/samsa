@@ -81,11 +81,12 @@ type Model struct {
 	parts     map[TP]*partModel
 	topics    map[string]*topicModel
 	finalPass int
+	groups    groupModel
 }
 
 // NewModel returns an empty model.
 func NewModel(strict bool) *Model {
-	return &Model{strict: strict, recs: make([]rec, 1), parts: map[TP]*partModel{}, topics: map[string]*topicModel{}}
+	return &Model{strict: strict, recs: make([]rec, 1), parts: map[TP]*partModel{}, topics: map[string]*topicModel{}, groups: newGroupModel()}
 }
 
 func (m *Model) part(tp TP) *partModel {
@@ -111,6 +112,7 @@ func (m *Model) PowerLoss() {
 	if m.strict {
 		return
 	}
+	m.groups.forget()
 	for _, p := range m.parts { // order-independent: every entry gets the same update
 		p.floor = 0
 	}

@@ -71,6 +71,8 @@ type state struct {
 	topics map[string]*topic
 	names  []string // sorted, for deterministic listing
 	groups map[string]*group
+	// noFencing is Config.UnsafeNoFencing: a deliberate bug.
+	noFencing bool
 }
 
 func newState() *state { return &state{topics: map[string]*topic{}, groups: map[string]*group{}} }
@@ -147,7 +149,7 @@ func (s *state) forWrite(name string) *group {
 // checkCommit decides whether an offset commit is accepted. It runs in
 // apply, so the generation it compares with is the one current at the
 // commit's position in the log: this is what fences a zombie (G4).
-func (g *group) checkCommit(generation int32, memberID string) int16 {
+func (g *group) checkCommit(generation int32, memberID string, noFencing bool) int16 {
 	if generation == -1 && memberID == "" {
 		// A consumer that assigns partitions itself. It may not write
 		// under a group that has members.
@@ -159,7 +161,7 @@ func (g *group) checkCommit(generation int32, memberID string) int16 {
 	switch {
 	case g.member(memberID) == nil:
 		return wire.ErrUnknownMemberID
-	case generation != g.generation:
+	case generation != g.generation && !noFencing:
 		return wire.ErrIllegalGeneration
 	case !g.assigned:
 		return wire.ErrRebalanceInProgress
@@ -295,7 +297,7 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 		if r.Err() != nil {
 			return result{}, fmt.Errorf("%w: offset commit at index %d", errBadCommand, index)
 		}
-		if code := s.group(name).checkCommit(generation, memberID); code != wire.ErrNone {
+		if code := s.group(name).checkCommit(generation, memberID, s.noFencing); code != wire.ErrNone {
 			return result{errCode: code}, nil
 		}
 		g := s.forWrite(name)

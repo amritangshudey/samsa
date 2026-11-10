@@ -45,6 +45,8 @@ type Stats struct {
 	Requests, RecordsAcked, RecordsRead, FetchesChecked int
 	PowerLosses, Kills, SyncFailures, RecoveriesCut     int
 	Starts, Disconnects                                 int
+	GroupJoins, GroupSyncs, OffsetCommits               int
+	OffsetFetches, ZombiesRefused                       int
 }
 
 // world owns virtual time and everything outside the node.

@@ -65,6 +65,9 @@ type Config struct {
 	// SyncAlways, commands count as committed when appended, not when
 	// synced. It exists so that the simulator can prove it notices.
 	UnsafeAckBeforeSync bool
+	// UnsafeNoFencing breaks zombie fencing on purpose: an offset commit
+	// from a member is accepted whatever generation it carries.
+	UnsafeNoFencing bool
 }
 
 func (c Config) withDefaults() Config {
@@ -172,9 +175,11 @@ type Node struct {
 // random source. It does nothing until the driver calls OnStart.
 func New(cfg Config, clock sys.Clock, net sys.Network, disk sys.Disk, rand sys.Random) *Node {
 	cfg = cfg.withDefaults()
+	st := newState()
+	st.noFencing = cfg.UnsafeNoFencing
 	return &Node{
 		cfg: cfg, clock: clock, net: net, disk: disk, rand: rand, log: cfg.Logger,
-		st: newState(), conns: map[sys.ConnID]*conn{}, nextTimer: firstFreeTimer,
+		st: st, conns: map[sys.ConnID]*conn{}, nextTimer: firstFreeTimer,
 		timers: map[sys.TimerID]func(){}, groups: map[string]*softGroup{},
 	}
 }
