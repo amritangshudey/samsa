@@ -31,6 +31,7 @@ var allowedImports = map[string]bool{
 	"log/slog":        true,
 	"math":            true,
 	"math/bits":       true,
+	"path":            true,
 	"slices":          true,
 	"sort":            true,
 	"strconv":         true,
