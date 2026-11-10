@@ -337,10 +337,11 @@ func TestKcatRoundTrip(t *testing.T) {
 	}
 }
 
-// The official Java client: admin creates the topic, producer writes,
-// consumer reads back. See java/RoundTrip.java.
-func TestJavaClientRoundTrip(t *testing.T) {
-	java := os.Getenv("JAVA")
+// javaAndJars finds a working JDK and the kafka-clients class path, or
+// skips the test (fails it, in CI).
+func javaAndJars(t *testing.T) (java, classPath string) {
+	t.Helper()
+	java = os.Getenv("JAVA")
 	if java == "" {
 		for _, candidate := range []string{"/opt/homebrew/opt/openjdk/bin/java", "java"} {
 			if p, err := exec.LookPath(candidate); err == nil {
@@ -358,11 +359,18 @@ func TestJavaClientRoundTrip(t *testing.T) {
 	if len(jars) < 2 {
 		missing(t, "the kafka-clients jars (run `make integration` to download them)")
 	}
+	return java, strings.Join(jars, string(os.PathListSeparator))
+}
+
+// The official Java client: admin creates the topic, producer writes,
+// consumer reads back. See java/RoundTrip.java.
+func TestJavaClientRoundTrip(t *testing.T) {
+	java, cp := javaAndJars(t)
 	b := startBroker(t)
 	const n = 300
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, java, "-cp", strings.Join(jars, string(os.PathListSeparator)), "java/RoundTrip.java", b.addr, "java", fmt.Sprint(n))
+	cmd := exec.CommandContext(ctx, java, "-cp", cp, "java/RoundTrip.java", b.addr, "java", fmt.Sprint(n))
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
