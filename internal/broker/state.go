@@ -4,8 +4,10 @@
 package broker
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"sort"
 
 	"github.com/amritangshudey/samsa/internal/wire"
@@ -142,4 +144,31 @@ func appendBatch(cmd []byte) []byte {
 		return nil
 	}
 	return r.Rest()
+}
+
+// hash returns a checksum of the whole state machine. Two nodes that have
+// applied the same commands have the same hash; the simulator uses it to
+// check that replay is repeatable and, later, that replicas agree.
+func (s *state) hash() uint32 {
+	table := crc32.MakeTable(crc32.Castagnoli)
+	var sum uint32
+	add := func(vs ...int64) {
+		var b [8]byte
+		for _, v := range vs {
+			binary.BigEndian.PutUint64(b[:], uint64(v))
+			sum = crc32.Update(sum, table, b[:])
+		}
+	}
+	for _, name := range s.names { // sorted: never iterate the map
+		t := s.topics[name]
+		sum = crc32.Update(sum, table, []byte(name))
+		add(int64(len(t.parts)))
+		for _, p := range t.parts {
+			add(p.next, int64(len(p.batches)))
+			for _, b := range p.batches {
+				add(b.base, b.logIndex, b.maxTimestamp)
+			}
+		}
+	}
+	return sum
 }

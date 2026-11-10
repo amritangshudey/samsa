@@ -23,6 +23,7 @@ const corePrefix = "github.com/amritangshudey/samsa/internal/"
 var allowedImports = map[string]bool{
 	"bytes":           true,
 	"cmp":             true,
+	"container/heap":  true,
 	"encoding/binary": true,
 	"errors":          true,
 	"fmt":             true,
