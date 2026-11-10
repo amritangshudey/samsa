@@ -1,0 +1,12 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - errorlint # errors are wrapped with %w and compared with errors.Is/As
+    - revive
+  settings:
+    revive:
+      rules:
+        - name: exported # doc comment on every exported identifier
+        - name: package-comments
