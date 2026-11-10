@@ -26,6 +26,10 @@ type TimerID uint64
 // driver and never reused within a process.
 type ConnID uint64
 
+// NodeID names one node of a cluster. IDs are configured, not negative,
+// and never change.
+type NodeID int32
+
 // Instant is a point in time, in nanoseconds since the Unix epoch.
 //
 // It is deliberately not time.Time, whose methods can read the real clock.
