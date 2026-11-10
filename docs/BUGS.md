@@ -97,6 +97,20 @@ for how much that is worth.
 - Seed 50: the test expected exactly one batch from `Read(offset, 0)`, but
   zero-length payloads legitimately fit in a zero-byte budget.
 
+### M4. The checker blamed the broker for a topic created too late (Phase 4)
+
+- **Seed:** 157 of the first 200, on the commit that introduced the group
+  workload.
+- **Reported as:** "OffsetCommit for t0/0 failed with code 3".
+- **Root cause:** the member checked an `UNKNOWN_TOPIC_OR_PARTITION`
+  answer against what the model knew when the *response arrived*. The
+  topic had been created, and acknowledged to another client, between the
+  broker's answer and its delivery. The broker was right.
+- **Fix:** like every other check, this one now uses what was known when
+  the request was *sent* (`client.commitOffset`).
+- **Lesson:** ADR 0007's causality rule is easy to state and easy to
+  forget in each new check.
+
 ### M3. The checker condemned records that an earlier crash had spared (Phase 3)
 
 - **Seeds:** 1, 3 and 6, under the `interval` and `never` fsync policies.

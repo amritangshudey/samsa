@@ -258,6 +258,21 @@ broker restarts under a stable group and consumers continue with their
 offsets. G1 to G6 hold over the CI seeds, and each fires on a deliberately
 wrong history.
 
+## 9a. What changed during implementation
+
+- **No client id in `GroupGeneration`.** Section 3 listed one per member.
+  Nothing reads it without DescribeGroups, so it is not stored.
+- **Requests that arrive while a generation is being proposed** are not
+  kept in a round's table (review item 1). They are set aside and run
+  again, from the start, when the generation has been applied. Same
+  behaviour, and one place decides what a request means.
+- **The first member of an empty group forms a generation at once**, as
+  section 6 says; a second consumer started with it causes a second
+  generation a moment later. Seen in the integration tests, harmless.
+- **G5 is the existing watchdog** (I7): no request may stay unanswered for
+  10 s on a live connection. The simulated members' rebalance timeouts are
+  at most 3 s, so a held request that outlives its timers is caught.
+
 ## 9. Review record
 
 Second pass, hunting for requests that are never answered and for state
