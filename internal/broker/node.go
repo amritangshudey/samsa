@@ -52,6 +52,12 @@ type Config struct {
 	MaxFetchBytes int
 	// MaxPartitions bounds the partitions of one topic. Default 1024.
 	MaxPartitions int32
+	// MinSessionTimeout and MaxSessionTimeout bound the session timeout a
+	// group member may ask for. Defaults 6s and 30m, as in Kafka.
+	MinSessionTimeout time.Duration
+	MaxSessionTimeout time.Duration
+	// MaxGroupSize bounds the members of one consumer group. Default 1000.
+	MaxGroupSize int
 	// Logger receives structured logs. Default: discard.
 	Logger *slog.Logger
 
@@ -83,6 +89,15 @@ func (c Config) withDefaults() Config {
 	if c.MaxPartitions <= 0 {
 		c.MaxPartitions = 1024
 	}
+	if c.MinSessionTimeout <= 0 {
+		c.MinSessionTimeout = 6 * time.Second
+	}
+	if c.MaxSessionTimeout <= 0 {
+		c.MaxSessionTimeout = 30 * time.Minute
+	}
+	if c.MaxGroupSize <= 0 {
+		c.MaxGroupSize = 1000
+	}
 	if c.Logger == nil {
 		c.Logger = slog.New(slog.DiscardHandler)
 	}
@@ -93,12 +108,13 @@ func (c Config) withDefaults() Config {
 // type, topic name (at most 249 bytes plus length) and partition.
 const commandOverhead = 512
 
-// Timer ids. Delayed fetches take ids from firstFetchTimer upwards.
+// Timer ids. Delayed fetches and the group coordinator take ids from
+// firstFreeTimer upwards.
 const (
 	timerFlush sys.TimerID = 1
 	timerSync  sys.TimerID = 2
 
-	firstFetchTimer sys.TimerID = 16
+	firstFreeTimer sys.TimerID = 16
 )
 
 // conn is the node's view of one client connection.
@@ -111,6 +127,10 @@ type conn struct {
 	busy    bool
 	pumping bool // pump is on the stack; finish must not re-enter it
 	closed  bool
+	// onClose, if set, withdraws the request the group coordinator is
+	// holding for this connection. A connection has one request in
+	// progress at a time, so one slot is enough.
+	onClose func()
 }
 
 // waiter is a proposed command that is not yet applied.
@@ -127,6 +147,7 @@ type Node struct {
 	clock sys.Clock
 	net   sys.Network
 	disk  sys.Disk
+	rand  sys.Random
 	log   *slog.Logger
 
 	cmds    *storage.Log
@@ -138,6 +159,8 @@ type Node struct {
 	conns      map[sys.ConnID]*conn
 	parked     []*parkedFetch // in arrival order
 	nextTimer  sys.TimerID
+	timers     map[sys.TimerID]func() // armed by after; see groups.go
+	groups     map[string]*softGroup
 
 	// fatal is the first error after which the node cannot be trusted: a
 	// failed write or sync, or an undecodable command. Every handler
@@ -145,13 +168,14 @@ type Node struct {
 	fatal error
 }
 
-// New returns a node that will use the given clock, network and disk. It
-// does nothing until the driver calls OnStart.
-func New(cfg Config, clock sys.Clock, net sys.Network, disk sys.Disk) *Node {
+// New returns a node that will use the given clock, network, disk and
+// random source. It does nothing until the driver calls OnStart.
+func New(cfg Config, clock sys.Clock, net sys.Network, disk sys.Disk, rand sys.Random) *Node {
 	cfg = cfg.withDefaults()
 	return &Node{
-		cfg: cfg, clock: clock, net: net, disk: disk, log: cfg.Logger,
-		st: newState(), conns: map[sys.ConnID]*conn{}, nextTimer: firstFetchTimer,
+		cfg: cfg, clock: clock, net: net, disk: disk, rand: rand, log: cfg.Logger,
+		st: newState(), conns: map[sys.ConnID]*conn{}, nextTimer: firstFreeTimer,
+		timers: map[sys.TimerID]func(){}, groups: map[string]*softGroup{},
 	}
 }
 
@@ -183,7 +207,8 @@ func (n *Node) OnStart() error {
 	if n.cfg.Sync == SyncInterval {
 		n.clock.SetTimer(timerSync, n.cfg.SyncInterval)
 	}
-	n.log.Info("started", "commands", n.applied, "topics", len(n.st.names))
+	n.startGroups()
+	n.log.Info("started", "commands", n.applied, "topics", len(n.st.names), "groups", len(n.st.groups))
 	return nil
 }
 
@@ -213,6 +238,10 @@ func (n *Node) OnConnClose(id sys.ConnID) error {
 	if c := n.conns[id]; c != nil {
 		c.closed = true // proposals in flight still complete, but send nothing
 		delete(n.conns, id)
+		if c.onClose != nil {
+			c.onClose()
+			c.onClose = nil
+		}
 		kept := n.parked[:0]
 		for _, f := range n.parked {
 			if f.c == c {
@@ -237,6 +266,11 @@ func (n *Node) OnTimer(id sys.TimerID) error {
 		n.sync()
 		n.clock.SetTimer(timerSync, n.cfg.SyncInterval)
 	default:
+		if fn := n.timers[id]; fn != nil {
+			delete(n.timers, id)
+			fn()
+			break
+		}
 		for _, f := range n.parked {
 			if f.timer == id {
 				n.completeFetch(f)
@@ -360,6 +394,7 @@ func (n *Node) pump(c *conn) {
 // finish marks c's current request as done and resumes its buffered frames.
 func (n *Node) finish(c *conn) {
 	c.busy = false
+	c.onClose = nil
 	if !c.pumping {
 		n.pump(c)
 	}
@@ -436,6 +471,27 @@ func (n *Node) dispatch(c *conn, frame []byte) {
 	case wire.KeyListOffsets:
 		m := &wire.ListOffsetsRequest{}
 		req, handle = m, func() { n.respond(c, h, n.listOffsets(m)) }
+	case wire.KeyFindCoord:
+		m := &wire.FindCoordinatorRequest{}
+		req, handle = m, func() { n.respond(c, h, n.findCoordinator(m)) }
+	case wire.KeyJoinGroup:
+		m := &wire.JoinGroupRequest{}
+		req, handle = m, func() { n.joinGroup(c, h, m) }
+	case wire.KeySyncGroup:
+		m := &wire.SyncGroupRequest{}
+		req, handle = m, func() { n.syncGroup(c, h, m) }
+	case wire.KeyHeartbeat:
+		m := &wire.HeartbeatRequest{}
+		req, handle = m, func() { n.respond(c, h, n.heartbeat(m)) }
+	case wire.KeyLeaveGroup:
+		m := &wire.LeaveGroupRequest{}
+		req, handle = m, func() { n.leaveGroup(c, h, m) }
+	case wire.KeyOffsetCommit:
+		m := &wire.OffsetCommitRequest{}
+		req, handle = m, func() { n.offsetCommit(c, h, m) }
+	case wire.KeyOffsetFetch:
+		m := &wire.OffsetFetchRequest{}
+		req, handle = m, func() { n.respond(c, h, n.offsetFetch(m)) }
 	default: // unreachable while wire.APIs and this switch agree
 		n.drop(c, fmt.Sprintf("no handler for key %d", h.Key))
 		return

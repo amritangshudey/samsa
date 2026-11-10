@@ -73,7 +73,7 @@ func run() error {
 	node := broker.New(broker.Config{
 		NodeID: int32(*nodeID), Host: host, Port: int32(port),
 		Sync: policy, SyncInterval: *syncInterval, Logger: logger,
-	}, loop, loop, disk)
+	}, loop, loop, disk, realsys.Random{})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

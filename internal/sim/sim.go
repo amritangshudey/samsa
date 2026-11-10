@@ -196,7 +196,7 @@ func (w *world) finalChecks() {
 			w.disk.Restart()
 		}
 		inc := &incarnation{w: w, timers: map[sys.TimerID]uint64{}}
-		inc.n = broker.New(w.bcfg, inc, inc, w.disk)
+		inc.n = broker.New(w.bcfg, inc, inc, w.disk, w.rng.Fork())
 		if err := inc.n.OnStart(); err != nil {
 			w.fail("I6: restart on a quiet disk failed: %v", err)
 			return

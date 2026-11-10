@@ -299,7 +299,7 @@ func (w *world) start() {
 		w.disk.CrashAfter(1 + w.rng.Intn(40)) // lands inside recovery, or soon after
 	}
 	inc := &incarnation{w: w, timers: map[sys.TimerID]uint64{}}
-	inc.n = broker.New(w.bcfg, inc, inc, w.disk)
+	inc.n = broker.New(w.bcfg, inc, inc, w.disk, w.rng.Fork())
 	w.note("node-start", 0, nil)
 	if err := inc.n.OnStart(); err != nil {
 		if !w.disk.Crashed() {

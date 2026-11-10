@@ -51,11 +51,12 @@ type harness struct {
 	clock *fakeClock
 	net   *fakeNet
 	node  *Node
+	rand  *simsys.Rand // survives restarts, like real randomness
 	corr  int32
 }
 
 func newHarness(t *testing.T, cfg Config) *harness {
-	h := &harness{t: t, cfg: cfg, disk: simsys.NewDisk(simsys.NewRand(1), simsys.DiskConfig{})}
+	h := &harness{t: t, cfg: cfg, disk: simsys.NewDisk(simsys.NewRand(1), simsys.DiskConfig{}), rand: simsys.NewRand(2)}
 	h.start()
 	return h
 }
@@ -66,7 +67,7 @@ func (h *harness) start() {
 	h.clock = &fakeClock{now: h.clockNow(), timers: map[sys.TimerID]fakeTimer{}}
 	h.net = &fakeNet{sent: map[sys.ConnID][]byte{}}
 	h.cfg.NodeID, h.cfg.Host, h.cfg.Port = 1, "localhost", 9092
-	h.node = New(h.cfg, h.clock, h.net, h.disk)
+	h.node = New(h.cfg, h.clock, h.net, h.disk, h.rand)
 	if err := h.node.OnStart(); err != nil {
 		h.t.Fatalf("OnStart: %v", err)
 	}
@@ -733,7 +734,7 @@ func TestUnknownCommandInLogStopsStart(t *testing.T) {
 	if err := h.node.OnTimer(timerFlush); !errors.Is(err, errBadCommand) {
 		t.Fatalf("got %v, want errBadCommand", err)
 	}
-	n := New(h.cfg, h.clock, h.net, h.disk)
+	n := New(h.cfg, h.clock, h.net, h.disk, h.rand)
 	if err := n.OnStart(); !errors.Is(err, errBadCommand) {
 		t.Fatalf("restart over an unknown command: got %v, want errBadCommand", err)
 	}
