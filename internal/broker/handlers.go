@@ -139,9 +139,14 @@ func (n *Node) produce(c *conn, h wire.RequestHeader, req *wire.ProduceRequest) 
 			}
 			for rest := p.Records; res.ErrorCode == wire.ErrNone && len(rest) > 0; {
 				info, code := wire.ParseBatch(rest, n.cfg.MaxBatchBytes)
-				res.ErrorCode = code
+				if code != wire.ErrNone {
+					// info describes nothing on error; in particular its
+					// size must not be used to step forward.
+					res.ErrorCode = code
+					break
+				}
 				sizes = append(sizes, info.Size)
-				rest = rest[min(info.Size, len(rest)):]
+				rest = rest[info.Size:]
 			}
 			if res.ErrorCode != wire.ErrNone {
 				continue
