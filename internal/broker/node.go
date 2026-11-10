@@ -224,11 +224,11 @@ func (n *Node) OnConnClose(id sys.ConnID) error {
 
 // OnTimer implements sys.Handler.
 func (n *Node) OnTimer(id sys.TimerID) error {
-	switch {
-	case id == timerFlush:
+	switch id {
+	case timerFlush:
 		n.flushArmed = false
 		n.sync()
-	case id == timerSync:
+	case timerSync:
 		n.sync()
 		n.clock.SetTimer(timerSync, n.cfg.SyncInterval)
 	default:
