@@ -126,8 +126,9 @@ offset, and is durable before it returns: truncate the file (or remove
 whole later segments, newest first), sync, sync the directory if segments
 were removed. Raft refuses to call it below the commit index. After a
 crash at any point inside it, recovery must yield a prefix of the old log
-that is at least as long as `offset`; crash tests in the Phase 1 style
-check exactly that.
+that keeps everything that was durable below `offset`; and once it has
+returned, nothing removed may reappear, even behind later appends. Crash
+tests in the Phase 1 style check exactly that.
 
 **Hard state.** `currentTerm` and `votedFor` in one file of fixed size
 with a checksum, replaced atomically: write `hardstate.tmp`, sync it,

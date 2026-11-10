@@ -44,7 +44,7 @@ type Config struct {
 	// skipRollDirSync and skipRecoverySync remove one step each from the
 	// crash-safety protocol. Tests set them to prove that the crash tests
 	// notice.
-	skipRollDirSync, skipRecoverySync bool
+	skipRollDirSync, skipRecoverySync, skipTruncateSync bool
 }
 
 func (c Config) withDefaults() (Config, error) {
@@ -463,6 +463,84 @@ func (l *Log) Read(offset int64, maxBytes int) ([]Batch, error) {
 		return nil, fmt.Errorf("%w: no frame holds offset %d in segment %d", ErrCorrupt, offset, s.base)
 	}
 	return out, nil
+}
+
+// TruncateSuffix removes every record at or after offset, which must be
+// the first offset of a record or EndOffset. The removal is durable when
+// it returns: nothing removed can come back after a crash, even behind
+// records appended later. A crash during the call leaves a prefix of the
+// log that keeps at least what was durable below offset.
+func (l *Log) TruncateSuffix(offset int64) error {
+	switch {
+	case l.err != nil:
+		return l.err
+	case offset < l.StartOffset() || offset > l.end:
+		return fmt.Errorf("%w: truncate at %d not in [%d, %d]", ErrOffsetOutOfRange, offset, l.StartOffset(), l.end)
+	case offset == l.end:
+		return nil
+	}
+	// From here on nothing at or after offset is promised, whether or not
+	// the call completes.
+	l.durable = min(l.durable, offset)
+	// Whole segments after the one that holds offset go first, newest
+	// first, each removal made durable before the next: a crash must never
+	// leave a later segment behind a missing one.
+	keep := sort.Search(len(l.segs), func(i int) bool { return l.segs[i].base > offset })
+	for len(l.segs) > keep {
+		s := l.active()
+		if s.file != nil {
+			_ = s.file.Close() // the file is about to be removed
+		}
+		if err := l.disk.Remove(segName(l.dir, s.base, ".log")); err != nil {
+			return l.fail(fmt.Errorf("remove segment %d: %w", s.base, err))
+		}
+		// A sealed segment has an index file; nothing reads it without
+		// its segment, but it should not be left to confuse a reader.
+		if err := l.disk.Remove(segName(l.dir, s.base, ".index")); err != nil && !errors.Is(err, sys.ErrNotExist) {
+			return l.fail(fmt.Errorf("remove index %d: %w", s.base, err))
+		}
+		if err := l.disk.SyncDir(l.dir); err != nil {
+			return l.fail(fmt.Errorf("sync log directory %s: %w", l.dir, err))
+		}
+		l.segs = l.segs[:len(l.segs)-1]
+		l.end = s.base
+	}
+	s := l.active()
+	if s.file == nil { // it was sealed; it is the active segment again
+		f, err := l.disk.Open(segName(l.dir, s.base, ".log"), sys.ReadWrite)
+		if err != nil {
+			return l.fail(fmt.Errorf("reopen segment %d: %w", s.base, err))
+		}
+		s.file = f
+	}
+	// Find the byte position of the frame that starts at offset.
+	pos, at := int64(0), s.base
+	for at < offset {
+		h, err := readHeader(s.file, pos, s.size, l.cfg.MaxPayloadBytes)
+		if err != nil {
+			return l.fail(corrupt(err))
+		}
+		pos += headerSize + h.length
+		at += int64(h.count)
+	}
+	if at != offset {
+		return fmt.Errorf("storage: truncate at %d, which is inside the record ending at %d", offset, at)
+	}
+	if err := s.file.Truncate(pos); err != nil {
+		return l.fail(fmt.Errorf("truncate segment %d: %w", s.base, err))
+	}
+	// As in recovery: the cut must be durable before anything is appended
+	// after it, or a crash could bring the old bytes back behind new ones.
+	if !l.cfg.skipTruncateSync {
+		if err := s.file.Sync(); err != nil {
+			return l.fail(fmt.Errorf("sync segment %d after truncation: %w", s.base, err))
+		}
+	}
+	for len(s.index) > 0 && int64(s.index[len(s.index)-1].pos) >= pos {
+		s.index = s.index[:len(s.index)-1]
+	}
+	s.size, l.end, l.durable, l.unsynced = pos, offset, offset, 0
+	return nil
 }
 
 // corrupt turns a bad frame met outside recovery into ErrCorrupt.
