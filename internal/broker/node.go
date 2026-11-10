@@ -376,7 +376,9 @@ func (n *Node) drop(c *conn, reason string) {
 
 // respond sends the response to the request with header h and finishes it.
 func (n *Node) respond(c *conn, h wire.RequestHeader, body wire.Message) {
-	if !c.closed {
+	// A node that has hit a fatal error says nothing more: whatever it
+	// would send was computed from state it can no longer vouch for.
+	if !c.closed && n.fatal == nil {
 		w := wire.Writer{B: make([]byte, 4, 256)}
 		wire.EncodeResponseHeader(&w, h.Key, h.Version, h.CorrelationID)
 		body.Encode(&w, h.Version)
