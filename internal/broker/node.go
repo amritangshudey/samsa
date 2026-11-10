@@ -54,6 +54,11 @@ type Config struct {
 	MaxPartitions int32
 	// Logger receives structured logs. Default: discard.
 	Logger *slog.Logger
+
+	// UnsafeAckBeforeSync breaks the commit rule on purpose: under
+	// SyncAlways, commands count as committed when appended, not when
+	// synced. It exists so that the simulator can prove it notices.
+	UnsafeAckBeforeSync bool
 }
 
 func (c Config) withDefaults() Config {
@@ -267,7 +272,7 @@ func (n *Node) settle() error {
 // committed returns the index below which commands are committed under the
 // configured policy.
 func (n *Node) committed() int64 {
-	if n.cfg.Sync == SyncAlways {
+	if n.cfg.Sync == SyncAlways && !n.cfg.UnsafeAckBeforeSync {
 		return n.cmds.DurableOffset()
 	}
 	return n.cmds.EndOffset()
@@ -448,3 +453,7 @@ func advertised() []wire.APIRange {
 	}
 	return out
 }
+
+// StateHash returns a checksum of everything the node has applied, together
+// with the index up to which it has applied.
+func (n *Node) StateHash() (applied int64, hash uint32) { return n.applied, n.st.hash() }
