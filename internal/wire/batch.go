@@ -192,3 +192,14 @@ func DecodeBatch(b []byte) (base int64, records []Record, err error) {
 	}
 	return base, records, r.Err()
 }
+
+// PeekBatch returns the record count and max timestamp of a batch from its
+// header alone, checking only that the header is present and the count
+// positive. It is for batches that were validated before being stored.
+func PeekBatch(b []byte) (count int32, maxTimestamp int64, ok bool) {
+	if len(b) < BatchOverhead {
+		return 0, 0, false
+	}
+	count = int32(binary.BigEndian.Uint32(b[batchCountAt:]))
+	return count, int64(binary.BigEndian.Uint64(b[batchMaxTimeAt:])), count > 0
+}
