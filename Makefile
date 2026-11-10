@@ -5,7 +5,9 @@ SLF4J_VERSION ?= 2.0.17
 MAVEN := https://repo1.maven.org/maven2
 JARS := integration/.cache/kafka-clients-$(KAFKA_CLIENTS_VERSION).jar integration/.cache/slf4j-api-$(SLF4J_VERSION).jar
 
-.PHONY: build test race lint fuzz integration
+SEEDS ?= 1000
+
+.PHONY: build test race lint fuzz integration sim
 
 build:
 	CGO_ENABLED=0 go build -trimpath -o bin/samsa ./cmd/samsa
@@ -27,6 +29,15 @@ fuzz:
 			go test -run '^$$' -fuzz "^$$f\$$" -fuzztime $(FUZZTIME) $$pkg || exit 1; \
 		done; \
 	done
+
+# The simulator. `make sim SEEDS=5000` runs that many seeds and prints the
+# failing ones; `make sim SEED=1234` replays one seed with its event trace.
+sim:
+ifdef SEED
+	go test ./internal/sim -count=1 -v -run '^TestSim$$' -seed=$(SEED)
+else
+	go test ./internal/sim -count=1 -v -timeout 2h -run '^TestSim$$' -seeds=$(SEEDS)
+endif
 
 # Real clients (franz-go, kcat, the Java client) against the built binary.
 # Needs kcat and a JDK; set SAMSA_REQUIRE_CLIENTS=1 to fail when one is missing.
