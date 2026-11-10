@@ -107,8 +107,12 @@ again if the developer withdraws this instruction.
 | `make lint` | `golangci-lint` |
 | `make fuzz` | Run every fuzz target for `FUZZTIME` (default 10s) each |
 
-Not yet present: `make sim SEEDS=n` / `make sim SEED=x` (Phase 3) and
-`make integration` (Phase 2).
+| `make integration` | Real clients (franz-go, kcat, Java) against the binary; needs kcat and a JDK |
+
+Not yet present: `make sim SEEDS=n` / `make sim SEED=x` (Phase 3).
+
+Run the broker: `./bin/samsa -listen localhost:9092 -data ./data`
+(`-sync always|interval|never`, `-log-level debug` to see each request).
 
 ## Local tools
 
@@ -119,4 +123,7 @@ The JDK is keg-only and not on PATH: use `/opt/homebrew/opt/openjdk/bin/java`.
 
 See ADR 0003. `cmd/samsa` wires the real implementations; `internal/sys`
 holds the interfaces; `internal/realsys` is the only impure package under
-`internal/`; everything else there is core.
+`internal/`; everything else there is core: `storage` (the log), `wire`
+(Kafka encoding), `broker` (the node), `simsys` (simulated disk).
+`integration/` is a separate Go module so that client libraries never enter
+the broker's `go.mod`.
