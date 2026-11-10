@@ -3,6 +3,11 @@
 Phases 0–3 are the MVP. Each phase starts with `docs/design/phase-N.md`
 (approved before coding) and ends with a report and a stop for approval.
 
+Phase 4 onwards, and the work beyond Phase 7, are specified in detail in
+`docs/ROADMAP.md`, which wins where it differs from this file. The
+architecture all phases share (one command log, partitions as views) is
+ADR 0005.
+
 Anything stated here about Kafka's wire protocol is a planning assumption.
 Per architecture rule 5 it is verified against the official documentation in
 the phase that implements it.
@@ -23,9 +28,9 @@ push back early.
 | Question | Settled in | Recommendation |
 |---|---|---|
 | How does the core talk to the outside: synchronous calls on injected interfaces, or a pure `step(event) -> effects` function? | Phase 0 | Synchronous injected interfaces, as rule 1 states. Simpler to read and debug; the simulator injects faults at each call. |
-| On-disk record format: store Kafka record batches as received, or wrap opaque payloads in our own frame? | Phase 1 | Our own frame (base offset, record count, length, CRC) around an opaque payload. Storage is then testable before any Kafka code exists, and Phase 2 stores the client's batch bytes as the payload. |
+| On-disk record format: store Kafka record batches as received, or wrap opaque payloads in our own frame? | Phase 1 | Decided: our own frame around an opaque payload. Since ADR 0005 the payload is a command, one of whose kinds carries a record batch. |
 | What do simulated clients send: Kafka wire bytes or direct calls into the core? | Phase 3 | Wire bytes over the simulated network, so the decoders and request handling are inside the simulated system. |
-| Raft topology: one Raft group for the cluster, or one per partition? | Phase 5 | One group. Every node replicates every partition and the Raft leader leads all of them. Per-partition groups add a lot of machinery for a three-node cluster. |
+| Raft topology: one Raft group for the cluster, or one per partition? | Phase 5 | Decided early (ADR 0005): one group, replicating one command log. |
 | Kafka replicates with ISR, not Raft. What do `acks` and the high watermark mean here? | Phase 5 | A produce is acknowledged only after Raft commit, whatever `acks` says (stronger than requested is permitted). Fetch never returns beyond the commit index. |
 | Consumer-group state is built in Phase 4 on a single node, then must be replicated in Phase 5. | Phase 4 | Write the coordinator as a state machine driven by a log of commands from the start, so Phase 5 swaps the local log for the Raft log. |
 
