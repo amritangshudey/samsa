@@ -564,7 +564,9 @@ func (m *FetchResponse) Decode(r *Reader, v int16) {
 			if v >= 11 {
 				r.Int32() // PreferredReadReplica
 			}
-			p.Records = r.Bytes(false)
+			if p.Records = r.Bytes(false); len(p.Records) == 0 {
+				p.Records = nil
+			}
 			return p
 		})}
 	})
@@ -593,7 +595,12 @@ func (m *FetchResponse) Encode(w *Writer, v int16) {
 			if v >= 11 {
 				w.Int32(-1)
 			}
-			w.Bytes(false, p.Records)
+			// "No records" is sent as an empty set, never as null. The
+			// definition allows null, and the Java client and franz-go
+			// accept it, but librdkafka rejects it ("invalid
+			// MessageSetSize -1"). Found by the kcat integration test.
+			w.Int32(int32(len(p.Records)))
+			w.B = append(w.B, p.Records...)
 		}
 	}
 }

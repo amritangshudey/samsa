@@ -10,6 +10,25 @@ None yet. Phase 1's storage engine passed the crash property test once the
 model bug below was fixed. That is weaker evidence than it sounds: see
 "what is untested or weak" in `docs/reports/phase-1.md`.
 
+## Bugs found by real clients
+
+### C1. Null record set in a fetch response broke librdkafka (Phase 2)
+
+- **Found by:** the kcat integration test, which hung: kcat never reached
+  end of partition.
+- **Symptom:** librdkafka logged `Protocol parse failure for Fetch v11 ...
+  invalid MessageSetSize -1` on every fetch that had nothing to return, and
+  retried every 500 ms forever.
+- **Root cause:** `FetchResponse.Records` is declared nullable in Kafka's
+  message definition, so an empty result was encoded as null (length -1).
+  The Java client and franz-go accept that. librdkafka does not. Kafka's own
+  broker sends an empty set (length 0).
+- **Fix:** the encoder always writes a length of at least 0 for records.
+- **Lesson:** the schema says what is legal, not what every client
+  tolerates. This is why the acceptance test uses three independent client
+  implementations, and why the plan says to match the reference broker's
+  observable behaviour, not only its specification.
+
 ## Bugs found by fuzzing
 
 ### F1. Negative batch length crashed the produce handler (Phase 2)
