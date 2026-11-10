@@ -6,25 +6,44 @@ const (
 	KeyFetch        int16 = 1
 	KeyListOffsets  int16 = 2
 	KeyMetadata     int16 = 3
+	KeyOffsetCommit int16 = 8
+	KeyOffsetFetch  int16 = 9
+	KeyFindCoord    int16 = 10
+	KeyJoinGroup    int16 = 11
+	KeyHeartbeat    int16 = 12
+	KeyLeaveGroup   int16 = 13
+	KeySyncGroup    int16 = 14
 	KeyAPIVersions  int16 = 18
 	KeyCreateTopics int16 = 19
 )
 
 // Kafka error codes used by the broker, from Errors.java.
 const (
+	ErrUnknownServerError          int16 = -1
 	ErrNone                        int16 = 0
 	ErrOffsetOutOfRange            int16 = 1
 	ErrCorruptMessage              int16 = 2
 	ErrUnknownTopicOrPartition     int16 = 3
 	ErrMessageTooLarge             int16 = 10
+	ErrOffsetMetadataTooLarge      int16 = 12
+	ErrCoordinatorNotAvailable     int16 = 15
+	ErrNotCoordinator              int16 = 16
 	ErrInvalidTopic                int16 = 17
 	ErrInvalidRequiredAcks         int16 = 21
+	ErrIllegalGeneration           int16 = 22
+	ErrInconsistentGroupProtocol   int16 = 23
+	ErrInvalidGroupID              int16 = 24
+	ErrUnknownMemberID             int16 = 25
+	ErrInvalidSessionTimeout       int16 = 26
+	ErrRebalanceInProgress         int16 = 27
 	ErrUnsupportedVersion          int16 = 35
 	ErrTopicAlreadyExists          int16 = 36
 	ErrInvalidPartitions           int16 = 37
 	ErrInvalidReplicationFactor    int16 = 38
 	ErrInvalidRequest              int16 = 42
 	ErrUnsupportedForMessageFormat int16 = 43
+	ErrMemberIDRequired            int16 = 79
+	ErrGroupMaxSizeReached         int16 = 81
 	ErrInvalidRecord               int16 = 87
 )
 
@@ -49,6 +68,13 @@ var APIs = []API{
 	{Key: KeyFetch, Min: 4, Max: 11, AdvertisedMin: 4, FlexFrom: 12},
 	{Key: KeyListOffsets, Min: 1, Max: 5, AdvertisedMin: 1, FlexFrom: 6},
 	{Key: KeyMetadata, Min: 1, Max: 8, AdvertisedMin: 1, FlexFrom: 9},
+	{Key: KeyOffsetCommit, Min: 2, Max: 7, AdvertisedMin: 2, FlexFrom: 8},
+	{Key: KeyOffsetFetch, Min: 1, Max: 5, AdvertisedMin: 1, FlexFrom: 6},
+	{Key: KeyFindCoord, Min: 0, Max: 2, AdvertisedMin: 0, FlexFrom: 3},
+	{Key: KeyJoinGroup, Min: 0, Max: 5, AdvertisedMin: 0, FlexFrom: 6},
+	{Key: KeyHeartbeat, Min: 0, Max: 3, AdvertisedMin: 0, FlexFrom: 4},
+	{Key: KeyLeaveGroup, Min: 0, Max: 3, AdvertisedMin: 0, FlexFrom: 4},
+	{Key: KeySyncGroup, Min: 0, Max: 3, AdvertisedMin: 0, FlexFrom: 4},
 	{Key: KeyAPIVersions, Min: 0, Max: 4, AdvertisedMin: 0, FlexFrom: 3},
 	{Key: KeyCreateTopics, Min: 2, Max: 4, AdvertisedMin: 2, FlexFrom: 5},
 }

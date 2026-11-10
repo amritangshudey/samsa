@@ -21,6 +21,10 @@ func FuzzDecodeMessage(f *testing.F) {
 		"ApiVersionsRequest", "ApiVersionsResponse", "MetadataRequest", "MetadataResponse",
 		"CreateTopicsRequest", "CreateTopicsResponse", "ProduceRequest", "ProduceResponse",
 		"FetchRequest", "FetchResponse", "ListOffsetsRequest", "ListOffsetsResponse",
+		"OffsetCommitRequest", "OffsetCommitResponse", "OffsetFetchRequest", "OffsetFetchResponse",
+		"FindCoordinatorRequest", "FindCoordinatorResponse", "JoinGroupRequest", "JoinGroupResponse",
+		"HeartbeatRequest", "HeartbeatResponse", "LeaveGroupRequest", "LeaveGroupResponse",
+		"SyncGroupRequest", "SyncGroupResponse",
 	}
 	all := messages()
 	for i, name := range names {
