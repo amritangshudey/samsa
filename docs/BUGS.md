@@ -6,9 +6,31 @@ the end, because a model that is wrong in either direction matters too.
 
 ## Bugs in the system
 
-None yet. Phase 1's storage engine passed the crash property test once the
-model bug below was fixed. That is weaker evidence than it sounds: see
-"what is untested or weak" in `docs/reports/phase-1.md`.
+Found by the simulator (`make sim SEED=<seed>` replays each on the commit
+before its fix).
+
+### S1. A dying node sent a fetch response it could not vouch for (Phase 3)
+
+- **Seeds:** 4, 7 and 8 of the first 8, with the fix removed
+  (`make sim SEEDS=8`).
+- **Invariant:** I2, "fetch at 35 returned nothing although the high
+  watermark is 52".
+- **Root cause:** the disk lost power while a fetch was reading its batches
+  from the command log. The read failed, the node recorded its fatal error,
+  and then still sent the response it had half built: a correct high
+  watermark with no records. The node stopped one instruction later, but
+  the bytes were already on the wire.
+- **Impact:** small on its own (a consumer sees an empty response and
+  retries), but the rule it broke is not: after a fatal error nothing the
+  node computes can be trusted, so nothing may be sent.
+- **Fix:** `Node.respond` sends nothing once the fatal error is set.
+- **Lesson:** "stop on fatal error" has to cover output already in
+  progress, not only the next request. No unit test had a disk failing in
+  the middle of a read.
+
+Phase 1's storage engine and the rest of Phase 2's broker passed 5000 seeds
+with no other finding. See "what is untested or weak" in the phase reports
+for how much that is worth.
 
 ## Bugs found by real clients
 
@@ -74,3 +96,19 @@ model bug below was fixed. That is weaker evidence than it sounds: see
   restarts on a crash like any other step.
 - Seed 50: the test expected exactly one batch from `Read(offset, 0)`, but
   zero-length payloads legitimately fit in a zero-byte budget.
+
+### M3. The checker condemned records that an earlier crash had spared (Phase 3)
+
+- **Seeds:** 1, 3 and 6, under the `interval` and `never` fsync policies.
+- **Reported as:** I3, "record 1706 reappeared after a power loss had
+  removed it".
+- **Root cause:** under those policies a power loss may cut a suffix of a
+  partition. When a read contradicted what the model remembered at an
+  offset, the model concluded the log had been cut there and marked
+  everything it remembered beyond that offset as lost. With two power
+  losses that is wrong: records confirmed *after* the first loss sit beyond
+  the cut and are alive.
+- **Fix:** only what was confirmed no later than the contradicted entry is
+  marked lost (`Model.place`). A unit test holds the two-crash history.
+- **Lesson:** the same as M1. 81 of the first 200 seeds failed, and 79 of
+  those were the checker.
