@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -18,6 +19,22 @@ import (
 	"github.com/amritangshudey/samsa/internal/realsys"
 	"github.com/amritangshudey/samsa/internal/sys"
 )
+
+// version is set by release builds: -ldflags "-X main.version=v0.1.0".
+var version string
+
+// versionString is version, or else what Go stamped into the build: the
+// commit, and "+dirty" if the tree had uncommitted changes.
+func versionString() string {
+	if version != "" {
+		return version
+	}
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "unknown"
+	}
+	return info.Main.Version
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -35,7 +52,12 @@ func run() error {
 	nodeID := flag.Int("node-id", 1, "this node's id")
 	peersText := flag.String("peers", "", "every node of the cluster, this one included, as id=clientHost:port/peerHost:port,... (default: a cluster of this node alone)")
 	logLevel := flag.String("log-level", "info", "debug, info, warn or error")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println("samsa", versionString())
+		return nil
+	}
 
 	var level slog.Level
 	if err := level.UnmarshalText([]byte(*logLevel)); err != nil {
