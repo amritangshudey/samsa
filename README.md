@@ -33,11 +33,16 @@ A three-node cluster on one machine (each node: id, client address, peer
 address):
 
 ```sh
-P=1=localhost:9092/localhost:9192,2=localhost:9093/localhost:9193,3=localhost:9094/localhost:9194
-./bin/samsa -node-id 1 -listen localhost:9092 -data d1 -peers $P &
-./bin/samsa -node-id 2 -listen localhost:9093 -data d2 -peers $P &
-./bin/samsa -node-id 3 -listen localhost:9094 -data d3 -peers $P &
+P=1=127.0.0.1:9092/127.0.0.1:9192,2=127.0.0.1:9093/127.0.0.1:9193,3=127.0.0.1:9094/127.0.0.1:9194
+./bin/samsa -node-id 1 -listen 127.0.0.1:9092 -data d1 -peers $P &
+./bin/samsa -node-id 2 -listen 127.0.0.1:9093 -data d2 -peers $P &
+./bin/samsa -node-id 3 -listen 127.0.0.1:9094 -data d3 -peers $P &
+(cd integration && go run ./cmd/topic -b 127.0.0.1:9092 -partitions 3 replicated)
+printf 'one\ntwo\n' | kcat -b 127.0.0.1:9093 -X enable.idempotence=false -P -t replicated -p 1
+kcat -b 127.0.0.1:9094 -C -t replicated -p 1 -o beginning -e
 ```
+
+Any node can be named: clients are told which one leads.
 
 ## What is supported
 

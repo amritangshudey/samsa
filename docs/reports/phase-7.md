@@ -33,7 +33,7 @@ Branch `phase-7`, 2026-11-11. Stacked on `phase-6` (PR #7), `phase-5`
 | 1 node, `always`, 1 KiB | 393 k records/s (403 MB/s); p50 8.9 ms, p99 21 ms, p99.9 26 ms at half that rate |
 | 3 nodes, `always`, 1 KiB | 98 k records/s (100 MB/s); p50 22 ms, p99 54 ms, p99.9 66 ms |
 | Spread | wide in places (3 nodes, 10 KiB: 8 000–28 000 records/s); some p99s above 100 ms are not explained |
-| Fresh clone | ACCEPTANCE |
+| Fresh clone from GitHub | `make build test` pass; both README snippets run verbatim (one node, three nodes) and read back what they wrote |
 
 Full table: `docs/benchmarks.md`.
 
