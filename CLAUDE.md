@@ -26,8 +26,14 @@ in order to a deterministic state machine (ADR 0005).
 
 ## Non-goals (do not build unless asked)
 
-Transactions, idempotent producer, log compaction, ACLs/SASL/TLS, tiered
-storage, Kafka Streams/Connect guarantees, cluster membership changes.
+Tiered storage, Kafka Streams/Connect guarantees.
+
+**Asked for (2026-11-11):** the developer asked to make the project
+production ready with "all the features": transactions, the idempotent
+producer, log compaction, ACLs/SASL/TLS and cluster membership changes are
+now in scope. Order and status: `docs/PRODUCTION.md`. The rule against
+claiming what no test shows still holds: "production ready" and "best"
+are goals, never claims.
 
 ## Architecture rules (non-negotiable)
 
