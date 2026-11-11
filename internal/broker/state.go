@@ -92,10 +92,15 @@ func (p *partition) admit(b wire.BatchInfo) (dup int64, code int16) {
 	ps := p.producers[b.ProducerID]
 	switch {
 	case ps == nil:
-		// A partition never written cannot have forgotten a producer, so a
-		// producer must start at 0 there. Anywhere else its state may have
-		// expired, and it continues where it was.
-		if p.next == 0 && b.BaseSequence != 0 {
+		// Kafka requires 0 only on a partition never written, since
+		// elsewhere the state may have expired. Here nothing expires, so
+		// no state means the producer never wrote here. Accepting any
+		// sequence let a batch in ahead of the one before it, which a
+		// node had refused as not leader just before it became leader:
+		// the earlier batch's retry was then out of order (BUGS.md S6).
+		// shortcut: part (b), which expires state, must keep this rule
+		// for producers it has not expired.
+		if b.BaseSequence != 0 {
 			return -1, wire.ErrOutOfOrderSequenceNumber
 		}
 		return -1, wire.ErrNone

@@ -56,9 +56,7 @@ func TestSequenceRules(t *testing.T) {
 		{"a newer epoch starts at 0", nil, []step{{0, 0, v("a"), 0}, {1, 1, v("x"), ooo}, {1, 0, v("b"), 1}, {1, 1, v("c"), 2}}, v("a", "b", "c")},
 		{"a newer epoch forgets the old one's batches", nil, []step{{0, 0, v("a"), 0}, {1, 0, v("b"), 1}, {0, 0, v("a"), oldEpoch}}, v("a", "b")},
 		{"an unknown producer on a partition never written must start at 0", nil, []step{{0, 3, v("x"), ooo}, {0, 0, v("a"), 0}}, v("a")},
-		{"an unknown producer on a written partition may continue anywhere", v("p"), []step{{4, 30, v("a"), 1}, {4, 31, v("b"), 2}, {4, 30, v("a"), 1}}, v("p", "a", "b")},
-		{"0 follows the last sequence number", v("p"), []step{{0, topSeq, v("a"), 1}, {0, 0, v("b"), 2}, {0, topSeq, v("a"), 1}, {0, 1, v("c"), 3}}, v("p", "a", "b", "c")},
-		{"a batch may span the wrap", v("p"), []step{{0, topSeq - 1, v("a", "b", "c"), 1}, {0, topSeq - 1, v("a", "b", "c"), 1}, {0, 1, v("d"), 4}}, v("p", "a", "b", "c", "d")},
+		{"an unknown producer on a written partition must start at 0 too", v("p"), []step{{4, 30, v("x"), ooo}, {4, 0, v("a"), 1}, {4, 1, v("b"), 2}}, v("p", "a", "b")},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -247,5 +245,43 @@ func TestNodeIDTooLargeForProducerIDs(t *testing.T) {
 		&fakeNet{sent: map[sys.ConnID][]byte{}}, simsys.NewDisk(simsys.NewRand(1), simsys.DiskConfig{}), simsys.NewRand(2))
 	if err := n.OnStart(); err == nil {
 		t.Fatal("a node id of 65536 was accepted")
+	}
+}
+
+// The wrap from 2^31-1 to 0, on a partition whose producer is already near
+// it: a producer cannot get there through the broker in a test's time.
+func TestSequenceWrap(t *testing.T) {
+	info := func(seq, count int32) wire.BatchInfo {
+		return wire.BatchInfo{Count: count, ProducerID: 7, BaseSequence: seq}
+	}
+	for _, tt := range []struct {
+		name  string
+		start sentBatch // the producer's last batch so far, ending at offset 9
+		steps []wire.BatchInfo
+		want  []int64 // base offset, the duplicate's offset, or the code negated
+	}{
+		{"0 follows the last sequence number", sentBatch{topSeq - 1, topSeq, 8},
+			[]wire.BatchInfo{info(0, 1), info(topSeq-1, 2), info(1, 1), info(5, 1)}, []int64{10, 8, 11, -int64(wire.ErrOutOfOrderSequenceNumber)}},
+		{"a batch may span the wrap", sentBatch{topSeq - 2, topSeq - 2, 9},
+			[]wire.BatchInfo{info(topSeq-1, 3), info(topSeq-1, 3), info(1, 1)}, []int64{10, 10, 13}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &partition{next: 10, producers: map[int64]*producer{7: {batches: []sentBatch{tt.start}}}}
+			for i, b := range tt.steps {
+				dup, code := p.admit(b)
+				got := dup
+				switch {
+				case code != wire.ErrNone:
+					got = -int64(code)
+				case dup < 0:
+					got = p.next
+					p.remember(b, p.next)
+					p.next += int64(b.Count)
+				}
+				if got != tt.want[i] {
+					t.Fatalf("step %d (sequence %d): got %d, want %d", i, b.BaseSequence, got, tt.want[i])
+				}
+			}
+		})
 	}
 }
