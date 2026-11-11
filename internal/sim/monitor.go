@@ -57,6 +57,16 @@ func (w *world) monitor(inc *incarnation) {
 		}
 	}
 	inc.commit = commit
+	if s := r.LogStart(); s > inc.logStart {
+		if inc.logStart > 0 || inc.installing || !r.Installing() {
+			w.stats.Trims++
+		}
+		inc.logStart = s
+	}
+	if r.Installing() && !inc.installing {
+		w.stats.Installs++
+	}
+	inc.installing = r.Installing()
 }
 
 // compareReplicas samples S4 every 100ms: whichever running nodes happen

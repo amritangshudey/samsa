@@ -431,7 +431,7 @@ func (m *ProduceResponse) Encode(w *Writer, v int16) {
 			w.Int64(p.BaseOffset)
 			w.Int64(-1) // LogAppendTimeMs: record timestamps are the producer's
 			if v >= 5 {
-				w.Int64(0) // LogStartOffset: nothing is ever deleted
+				w.Int64(-1) // LogStartOffset: the schema's default, "unknown"; Fetch carries it
 			}
 			if v >= 8 {
 				w.ArrayLen(false, 0)

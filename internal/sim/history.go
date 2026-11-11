@@ -49,6 +49,7 @@ type slot struct {
 type partModel struct {
 	at    []slot // by offset
 	floor int64  // a read that starts now must report a log end of at least this
+	start int64  // the highest log start offset a broker reported
 }
 
 type topicState uint8
@@ -81,6 +82,7 @@ type Model struct {
 	parts     map[TP]*partModel
 	topics    map[string]*topicModel
 	finalPass int
+	trimming  bool
 	groups    groupModel
 }
 
@@ -114,7 +116,7 @@ func (m *Model) PowerLoss() {
 	}
 	m.groups.forget()
 	for _, p := range m.parts { // order-independent: every entry gets the same update
-		p.floor = 0
+		p.floor, p.start = 0, 0 // a lost Trim may come back as a lower start
 	}
 	for _, t := range m.topics {
 		if t.state == topicCreated {
@@ -261,15 +263,26 @@ type Fetch struct {
 	Floor  int64 // Model.Floor(TP) when the request was sent
 	Epoch  int   // Model.Epoch() when the request was sent
 	Known  bool  // Model.Known(TP) when the request was sent
+	Start  int64 // Model.Start(TP) when the request was sent
 	// MustProgress is set when no earlier partition of the same response
 	// carried records: then the broker must return at least one batch if
 	// there is one, whatever the byte limits.
 	MustProgress bool
 
-	Err     int16
-	HW      int64
-	Records []byte
+	Err      int16
+	HW       int64
+	LogStart int64 // -1 below Fetch v5, which does not carry it
+	Records  []byte
 }
+
+// Start returns the highest log start offset reported for tp: retention
+// may raise it, and nothing may lower it (docs/design/a1-snapshots.md, 3.4).
+func (m *Model) Start(tp TP) int64 { return m.part(tp).start }
+
+// Trimming tells the model the broker may delete old records. Without a
+// log start in the answer (Fetch below v5), an out-of-range answer below
+// the end is then believed. shortcut: unchecked for those versions.
+func (m *Model) Trimming() { m.trimming = true }
 
 // Fetched checks one partition of a fetch response. It returns the offset
 // after the last record returned, or -1 if there were none.
@@ -284,8 +297,24 @@ func (m *Model) Fetched(f Fetch) (next int64, err error) {
 			return -1, fmt.Errorf("I1: %v was created but the broker does not know it", f.TP)
 		}
 		return -1, nil
+	}
+	if f.LogStart >= 0 && (f.Err == wire.ErrNone || f.Err == wire.ErrOffsetOutOfRange) {
+		switch {
+		case f.LogStart < f.Start:
+			return -1, fmt.Errorf("R1: %v log start went back from %d to %d", f.TP, f.Start, f.LogStart)
+		case f.LogStart > f.HW:
+			return -1, fmt.Errorf("R1: %v log start %d is past the high watermark %d", f.TP, f.LogStart, f.HW)
+		case f.Err == wire.ErrNone && f.Offset < f.LogStart:
+			return -1, fmt.Errorf("R1: %v fetch at %d succeeded below the log start %d", f.TP, f.Offset, f.LogStart)
+		}
+		p := m.part(f.TP)
+		p.start = max(p.start, f.LogStart)
+	}
+	switch f.Err {
+	case wire.ErrNone:
 	case wire.ErrOffsetOutOfRange:
-		if f.Offset >= 0 && f.Offset <= f.Floor {
+		below := f.Offset < f.LogStart || f.LogStart < 0 && m.trimming
+		if f.Offset >= 0 && f.Offset <= f.Floor && !below {
 			return -1, fmt.Errorf("I1: %v offset %d reported out of range, but the log end was already %d", f.TP, f.Offset, f.Floor)
 		}
 		return -1, nil
@@ -378,7 +407,8 @@ func (m *Model) BeginFinal() { m.finalPass++ }
 func (m *Model) CheckFinal() error {
 	for id := 1; id < len(m.recs); id++ {
 		r := &m.recs[id]
-		if r.state == recAcked && (m.strict || r.ackEpoch == m.epoch) && r.final != m.finalPass {
+		// Retention may drop what lies below the log start, nothing else.
+		if r.state == recAcked && (m.strict || r.ackEpoch == m.epoch) && r.final != m.finalPass && r.offset >= m.part(r.tp).start {
 			return fmt.Errorf("I1: record %d was acknowledged at %v offset %d and is gone", id, r.tp, r.offset)
 		}
 	}
