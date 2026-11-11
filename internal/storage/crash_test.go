@@ -47,6 +47,7 @@ func crashRun(seed uint64, mutate func(*Config)) error {
 	var (
 		model   []rec // every append not known to be lost, in offset order
 		durable int64 // highest DurableOffset the log has reported
+		cutTo   int64 // highest offset passed to TruncatePrefix: everything from it on must stay
 		l       *Log
 	)
 
@@ -57,6 +58,12 @@ func crashRun(seed uint64, mutate func(*Config)) error {
 		}
 		if l.DurableOffset() != l.EndOffset() {
 			return fmt.Errorf("after open, durable offset %d != end offset %d", l.DurableOffset(), l.EndOffset())
+		}
+		if l.StartOffset() > cutTo {
+			return fmt.Errorf("invariant 5: log starts at %d, but only records below %d were removed", l.StartOffset(), cutTo)
+		}
+		for len(model) > 0 && model[0].base < l.StartOffset() {
+			model = model[1:] // removed from the front, as asked
 		}
 		off, i := l.StartOffset(), 0
 		for off < l.EndOffset() {
@@ -141,6 +148,17 @@ func crashRun(seed uint64, mutate func(*Config)) error {
 				model = model[:i]
 				if l.EndOffset() != cut || l.DurableOffset() != cut {
 					return fmt.Errorf("after truncating at %d: end %d, durable %d", cut, l.EndOffset(), l.DurableOffset())
+				}
+			}
+		case r < 76 && len(model) > 0: // remove old segments
+			cut := model[rng.Intn(len(model))].base
+			cutTo = max(cutTo, cut)
+			if err = l.TruncatePrefix(cut); err == nil {
+				if l.StartOffset() > cut {
+					return fmt.Errorf("invariant 5: truncating the prefix below %d made the log start at %d", cut, l.StartOffset())
+				}
+				for len(model) > 0 && model[0].base < l.StartOffset() {
+					model = model[1:]
 				}
 			}
 		case r < 80:
