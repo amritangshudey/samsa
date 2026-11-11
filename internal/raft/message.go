@@ -14,6 +14,8 @@ const (
 	msgVoteResponse
 	msgAppendEntries
 	msgAppendResponse
+	msgInstallSnapshot
+	msgInstallResponse
 )
 
 // Entry kinds.
@@ -57,7 +59,16 @@ type message struct {
 	// success, index is the highest index the follower knows to match the
 	// leader's log and holds durably. On refusal it is a hint: the leader
 	// should try again from the entry after it.
+	// InstallResponse: index is the follower's last index.
 	echo, index int64
+
+	// InstallSnapshot: the leader's log start (the follower's log will
+	// start there) with the term of the entry before it (in prevTerm), the
+	// snapshot's index (in snapIndex), its total size,
+	// and one chunk of it at offset. InstallResponse: offset is the next
+	// byte the follower expects, or -1 if it needs no snapshot.
+	cut, snapIndex, total, offset int64
+	data                          []byte
 }
 
 var errBadMessage = errors.New("raft: malformed message")
@@ -96,6 +107,19 @@ func (m *message) encode() []byte {
 		i64(m.echo)
 		i64(m.index)
 		i64(m.stamp)
+	case msgInstallSnapshot:
+		i64(m.stamp)
+		i64(m.cut)
+		i64(m.prevTerm)
+		i64(m.snapIndex)
+		i64(m.total)
+		i64(m.offset)
+		b = binary.BigEndian.AppendUint32(b, uint32(len(m.data)))
+		b = append(b, m.data...)
+	case msgInstallResponse:
+		i64(m.stamp)
+		i64(m.offset)
+		i64(m.index)
 	}
 	return b
 }
@@ -150,6 +174,14 @@ func decodeMessage(b []byte, maxCmd int) (message, error) {
 		m.ok = flag()
 		m.echo, m.index, m.stamp = i64(), i64(), i64()
 		bad = bad || m.echo < -1 || m.index < -1
+	case msgInstallSnapshot:
+		m.stamp, m.cut, m.prevTerm, m.snapIndex, m.total, m.offset = i64(), i64(), i64(), i64(), i64(), i64()
+		n := int(binary.BigEndian.Uint32(take(4)))
+		bad = bad || n > maxCmd || m.cut < 1 || m.prevTerm < 0 || m.prevTerm > m.term || m.snapIndex < m.cut-1 || m.offset < 0 || m.total < 1 || m.offset > m.total-int64(n)
+		m.data = take(n)
+	case msgInstallResponse:
+		m.stamp, m.offset, m.index = i64(), i64(), i64()
+		bad = bad || m.offset < -1 || m.index < -1
 	default:
 		bad = true
 	}
