@@ -141,6 +141,19 @@ for how much that is worth.
   fails the checksum with a sane length. An error path that returns
   partially filled data is a trap.
 
+### F2. A CreateTopics request lost its manual assignment when re-encoded (Phase 7)
+
+- **Found by:** `FuzzDecodeMessage` on the macOS CI runner (PR #8).
+- **Violated:** a decoded message must survive encode and decode unchanged.
+- **Cause:** the decoder records that a topic carried a manual replica
+  assignment (`HasAssignments`, so that the broker can refuse it), but the
+  encoder always wrote an empty assignment list. Only the simulator's
+  clients and the tests encode requests, so the broker was never affected;
+  but a simulated client could not have sent such a request.
+- **Fix:** the encoder writes one assignment when the flag is set. The
+  round-trip test's sample request now carries one, and fails without the
+  fix.
+
 ## Bugs in the simulator and tests
 
 ### M1. Torn block destroyed bytes that had been synced (Phase 1)

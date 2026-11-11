@@ -141,7 +141,7 @@ func messages() map[string]struct {
 			Topics: []TopicMetadata{{Name: "a", Partitions: []PartitionMetadata{{Index: 0, Leader: 1, Replicas: []int32{1}, ISR: []int32{1}}}},
 				{ErrorCode: 3, Name: "missing"}},
 		}, func() Message { return &MetadataResponse{} }},
-		"CreateTopicsRequest": {KeyCreateTopics, &CreateTopicsRequest{Topics: []CreateTopic{{Name: "a", NumPartitions: 3, ReplicationFactor: 1}}, TimeoutMs: 1000},
+		"CreateTopicsRequest": {KeyCreateTopics, &CreateTopicsRequest{Topics: []CreateTopic{{Name: "a", NumPartitions: 3, ReplicationFactor: 1}, {Name: "b", NumPartitions: 1, ReplicationFactor: 1, HasAssignments: true}}, TimeoutMs: 1000},
 			func() Message { return &CreateTopicsRequest{} }},
 		"CreateTopicsResponse": {KeyCreateTopics, &CreateTopicsResponse{Topics: []CreateTopicResult{{Name: "a"}, {Name: "b", ErrorCode: 36, ErrorMessage: "exists"}}},
 			func() Message { return &CreateTopicsResponse{} }},
