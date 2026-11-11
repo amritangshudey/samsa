@@ -647,6 +647,13 @@ func advertised() []wire.APIRange {
 	return out
 }
 
+// Serving reports whether the node is answering clients as leader.
+func (n *Node) Serving() bool { return n.serving }
+
+// Raft exposes the node's consensus state to the simulator's monitor,
+// which only reads it. Nil before OnStart.
+func (n *Node) Raft() *raft.Raft { return n.raft }
+
 // StateHash returns a checksum of everything the node has applied, together
 // with the index up to which it has applied.
 func (n *Node) StateHash() (applied int64, hash uint32) { return n.applied, n.st.hash() }

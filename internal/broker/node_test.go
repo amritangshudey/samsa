@@ -38,11 +38,19 @@ func (c *fakeClock) CancelTimer(id sys.TimerID) { delete(c.timers, id) }
 type fakeNet struct {
 	sent   map[sys.ConnID][]byte
 	closed []sys.ConnID
+	peers  []peerMsg // what the node sent to other nodes, in order
+}
+
+type peerMsg struct {
+	to  sys.NodeID
+	msg []byte
 }
 
 func (n *fakeNet) Send(c sys.ConnID, p []byte) { n.sent[c] = append(n.sent[c], p...) }
 func (n *fakeNet) Close(c sys.ConnID)          { n.closed = append(n.closed, c) }
-func (n *fakeNet) SendPeer(sys.NodeID, []byte) {}
+func (n *fakeNet) SendPeer(to sys.NodeID, p []byte) {
+	n.peers = append(n.peers, peerMsg{to, append([]byte(nil), p...)})
+}
 
 // harness drives one node with no goroutines and no sockets.
 type harness struct {
@@ -67,7 +75,9 @@ func (h *harness) start() {
 	h.t.Helper()
 	h.clock = &fakeClock{now: h.clockNow(), timers: map[sys.TimerID]fakeTimer{}}
 	h.net = &fakeNet{sent: map[sys.ConnID][]byte{}}
-	h.cfg.NodeID, h.cfg.Host, h.cfg.Port = 1, "localhost", 9092
+	if h.cfg.NodeID == 0 {
+		h.cfg.NodeID, h.cfg.Host, h.cfg.Port = 1, "localhost", 9092
+	}
 	h.node = New(h.cfg, h.clock, h.net, h.disk, h.rand)
 	if err := h.node.OnStart(); err != nil {
 		h.t.Fatalf("OnStart: %v", err)

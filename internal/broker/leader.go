@@ -2,9 +2,11 @@ package broker
 
 import "github.com/amritangshudey/samsa/internal/wire"
 
-// leader returns the node that this one believes leads the cluster.
+// leader returns the node that this one believes leads the cluster. A
+// node names itself only once it is serving: until then it would refuse
+// the requests that a client sends to a leader.
 func (n *Node) leader() (Peer, bool) {
-	if id, ok := n.raft.Leader(); ok {
+	if id, ok := n.raft.Leader(); ok && (int32(id) != n.cfg.NodeID || n.serving) {
 		for _, p := range n.cfg.Peers {
 			if p.ID == int32(id) {
 				return p, true
