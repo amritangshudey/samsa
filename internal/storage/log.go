@@ -604,6 +604,21 @@ func corrupt(err error) error {
 	return err
 }
 
+// CutFor returns the base of the oldest segment from which on the log holds
+// at most maxBytes, never past the active segment: where to cut so that
+// about maxBytes remain.
+func (l *Log) CutFor(maxBytes int64) int64 {
+	var total int64
+	for _, s := range l.segs {
+		total += s.size
+	}
+	i := 0
+	for ; i < len(l.segs)-1 && total > maxBytes; i++ {
+		total -= l.segs[i].size
+	}
+	return l.segs[i].base
+}
+
 // StartOffset returns the offset of the first record in the log.
 func (l *Log) StartOffset() int64 { return l.segs[0].base }
 

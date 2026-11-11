@@ -796,3 +796,45 @@ func FuzzNodeInput(f *testing.F) {
 		h.advance(time.Hour)
 	})
 }
+
+// Retention (docs/design/a1-snapshots.md, section 3): the leader trims old
+// segments; fetches below the new start answer OFFSET_OUT_OF_RANGE, the
+// earliest offset moves up, everything above is unchanged, segments are
+// deleted, and a restart comes back to the same state.
+func TestRetentionTrimsTheLog(t *testing.T) {
+	h := newHarness(t, Config{SegmentBytes: 2048, MaxBatchBytes: 1000, SnapshotEvery: -1, RetentionBytes: 4096})
+	h.open(1)
+	h.createTopic(1, "t", 1)
+	for i := range 200 {
+		if got := h.produce(1, "t", 0, fmt.Sprintf("value-%03d", i)); got.ErrorCode != 0 {
+			t.Fatal(got)
+		}
+	}
+	start := h.node.st.topics["t"].parts[0].start
+	if start == 0 || h.node.raft.LogStart() == 0 || h.node.raft.SnapshotIndex() < 0 {
+		t.Fatalf("nothing trimmed: partition start %d, log start %d, snapshot %d", start, h.node.raft.LogStart(), h.node.raft.SnapshotIndex())
+	}
+	check := func() {
+		t.Helper()
+		if p, _ := h.fetch(1, "t", 0, start-1); p.ErrorCode != wire.ErrOffsetOutOfRange || p.LogStartOffset != start {
+			t.Fatalf("fetch below the start: %+v", p)
+		}
+		p, vals := h.fetch(1, "t", 0, start)
+		if p.ErrorCode != 0 || p.LogStartOffset != start || len(vals) == 0 || vals[0] != fmt.Sprintf("value-%03d", start) {
+			t.Fatalf("fetch at the start %d: %+v %v", start, p, vals)
+		}
+		var resp wire.ListOffsetsResponse
+		h.call(1, wire.KeyListOffsets, 1, &wire.ListOffsetsRequest{Topics: []wire.ListOffsetsTopic{{Name: "t", Partitions: []wire.ListOffsetsPartition{{Index: 0, Timestamp: wire.TimestampEarliest}}}}}, &resp)
+		if got := resp.Topics[0].Partitions[0].Offset; got != start {
+			t.Fatalf("earliest offset %d, want %d", got, start)
+		}
+	}
+	check()
+	hash := h.node.st.hash()
+	h.start()
+	if h.node.st.hash() != hash {
+		t.Fatal("state after restart differs from before")
+	}
+	h.open(1)
+	check()
+}

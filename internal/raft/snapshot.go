@@ -182,6 +182,12 @@ func (r *Raft) Compact(offset int64) {
 	}
 }
 
+// RetentionCut returns where to cut the log so that about maxBytes remain,
+// never past the commit index.
+func (r *Raft) RetentionCut(maxBytes int64) int64 {
+	return min(r.log.CutFor(maxBytes), r.commit+1)
+}
+
 // The install marker: the snapshot a follower is installing, and the index
 // its log starts at. Its presence means the node is installing.
 const (

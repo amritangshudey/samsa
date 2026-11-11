@@ -64,6 +64,10 @@ type Config struct {
 	// the state machine (docs/design/a1-snapshots.md). Default 10 000;
 	// negative disables them.
 	SnapshotEvery int64
+	// RetentionBytes bounds the log: past it, the leader proposes to drop
+	// the oldest segments (docs/design/a1-snapshots.md, section 3). Zero
+	// keeps everything.
+	RetentionBytes int64
 	// MaxRequestBytes bounds one request frame. Default 32 MiB.
 	MaxRequestBytes int
 	// MaxBatchBytes bounds one record batch. Default 1 MiB.
@@ -92,6 +96,9 @@ type Config struct {
 	// before it has applied an entry of its term. UnsafeNoLease answers
 	// reads without checking the leader's lease.
 	UnsafeServeEarly, UnsafeNoLease bool
+	// UnsafeTrimEarly deletes log segments as soon as a Trim is applied,
+	// before a snapshot covers it.
+	UnsafeTrimEarly bool
 	// UnsafeNoFencing breaks zombie fencing on purpose: an offset commit
 	// from a member is accepted whatever generation it carries.
 	UnsafeNoFencing bool
@@ -196,6 +203,9 @@ type Node struct {
 	// everything clients were ever told. servingTerm is that term.
 	serving     bool
 	servingTerm int64
+	// trimmedAt is the index of the last Trim applied (-1: none since the
+	// last restore); trimProposed the highest cut this node proposed.
+	trimmedAt, trimProposed int64
 
 	waiters    []waiter // ascending by index; non-empty only while serving
 	flushArmed bool
@@ -219,7 +229,7 @@ func New(cfg Config, clock sys.Clock, net sys.Network, disk sys.Disk, rand sys.R
 	st.noFencing = cfg.UnsafeNoFencing
 	return &Node{
 		cfg: cfg, clock: clock, net: net, disk: disk, rand: rand, log: cfg.Logger,
-		st: st, conns: map[sys.ConnID]*conn{}, nextTimer: firstFreeTimer,
+		st: st, trimmedAt: -1, conns: map[sys.ConnID]*conn{}, nextTimer: firstFreeTimer,
 		timers: map[sys.TimerID]func(){}, groups: map[string]*softGroup{},
 	}
 }
@@ -265,7 +275,7 @@ func (n *Node) OnStart() error {
 		},
 		ElectionTimeout: n.cfg.ElectionTimeout, HeartbeatInterval: n.cfg.HeartbeatInterval, MaxAppendBytes: n.cfg.MaxAppendBytes,
 		AckBeforeSync: n.ackBeforeSync(),
-		Unsafe:        n.cfg.UnsafeRaft,
+		Unsafe:        n.cfg.UnsafeRaft | n.trimMutation(),
 	}, raftEnv{n}, n.disk)
 	if err := n.raft.Start(); err != nil {
 		return err
@@ -412,6 +422,7 @@ func (n *Node) lead() {
 	// applied, so is everything before it.
 	if !n.serving && leader && (n.cfg.UnsafeServeEarly || n.applied > 0 && n.raft.EntryTerm(n.applied-1) == term) {
 		n.serving, n.servingTerm = true, term
+		n.trimProposed = n.st.logStart // a Trim proposed in an earlier term may have been lost
 		n.startGroups()
 		n.log.Info("serving as leader", "term", term, "applied", n.applied)
 	}
@@ -466,7 +477,28 @@ func (n *Node) propose(cmd []byte, done func(result)) {
 }
 
 // advance applies committed entries in order and completes their waiters.
+// trimMutation is the Raft switch behind UnsafeTrimEarly.
+func (n *Node) trimMutation() raft.Mutation {
+	if n.cfg.UnsafeTrimEarly {
+		return raft.MutTrimPastSnapshot
+	}
+	return 0
+}
+
 func (n *Node) advance() {
+	if n.raft.Installing() {
+		return // the log restarts after a snapshot this node does not yet hold
+	}
+	if i, b := n.raft.Snapshot(); i >= n.applied { // installed from the leader
+		st, err := decodeState(b)
+		if err != nil {
+			n.fatal = fmt.Errorf("installed snapshot at %d: %w", i, err)
+			return
+		}
+		st.noFencing = n.cfg.UnsafeNoFencing
+		n.st, n.applied, n.trimmedAt = st, i+1, -1
+		n.log.Info("installed snapshot", "index", i)
+	}
 	appended := false
 	for n.fatal == nil && n.applied < n.raft.Committed() {
 		var w waiter
@@ -496,6 +528,9 @@ func (n *Node) advance() {
 			n.fatal = err
 			return
 		}
+		if cmd[0] == cmdTrim {
+			n.trimmedAt = n.applied
+		}
 		n.applied++
 		appended = appended || (cmd[0] == cmdAppend && res.errCode == wire.ErrNone)
 		if w.done != nil {
@@ -505,8 +540,18 @@ func (n *Node) advance() {
 	if len(n.waiters) == 0 {
 		n.waiters = nil // release the backing array
 	}
-	if every := n.cfg.SnapshotEvery; every > 0 && n.fatal == nil && n.applied-1-n.raft.SnapshotIndex() >= every {
+	n.raft.Compact(n.st.logStart) // effective only below a snapshot, unless UnsafeTrimEarly
+	// A Trim frees disk only once a snapshot after it exists: take one now.
+	trimPending := n.trimmedAt > n.raft.SnapshotIndex() && !n.cfg.UnsafeTrimEarly
+	if every := n.cfg.SnapshotEvery; n.fatal == nil && (trimPending || every > 0 && n.applied-1-n.raft.SnapshotIndex() >= every) {
 		n.raft.SaveSnapshot(n.applied-1, n.st.encode())
+		n.raft.Compact(n.st.logStart)
+	}
+	if n.serving && n.cfg.RetentionBytes > 0 && n.fatal == nil {
+		if cut := n.raft.RetentionCut(n.cfg.RetentionBytes); cut > n.st.logStart && cut > n.trimProposed {
+			n.trimProposed = cut
+			n.propose(encodeTrim(cut), func(result) {})
+		}
 	}
 	if appended {
 		n.wakeFetches()
