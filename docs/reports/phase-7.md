@@ -24,6 +24,9 @@ Branch `phase-7`, 2026-11-11. Stacked on `phase-6` (PR #7), `phase-5`
 - **`integration/cmd/topic`**: a small tool to create a topic, because the
   broker never auto-creates one and kcat cannot.
 - Also: the Java group test flake from Phase 4 explained (BUGS.md M7).
+- Fixed: fuzzing on CI found that the CreateTopics request encoder (used
+  by the simulator and tests, not the broker) dropped a manual assignment
+  (BUGS.md F2).
 
 ## Results
 

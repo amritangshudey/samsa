@@ -275,14 +275,22 @@ func (m *CreateTopicsRequest) Decode(r *Reader, _ int16) {
 	m.ValidateOnly = r.Bool() // v1+
 }
 
-// Encode implements Message. It never writes assignments or configs.
+// Encode implements Message. It never writes configs; HasAssignments is
+// written as one assignment of partition 0 to no brokers, so that it
+// survives a round trip.
 func (m *CreateTopicsRequest) Encode(w *Writer, _ int16) {
 	w.ArrayLen(false, len(m.Topics))
 	for _, t := range m.Topics {
 		w.String(false, t.Name)
 		w.Int32(t.NumPartitions)
 		w.Int16(t.ReplicationFactor)
-		w.ArrayLen(false, 0)
+		if t.HasAssignments {
+			w.ArrayLen(false, 1)
+			w.Int32(0)           // PartitionIndex
+			w.ArrayLen(false, 0) // BrokerIds
+		} else {
+			w.ArrayLen(false, 0)
+		}
 		w.ArrayLen(false, 0)
 	}
 	w.Int32(m.TimeoutMs)
