@@ -175,7 +175,8 @@ virtual time, all randomness from one seed ([ADR 0007](adr/0007-history-checking
   invariants (generations only move forward and all members of one hear
   the same thing; each member gets what the leader assigned and no slot
   goes to two members; no commit accepted from an older generation;
-  acknowledged commits are what an offset fetch returns, across crashes). `monitor.go` checks Raft: one leader per term, committed entries
+  acknowledged commits are what an offset fetch returns, across crashes). `monitor.go` checks Raft: one leader per term, a term that never goes
+  back and a vote that is never forgotten across restarts, committed entries
   never replaced, replicas that applied the same prefix having equal state
   hashes. A failure prints the seed and the command that replays it.
 - **Quiet period.** Faults stop and everything heals; then a leader must

@@ -295,6 +295,9 @@ func (r *Raft) Term() int64 { return r.hard.term }
 // Leader returns the leader of the current term, if this node knows it.
 func (r *Raft) Leader() (id sys.NodeID, known bool) { return r.leader, r.leader != noVote }
 
+// Vote returns the node this node voted for in the current term, if any.
+func (r *Raft) Vote() (id sys.NodeID, voted bool) { return r.hard.votedFor, r.hard.votedFor != noVote }
+
 // Committed returns the index below which every entry is committed.
 func (r *Raft) Committed() int64 { return r.commit + 1 }
 

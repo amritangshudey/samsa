@@ -67,6 +67,8 @@ type simNode struct {
 	inc       *incarnation // nil while the node is down
 	powerLost bool         // the disk must be restarted before the node
 	term      int64        // S5: the highest term seen on this node, ever
+	vote      sys.NodeID   // S5: whom it voted for in that term, if voted
+	voted     bool
 }
 
 // world owns virtual time and everything outside the nodes.
