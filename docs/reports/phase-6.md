@@ -99,6 +99,12 @@ go test ./internal/raft -run TestRandomSchedules -raft-seeds 20000
 - **No check-quorum**: an isolated leader keeps its role and refuses
   requests until the partition heals; clients go back to Metadata, which
   that node answers without naming itself.
+- **A peer that lies about leading is not survived.** Fuzzing found that
+  an AppendEntries contradicting committed entries, claiming the current
+  or a later term, makes a node stop with an error. That is deliberate
+  (it proves a broken peer), and `FuzzStep` now allows exactly that. It
+  means one faulty node can stop the others: Byzantine faults are out of
+  scope, and there is no authentication between nodes (ADR 0010).
 - The design review was again a second pass by the same author.
 
 ## Ten questions

@@ -285,11 +285,19 @@ func FuzzStep(f *testing.F) {
 		c.propose(1, "a")
 		c.run(nil)
 		for _, to := range []sys.NodeID{1, 2} {
+			term := c.r(to).Term()
 			c.r(to).Step(3, b)
 			c.r(to).Flush()
-			// The one thing a lying peer can do is claim to lead the
-			// leader's own term, which a node rightly refuses to survive.
-			if err := c.r(to).Err(); err != nil && to != 1 {
+			// The one thing a lying peer can do is claim to lead a term,
+			// the present one (which node 1 leads) or a later one, with
+			// entries that contradict what is committed. An honest
+			// leader of any term holds every committed entry, so this
+			// proves a broken peer, and a node rightly stops rather than
+			// act on it (peers are not Byzantine; design phase 6,
+			// section 2). Anything else must leave it running.
+			m, err := decodeMessage(b, 64)
+			claim := err == nil && m.typ == msgAppendEntries && m.term >= term
+			if err := c.r(to).Err(); err != nil && !claim {
 				t.Fatalf("node %d stopped: %v", to, err)
 			}
 		}
