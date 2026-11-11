@@ -82,8 +82,8 @@ type state struct {
 	// cut of the latest Trim applied.
 	logStart int64
 	topics   map[string]*topic
-	names  []string // sorted, for deterministic listing
-	groups map[string]*group
+	names    []string // sorted, for deterministic listing
+	groups   map[string]*group
 	// noFencing is Config.UnsafeNoFencing: a deliberate bug.
 	noFencing bool
 }
