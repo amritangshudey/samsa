@@ -58,10 +58,11 @@ type client struct {
 	pending  []*call
 	corr     int32
 	progress uint64
-	cursors  map[TP]int64 // consumers: next offset to read
-	mem      *membership  // group members: their place in the group
-	pin      *simNode     // if set, the only node this client connects to
-	fetchMin int16        // lowest Fetch version to use
+	cursors  map[TP]int64  // consumers: next offset to read
+	mem      *membership   // group members: their place in the group
+	pin      *simNode      // if set, the only node this client connects to
+	fetchMin int16         // lowest Fetch version to use
+	idem     *idemProducer // idempotent producers: the session
 }
 
 // tick is the client's heartbeat: connect, misbehave, or issue a request.
