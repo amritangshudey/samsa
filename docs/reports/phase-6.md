@@ -42,6 +42,7 @@ Branch `phase-6`, 2026-11-11. Stacked on `phase-5` (PR #6), itself on
 | Profile | about half the time is the Go runtime (garbage collection, idle workers); reading the log to replicate it is the largest share of our own code (13.5 %). A lighter GC setting did not help. Nothing was optimised |
 | Real clients, all earlier tests, and three processes with two leader kills | pass; new leader after 0.63 s; no record lost or duplicated |
 | Bugs found in the system | 2 (S4, S5), both stale answers from an isolated leader |
+| Test bugs explained | M7: the Java group test flake since Phase 4 was the client re-bootstrapping during the broker restart; 20 of 20 runs pass after the fix |
 
 **The mutation suite**, and what caught each:
 
@@ -105,6 +106,10 @@ go test ./internal/raft -run TestRandomSchedules -raft-seeds 20000
   (it proves a broken peer), and `FuzzStep` now allows exactly that. It
   means one faulty node can stop the others: Byzantine faults are out of
   scope, and there is no authentication between nodes (ADR 0010).
+- **The Java group test turns off the client's re-bootstrapping**
+  (BUGS.md M7). With the default, a Java group leader may rebalance after
+  a single-broker restart; the test now shows only that the broker itself
+  causes no rebalance.
 - The design review was again a second pass by the same author.
 
 ## Ten questions

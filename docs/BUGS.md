@@ -210,6 +210,31 @@ lost its unsynced tail. Down nodes are now skipped. A second check, "at
 least five entries committed per seed", was wrong for crash-heavy seeds
 and now only requires that the healed cluster commits something.
 
+### M7. The Java group test blamed the broker for the client's own rejoin (Phase 4, explained in Phase 6)
+
+`TestJavaConsumerGroup` failed about once in 20–30 runs, locally and on
+CI: "the restart caused 1 JoinGroup requests". The broker log showed the
+surviving member sending JoinGroup straight after the restart, with no
+Heartbeat first, so no answer from the broker had asked it to rejoin.
+Cause, read in the kafka-clients 4.4.0 source: when no known broker is
+reachable, `NetworkClient` re-bootstraps (`metadata.recovery.strategy`
+defaults to `rebootstrap`), and `Metadata.bootstrap` bumps the metadata
+version and empties the cached topics. The group leader compares its
+metadata with the snapshot it made the assignment from, sees the topic
+gone, and rejoins ("cached metadata has changed",
+`ConsumerCoordinator.rejoinNeededOrPending`). With one broker every
+restart leaves no broker reachable; whether the client looks in that
+window is timing. Experiment: with the broker held down for 2 s, the
+default setting rejoined in 1 of 3 runs, and `none` in 0 of 6. The test
+client now sets `metadata.recovery.strategy=none`. A second, smaller test
+bug was fixed with it: the wait before the restart reused a "committed"
+flag from the first phase, so it did not prove a commit after the
+takeover.
+
+What this leaves unproven: a Java client with default settings may
+rebalance after a single-broker restart. That is the client's choice and
+would happen against Kafka too (not tested against Kafka).
+
 ### M3. The checker condemned records that an earlier crash had spared (Phase 3)
 
 - **Seeds:** 1, 3 and 6, under the `interval` and `never` fsync policies.
