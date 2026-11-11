@@ -75,6 +75,9 @@ func TestSim(t *testing.T) {
 		total.OffsetCommits += s.OffsetCommits
 		total.OffsetFetches += s.OffsetFetches
 		total.ZombiesRefused += s.ZombiesRefused
+		total.Leaders += s.Leaders
+		total.NotLeader += s.NotLeader
+		total.ReplicasCompared += s.ReplicasCompared
 	}
 	t.Logf("%d seeds, %d failed; totals %+v", *seeds, failed, total)
 	// A suite that passes because nothing happened proves nothing.
@@ -85,6 +88,7 @@ func TestSim(t *testing.T) {
 			"recoveries interrupted": total.RecoveriesCut, "client disconnects": total.Disconnects,
 			"group joins": total.GroupJoins, "group syncs": total.GroupSyncs, "offset commits": total.OffsetCommits,
 			"offset fetches checked": total.OffsetFetches, "zombie commits refused": total.ZombiesRefused,
+			"leaders elected": total.Leaders, "requests refused by a non-leader": total.NotLeader, "replica comparisons": total.ReplicasCompared,
 		} {
 			if n < *seeds/10 {
 				t.Errorf("only %d %s in %d seeds: the suite is not exercising what it claims", n, name, *seeds)
@@ -121,5 +125,29 @@ func TestSimCatchesAckBeforeSync(t *testing.T) {
 	t.Logf("broken broker caught by %d of %d seeds", caught, len(results))
 	if caught == 0 {
 		t.Fatal("no seed noticed a broker that acknowledges before syncing")
+	}
+}
+
+// The same for a vote that is granted before it is on disk: after a crash
+// the node votes again, and one term gets two leaders (S1).
+//
+// The third deliberate bug, committing an earlier term's entry by counting
+// replicas (Figure 8), is not caught here: 1000 seeds passed. It needs a
+// leader whose entries reach one follower and not the other, which this
+// phase's network (delays, no loss) almost never produces. The random
+// schedules in internal/raft do catch it. See docs/reports/phase-5.md.
+func TestSimCatchesVoteWithoutPersist(t *testing.T) {
+	caught := 0
+	results := runMany(1, 200, func(c *broker.Config) { c.UnsafeVoteWithoutPersist = true })
+	for _, res := range results {
+		if res.Err != nil {
+			if caught++; caught == 1 {
+				t.Logf("seed %d (%s): %v", res.Seed, res.Setup, res.Err)
+			}
+		}
+	}
+	t.Logf("broken broker caught by %d of %d seeds", caught, len(results))
+	if caught == 0 {
+		t.Fatal("no seed noticed a node that votes before persisting its vote")
 	}
 }

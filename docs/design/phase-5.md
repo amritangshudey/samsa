@@ -368,6 +368,38 @@ missing record fails the test.
 - Simulator invariants S1 to S5 read node internals. ADR 0007's rule that
   correctness is judged from client-visible history still governs S6.
 
+Added during implementation:
+
+- **Held requests are dropped by closing their connections** when
+  leadership is lost, instead of being answered with a not-leader error
+  as section 6 planned (ADR 0011). Requests that arrive afterwards get
+  the error.
+- **Waiters do not carry a term.** Losing leadership clears them all
+  before anything else is applied, so a waiter can only ever meet the
+  entry it proposed.
+- **S5 is weaker than written.** The commit index is not stored, so it
+  starts again from nothing after a restart; the simulator checks that it
+  never decreases within one life of a node, and that the term never
+  decreases at all.
+- **S3 compares terms, not contents**, while the cluster runs: the
+  monitor must not read the disk under fault injection. Contents are
+  compared whenever the cluster settles (S2 on whole logs).
+- **S4 is sampled** every 100 ms of virtual time while running, and
+  required whenever the cluster settles.
+- **Metadata from a follower may be behind**; the simulator checks its
+  freshness only on answers from the leader.
+- **Weak fsync policies in a cluster are simulated with process kills
+  only** (ADR 0012).
+- **Peer messages are sometimes slow** in the simulator (up to half an
+  election timeout), still never lost. Without that, elections other
+  than after a crash almost never happened.
+- **The simulator does not catch the Figure 8 mutation** (1000 seeds).
+  The random schedules in `internal/raft`, which lose messages, do. To be
+  closed in Phase 6, when the simulated network loses messages too.
+- **The peer transport drops the newest message when a queue is full**,
+  not the oldest as section 7 says; Raft does not care which.
+- **A leader alone in its cluster arms no heartbeat timer.**
+
 ## 11. Review record
 
 Second pass, hunting for anything told to another node or a client before
