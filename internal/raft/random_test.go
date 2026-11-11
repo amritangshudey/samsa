@@ -271,6 +271,8 @@ func FuzzDecodeMessage(f *testing.F) {
 func FuzzStep(f *testing.F) {
 	f.Add((&message{typ: msgAppendEntries, term: 9, prevIndex: 0, prevTerm: 1, commit: 5, entries: []entry{{term: 9, cmd: []byte("x")}}}).encode())
 	f.Add((&message{typ: msgAppendResponse, term: 1, ok: true, index: 1 << 40}).encode())
+	f.Add((&message{typ: msgAppendResponse, term: 1, echo: -1, index: -1}).encode())
+	f.Add((&message{typ: msgAppendResponse, term: 1, echo: 1, index: 7}).encode())
 	f.Add((&message{typ: msgRequestVote, term: 1 << 50, lastIndex: 1 << 50, lastTerm: 1 << 50}).encode())
 	f.Fuzz(func(t *testing.T, b []byte) {
 		c := newCluster(t, 3, nil)

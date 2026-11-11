@@ -493,8 +493,10 @@ func (r *Raft) Step(from sys.NodeID, raw []byte) {
 		}
 	case msgAppendEntries:
 		if stale {
-			// Tell the sender it has been superseded.
-			r.send(from, message{typ: msgAppendResponse, echo: m.prevIndex, index: -1})
+			// Tell the sender it has been superseded: only the term in
+			// this answer matters. Echo -1 keeps it from being taken for
+			// a refusal if the sender has since become leader of our term.
+			r.send(from, message{typ: msgAppendResponse, echo: -1, index: -1})
 			return
 		}
 		r.onAppendEntries(from, m)
@@ -581,8 +583,15 @@ func (r *Raft) onAppendResponse(from sys.NodeID, m message) {
 		if p.next <= r.LastIndex() {
 			r.replicate(from, p)
 		}
-	case !m.ok && m.echo == p.next-1: // a refusal of the request we are waiting on
-		p.next = max(p.match+1, min(m.index+1, p.next-1))
+	// A refusal of the request we are waiting on. A real one names an
+	// index before the one it refused; anything else is noise.
+	case !m.ok && m.echo == p.next-1 && m.echo >= 0 && m.index < m.echo:
+		// Not clamped to match+1: a follower that refuses below what it
+		// once acknowledged has lost entries (its disk lied, or it runs
+		// with AckBeforeSync and lost power). What that already cost
+		// cannot be undone here, but sending the entries again restores
+		// the copy; insisting on match+1 would refuse it for ever.
+		p.next = min(m.index+1, p.next-1)
 		r.replicate(from, p)
 	}
 }

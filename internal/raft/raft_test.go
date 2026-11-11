@@ -551,3 +551,28 @@ func TestFigure7(t *testing.T) {
 		}
 	}
 }
+
+// A follower that lost entries it had acknowledged (here: it does not wait
+// for the sync, and loses power) is sent them again. The leader must not
+// insist on continuing from what was acknowledged: found by the simulator
+// as a run that never ended (BUGS.md).
+func TestFollowerThatLostAcknowledgedEntriesIsRepaired(t *testing.T) {
+	c := newCluster(t, 3, func(cfg *Config) { cfg.AckBeforeSync = true })
+	c.startAll()
+	c.elect(1)
+	c.propose(1, "a")
+	c.propose(1, "b")
+	c.run(nil)
+	c.r(1).Sync() // the leader keeps its log; the follower does not
+	want := c.logOf(1)
+	c.crash(2)
+	c.start(2)
+	if got := c.logOf(2); len(got) >= len(want) {
+		t.Fatalf("setup: node 2 still holds %v after power loss", got)
+	}
+	c.fire(1, TimerHeartbeat)
+	c.run(nil)
+	if got := c.logOf(2); !slices.Equal(got, want) {
+		t.Fatalf("node 2 holds %v, the leader %v", got, want)
+	}
+}
