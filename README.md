@@ -21,7 +21,7 @@ make build
 ./bin/samsa -listen localhost:9092 -data ./data &
 
 (cd integration && go run ./cmd/topic -b localhost:9092 -partitions 3 demo)
-printf 'hello\nworld\n' | kcat -b localhost:9092 -X enable.idempotence=false -P -t demo -p 0
+printf 'hello\nworld\n' | kcat -b localhost:9092 -P -t demo -p 0
 kcat -b localhost:9092 -C -t demo -p 0 -o beginning -e
 ```
 
@@ -40,7 +40,7 @@ P=1=127.0.0.1:9092/127.0.0.1:9192,2=127.0.0.1:9093/127.0.0.1:9193,3=127.0.0.1:90
 ./bin/samsa -node-id 2 -listen 127.0.0.1:9093 -data d2 -peers $P &
 ./bin/samsa -node-id 3 -listen 127.0.0.1:9094 -data d3 -peers $P &
 (cd integration && go run ./cmd/topic -b 127.0.0.1:9092 -partitions 3 replicated)
-printf 'one\ntwo\n' | kcat -b 127.0.0.1:9093 -X enable.idempotence=false -P -t replicated -p 1
+printf 'one\ntwo\n' | kcat -b 127.0.0.1:9093 -P -t replicated -p 1
 kcat -b 127.0.0.1:9094 -C -t replicated -p 1 -o beginning -e
 ```
 
@@ -59,10 +59,11 @@ unmodified client library or tool, against the built binary, over TCP.
 | Compressed batches (gzip, snappy, lz4, zstd), 260 kB records | [`TestFranzGoCompressedAndLarge`](integration/integration_test.go) |
 | Consumer groups: join, sync, heartbeat, leave, offset commit and fetch, rebalance when a member dies | [`TestFranzGoConsumerGroup`](integration/groups_test.go), [`TestJavaConsumerGroup`](integration/groups_test.go), [`TestKcatConsumerGroup`](integration/groups_test.go) |
 | Zombie members fenced: a commit from an old generation is refused | [`TestSimCatchesMissingFencing`](internal/sim/groups_test.go), [`TestGroupLifecycle`](internal/broker/groups_test.go) |
+| Idempotent producer: Java, franz-go and kcat with idempotence on; retries across leader kills write nothing twice | [`TestClusterSurvivesLeaderKill`](integration/cluster_test.go), the simulator (I8, I9), [`TestSequenceRules`](internal/broker/idempotence_test.go) |
 | Replication with Raft; a three-process cluster survives two leader kills with no record lost | [`TestClusterSurvivesLeaderKill`](integration/cluster_test.go) |
 | Acknowledged writes survive power loss (fsync before ack, torn writes, failed fsyncs) | [`TestCrashRecoveryProperty`](internal/storage/crash_test.go), the simulator |
 | Every produce and fetch answer checked against an exact model of each partition, under crashes and partitions, 1–5 nodes ([ADR 0007](docs/adr/0007-history-checking.md)) | [`TestSim`](internal/sim/sim_test.go), [`TestRegressions`](internal/sim/sim_test.go) |
-| The checks can tell: seven deliberate bugs, each caught | [`TestMutationSuite`](internal/sim/sim_test.go), [`TestRandomSchedulesCatchBrokenRaft`](internal/raft/random_test.go) |
+| The checks can tell: deliberate bugs, each caught (ten in the simulator, one more in the Raft test) | [`TestMutationSuite`](internal/sim/sim_test.go), [`TestRandomSchedulesCatchBrokenRaft`](internal/raft/random_test.go) |
 | Malformed network input is rejected, never a panic | fuzz targets in [`internal/wire`](internal/wire), [`internal/raft`](internal/raft); [`TestBadInputClosesConnection`](internal/broker/node_test.go) |
 | The core does no I/O and reads no clock (so the simulator can drive it) | [`TestCoreIsPure`](internal/purity_test.go) |
 
@@ -72,9 +73,9 @@ fetch, metadata, offsets, topics) and [ADR 0008](docs/adr/0008-group-api-version
 
 ## What is not supported
 
-Transactions, the idempotent producer (clients must set
-`enable.idempotence=false`; franz-go: `DisableIdempotentWrite`), log
-compaction, retention by time or per topic (only `-retention-bytes`, one
+Transactions (a transactional producer is refused with `INVALID_REQUEST`),
+expiry of idempotent producer state (it is kept for ever, about a hundred
+bytes per producer session and partition), log compaction, retention by time or per topic (only `-retention-bytes`, one
 bound for the whole log), deleting records, ACLs, SASL, TLS, tiered storage,
 cluster membership changes, the KIP-848 group protocol, static membership,
 deleting topics or adding partitions, fetch sessions, more than one Raft

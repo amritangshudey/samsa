@@ -102,7 +102,9 @@ only in `apply` of an Append, so it is replicated and deterministic
 (roadmap R1), is in the state hash, and is in the snapshot (version 3).
 
 Apply of an Append whose batch has a producer id follows the six rules of
-section 2 exactly. A duplicate answers the kept base offset; a refused
+section 2, with one change found by the simulator (point 9 of the review):
+rule 4 is dropped. With no expiry, no state means the producer never
+wrote to the partition, so rule 3 applies to every partition. A duplicate answers the kept base offset; a refused
 batch answers its error; in both cases the log entry stays in the log and
 applies to nothing, as an Append to an unknown topic already does. A batch
 without a producer id is appended as before.
@@ -223,3 +225,9 @@ Second pass, against the Kafka source instead of the outline:
 8. The id block is durable state that is not a command, so by the working
    method it needs its own crash coverage: the simulator's power losses
    and failed syncs at start, checked by I9.
+9. **Rule 4 was wrong for part (a)** (found by the simulator, BUGS.md S6).
+   Point 6 missed one case: a node answers one batch "not leader",
+   becomes leader, and accepts the next pipelined batch. With rule 4 that
+   batch got in without the one before it. Without expiry rule 4 has no
+   reason to exist, so it is gone, and rule 3 holds everywhere. Part (b)
+   must keep it for producers that have not expired.

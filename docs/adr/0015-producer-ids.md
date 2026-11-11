@@ -62,3 +62,10 @@ separates the lives of one node. Nothing about them is replicated.
 - Transactions (plan item 15) will map a transactional id to a producer id
   in the replicated state; the id itself can still come from the leader's
   own block.
+
+## API versions
+
+InitProducerId (key 22) is supported in versions 0 to 4, flexible from 2.
+The three test clients negotiate version 4: the Java client 4.4.0,
+franz-go 1.22.3 and librdkafka 2.16.0, as logged by the integration tests.
+Version 5 and later are not implemented.
