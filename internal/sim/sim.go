@@ -60,6 +60,10 @@ type options struct {
 	vandals     int
 	members     int
 	nodes       int
+	// Between nodes (network.go): drop and duplicate probabilities per
+	// message, and whether partition scenarios run.
+	drop, dup  float64
+	partitions bool
 }
 
 func (f fault) String() string {
@@ -75,7 +79,7 @@ func Run(cfg Config) Result {
 	rng := simsys.NewRand(cfg.Seed)
 	w := &world{
 		rng: rng.Fork(), now: epochStart, trace: cfg.Trace,
-		conns: map[sys.ConnID]*conn{}, leaders: map[int64]int32{},
+		conns: map[sys.ConnID]*conn{}, leaders: map[int64]int32{}, cut: map[[2]int32]bool{},
 	}
 	diskRng := rng.Fork()
 
@@ -99,13 +103,21 @@ func Run(cfg Config) Result {
 		}
 	}
 	w.opts.disconnects = pick.Chance(0.6)
-	w.opts.faultEvery = []time.Duration{100 * time.Millisecond, 500 * time.Millisecond, 2 * time.Second}[pick.Intn(3)]
+	w.opts.faultEvery = []time.Duration{20 * time.Millisecond, 100 * time.Millisecond, 500 * time.Millisecond, 2 * time.Second}[pick.Intn(4)]
 	w.opts.producers, w.opts.consumers, w.opts.vandals = 1+pick.Intn(3), 1+pick.Intn(3), pick.Intn(2)
 	w.opts.members = pick.Intn(5)
-	w.opts.nodes = []int{1, 3, 3}[pick.Intn(3)]
+	w.opts.nodes = []int{1, 3, 3, 5}[pick.Intn(4)]
 	// Short, so that elections happen many times within a run.
 	w.bcfg.ElectionTimeout = []time.Duration{100, 150, 300}[pick.Intn(3)] * time.Millisecond
 	w.bcfg.HeartbeatInterval = w.bcfg.ElectionTimeout / 5
+	if w.opts.nodes > 1 {
+		w.opts.drop = []float64{0, 0.01, 0.1, 0.3}[pick.Intn(4)]
+		w.opts.dup = []float64{0, 0.01, 0.1}[pick.Intn(3)]
+		w.opts.partitions = pick.Chance(0.5)
+		// One entry per message, sometimes: then a leader's old entries
+		// and its own no-op travel separately, which Figure 8 needs.
+		w.bcfg.MaxAppendBytes = []int{0, 0, 1}[pick.Intn(3)]
+	}
 	if cfg.Mutate != nil {
 		cfg.Mutate(&w.bcfg)
 	}
@@ -119,8 +131,8 @@ func Run(cfg Config) Result {
 		w.opts.faults = slices.DeleteFunc(w.opts.faults, func(f fault) bool { return f != faultKill })
 	}
 	w.model = NewModel(strict)
-	res := Result{Seed: cfg.Seed, Setup: fmt.Sprintf("nodes=%d sync=%d segment=%d election=%v faults=%v every=%v disconnects=%v producers=%d consumers=%d vandals=%d members=%d",
-		w.opts.nodes, w.bcfg.Sync, w.bcfg.SegmentBytes, w.bcfg.ElectionTimeout, w.opts.faults, w.opts.faultEvery, w.opts.disconnects, w.opts.producers, w.opts.consumers, w.opts.vandals, w.opts.members)}
+	res := Result{Seed: cfg.Seed, Setup: fmt.Sprintf("nodes=%d sync=%d segment=%d election=%v faults=%v every=%v drop=%v dup=%v partitions=%v append=%d disconnects=%v producers=%d consumers=%d vandals=%d members=%d",
+		w.opts.nodes, w.bcfg.Sync, w.bcfg.SegmentBytes, w.bcfg.ElectionTimeout, w.opts.faults, w.opts.faultEvery, w.opts.drop, w.opts.dup, w.opts.partitions, w.bcfg.MaxAppendBytes, w.opts.disconnects, w.opts.producers, w.opts.consumers, w.opts.vandals, w.opts.members)}
 	if w.trace != nil {
 		_, _ = fmt.Fprintf(w.trace, "seed %d: %s\n", cfg.Seed, res.Setup)
 	}
@@ -153,11 +165,16 @@ func Run(cfg Config) Result {
 		}
 	}
 	w.after(w.opts.faultEvery, w.chaos)
+	if w.opts.partitions {
+		w.after(time.Duration(w.rng.Intn(1000))*time.Millisecond, w.partition)
+	}
 	w.runUntil(w.now+sys.Instant(cfg.Duration), nil)
 
 	// Quiesce: no new faults or requests. Let the nodes come back and every
 	// outstanding request finish or time out, then judge the final state.
 	w.quiet = true
+	w.heal()
+	w.opts.drop, w.opts.dup = 0, 0
 	for _, nd := range w.nodes {
 		nd.disk.CrashAfter(0)
 		nd.disk.SetSyncErrorRate(0)
@@ -174,7 +191,7 @@ func Run(cfg Config) Result {
 // of I1 to I5) and then checks that recovery is repeatable (I6).
 func (w *world) finalChecks() {
 	leader := w.settled()
-	if leader == nil {
+	if leader == nil || !w.writable(leader) {
 		return
 	}
 	var tps []TP
@@ -243,6 +260,47 @@ func (w *world) finalChecks() {
 			return
 		}
 	}
+}
+
+// writable checks L1's second half: once the cluster has settled, a new
+// write is acknowledged within liveBound. It creates topic t0 if needed
+// and produces one record there, which the final read must then find.
+func (w *world) writable(leader *simNode) bool {
+	const liveBound = 5 * time.Second
+	m, tp := w.model, TP{catalogue[0].name, 0}
+	v := &client{w: w, rng: w.rng.Fork(), pin: leader}
+	v.c = w.connect(v)
+	acked := false
+	m.TopicAttempted(tp.Topic, catalogue[0].parts)
+	epoch := m.Epoch()
+	create := &wire.CreateTopicsRequest{Topics: []wire.CreateTopic{{Name: tp.Topic, NumPartitions: catalogue[0].parts, ReplicationFactor: int16(len(w.nodes))}}}
+	cresp := &wire.CreateTopicsResponse{}
+	v.request(wire.KeyCreateTopics, 4, create, cresp, func(ok bool) {
+		if !ok || len(cresp.Topics) != 1 || (cresp.Topics[0].ErrorCode != wire.ErrNone && cresp.Topics[0].ErrorCode != wire.ErrTopicAlreadyExists) {
+			w.fail("L1: on a settled cluster, creating %s failed (connection ok: %v, %+v)", tp.Topic, ok, cresp.Topics)
+			return
+		}
+		m.TopicCreated(tp.Topic, epoch)
+		first := m.Send(tp, 1)
+		batch := wire.EncodeBatch([]wire.Record{{Value: Value(first), Timestamp: int64(w.now / 1e6)}})
+		req := &wire.ProduceRequest{Acks: -1, TimeoutMs: 1000, Topics: []wire.ProduceTopic{{Name: tp.Topic, Partitions: []wire.ProducePartition{{Index: tp.Part, Records: batch}}}}}
+		presp := &wire.ProduceResponse{}
+		v.request(wire.KeyProduce, 8, req, presp, func(ok bool) {
+			if !ok || presp.Topics[0].Partitions[0].ErrorCode != wire.ErrNone {
+				m.Unknown(first, 1)
+				w.fail("L1: on a settled cluster, a produce failed (connection ok: %v, %+v)", ok, presp.Topics)
+				return
+			}
+			v.check(m.Acked(first, 1, presp.Topics[0].Partitions[0].BaseOffset, epoch))
+			acked = true
+		})
+	})
+	w.runUntil(w.now+sys.Instant(liveBound), func() bool { return acked || w.err != nil })
+	if !acked && w.err == nil {
+		w.fail("L1: a produce on a settled cluster was not acknowledged within %v", liveBound)
+	}
+	v.hangUp()
+	return acked && w.err == nil
 }
 
 // settled waits, with no faults and no clients, until every node is up,

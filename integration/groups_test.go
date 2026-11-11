@@ -299,6 +299,9 @@ func TestJavaConsumerGroup(t *testing.T) {
 	}
 
 	victim.Process.Kill() // SIGKILL: no LeaveGroup
+	l.mu.Lock()
+	l.idle["A"] = false // so that the wait below sees a commit made after the takeover
+	l.mu.Unlock()
 	produceN(t, b, topic, parts, 200, 200)
 	l.wait(t, "A to take over all partitions and read the rest", func() bool { return len(l.by) == 400 && l.idle["A"] })
 	if a := l.readBy("A"); a != 300 {

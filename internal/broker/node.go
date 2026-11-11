@@ -46,9 +46,11 @@ type Config struct {
 	// is the same on every node and never changes. Default: this node
 	// alone.
 	Peers []Peer
-	// ElectionTimeout and HeartbeatInterval tune Raft; see raft.Config.
+	// ElectionTimeout, HeartbeatInterval and MaxAppendBytes tune Raft;
+	// see raft.Config.
 	ElectionTimeout   time.Duration
 	HeartbeatInterval time.Duration
+	MaxAppendBytes    int
 	// ClusterID is reported in Metadata. Default "samsa".
 	ClusterID string
 	// Dir is the directory of the Raft log on the node's disk. Default "raft".
@@ -80,9 +82,12 @@ type Config struct {
 	// SyncAlways, commands count as durable here when appended, not when
 	// synced. It exists so that the simulator can prove it notices.
 	UnsafeAckBeforeSync bool
-	// UnsafeCommitAnyTerm and UnsafeVoteWithoutPersist are Raft's
-	// deliberate bugs; see raft.Config.
-	UnsafeCommitAnyTerm, UnsafeVoteWithoutPersist bool
+	// UnsafeRaft switches on Raft's deliberate bugs; see raft.Mutation.
+	UnsafeRaft raft.Mutation
+	// UnsafeServeEarly serves clients as soon as the node is elected,
+	// before it has applied an entry of its term. UnsafeNoLease answers
+	// reads without checking the leader's lease.
+	UnsafeServeEarly, UnsafeNoLease bool
 	// UnsafeNoFencing breaks zombie fencing on purpose: an offset commit
 	// from a member is accepted whatever generation it carries.
 	UnsafeNoFencing bool
@@ -217,6 +222,7 @@ type raftEnv struct{ n *Node }
 
 func (e raftEnv) Send(to sys.NodeID, msg []byte) { e.n.net.SendPeer(to, msg) }
 func (e raftEnv) Rand() uint64                   { return e.n.rand.Uint64() }
+func (e raftEnv) Now() sys.Instant               { return e.n.clock.Now() }
 func (e raftEnv) SetTimer(t raft.Timer, d time.Duration) {
 	e.n.clock.SetTimer(raftTimer(t), d)
 }
@@ -250,10 +256,9 @@ func (n *Node) OnStart() error {
 			SegmentBytes:    n.cfg.SegmentBytes,
 			MaxPayloadBytes: n.cfg.MaxBatchBytes + commandOverhead,
 		},
-		ElectionTimeout: n.cfg.ElectionTimeout, HeartbeatInterval: n.cfg.HeartbeatInterval,
-		AckBeforeSync:            n.ackBeforeSync(),
-		UnsafeCommitAnyTerm:      n.cfg.UnsafeCommitAnyTerm,
-		UnsafeVoteWithoutPersist: n.cfg.UnsafeVoteWithoutPersist,
+		ElectionTimeout: n.cfg.ElectionTimeout, HeartbeatInterval: n.cfg.HeartbeatInterval, MaxAppendBytes: n.cfg.MaxAppendBytes,
+		AckBeforeSync: n.ackBeforeSync(),
+		Unsafe:        n.cfg.UnsafeRaft,
 	}, raftEnv{n}, n.disk)
 	if err := n.raft.Start(); err != nil {
 		return err
@@ -390,7 +395,7 @@ func (n *Node) lead() {
 	}
 	// The leader's first entry of its term is a no-op; once that is
 	// applied, so is everything before it.
-	if !n.serving && leader && n.applied > 0 && n.raft.EntryTerm(n.applied-1) == term {
+	if !n.serving && leader && (n.cfg.UnsafeServeEarly || n.applied > 0 && n.raft.EntryTerm(n.applied-1) == term) {
 		n.serving, n.servingTerm = true, term
 		n.startGroups()
 		n.log.Info("serving as leader", "term", term, "applied", n.applied)
@@ -626,7 +631,7 @@ func (n *Node) dispatch(c *conn, frame []byte) {
 		n.drop(c, fmt.Sprintf("malformed request body: key %d version %d", h.Key, h.Version))
 		return
 	}
-	if !n.serving {
+	if !n.canRead() {
 		if resp := refusal(req); resp != nil {
 			if p, ok := req.(*wire.ProduceRequest); ok && p.Acks == 0 {
 				n.finish(c) // the client asked for no answer, and gets none

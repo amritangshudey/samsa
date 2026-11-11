@@ -1,0 +1,17 @@
+# Seeds that once exposed a bug, run by TestRegressions on every push.
+# One seed per line; the comment names the bug in docs/BUGS.md and the
+# phase it was found in. The swarm draws change from phase to phase, so an
+# old seed rarely replays its original schedule; it stays because it was
+# once hard, and is cheap. The mutation suite is what proves each fix is
+# still checked.
+4    # S1, Phase 3: a dying node sent a fetch response
+7    # S1, Phase 3
+8    # S1, Phase 3
+157  # M4, Phase 4: checker blamed the broker for a late topic
+69   # M5, Phase 5: node called again after a failed start
+2    # S4, Phase 6: an isolated leader answered reads (I3)
+7    # S4, Phase 6 (G3)
+40   # S4, Phase 6
+57   # S4, Phase 6
+62   # S4, Phase 6
+937  # S5, Phase 6: an isolated leader refused a valid write from stale state

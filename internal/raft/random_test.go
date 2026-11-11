@@ -131,6 +131,7 @@ func randomRun(seed uint64, mutate func(*Config)) error {
 			continue
 		case r < crashes+12 && n.armed[TimerElection]:
 			n.armed[TimerElection] = false
+			c.passTime()
 			n.r.OnTimer(TimerElection)
 		case r < 120 && n.armed[TimerHeartbeat]:
 			n.armed[TimerHeartbeat] = false
@@ -196,6 +197,7 @@ func randomRun(seed uint64, mutate func(*Config)) error {
 			}
 		}
 		if !leader && len(c.queue) == 0 {
+			c.passTime()
 			c.r(c.ids[round%len(c.ids)]).OnTimer(TimerElection)
 		}
 	}
@@ -227,9 +229,11 @@ func TestRandomSchedules(t *testing.T) {
 // TestRandomSchedules mean nothing.
 func TestRandomSchedulesCatchBrokenRaft(t *testing.T) {
 	for name, mutate := range map[string]func(*Config){
-		"commit by counting replicas of any term": func(c *Config) { c.UnsafeCommitAnyTerm = true },
-		"vote granted before it is on disk":       func(c *Config) { c.UnsafeVoteWithoutPersist = true },
+		"commit by counting replicas of any term": func(c *Config) { c.Unsafe = MutCommitAnyTerm },
+		"vote granted before it is on disk":       func(c *Config) { c.Unsafe = MutVoteWithoutPersist },
 		"entries acknowledged before sync":        func(c *Config) { c.AckBeforeSync = true },
+		"vote by log length only":                 func(c *Config) { c.Unsafe = MutVoteByLength },
+		"follower truncates on a stale message":   func(c *Config) { c.Unsafe = MutTruncateOnStale },
 	} {
 		caught := false
 		for seed := range uint64(3000) {
@@ -281,11 +285,19 @@ func FuzzStep(f *testing.F) {
 		c.propose(1, "a")
 		c.run(nil)
 		for _, to := range []sys.NodeID{1, 2} {
+			term := c.r(to).Term()
 			c.r(to).Step(3, b)
 			c.r(to).Flush()
-			// The one thing a lying peer can do is claim to lead the
-			// leader's own term, which a node rightly refuses to survive.
-			if err := c.r(to).Err(); err != nil && to != 1 {
+			// The one thing a lying peer can do is claim to lead a term,
+			// the present one (which node 1 leads) or a later one, with
+			// entries that contradict what is committed. An honest
+			// leader of any term holds every committed entry, so this
+			// proves a broken peer, and a node rightly stops rather than
+			// act on it (peers are not Byzantine; design phase 6,
+			// section 2). Anything else must leave it running.
+			m, err := decodeMessage(b, 64)
+			claim := err == nil && m.typ == msgAppendEntries && m.term >= term
+			if err := c.r(to).Err(); err != nil && !claim {
 				t.Fatalf("node %d stopped: %v", to, err)
 			}
 		}

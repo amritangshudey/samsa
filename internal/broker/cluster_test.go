@@ -63,10 +63,20 @@ func (tr *trio) deliver(among ...sys.NodeID) {
 // in among.
 func (tr *trio) elect(id sys.NodeID, among ...sys.NodeID) {
 	tr.t.Helper()
+	tr.passTime()
 	tr.h[id].must(tr.h[id].node.OnTimer(timerElection))
 	tr.deliver(among...)
 	if !tr.h[id].node.Serving() {
 		tr.t.Fatalf("node %d did not become a serving leader", id)
+	}
+}
+
+// passTime moves every node's clock past an election timeout without
+// firing any timer: what an election timer that fires implies, and what
+// lets the others vote (they ignore candidates while a leader is recent).
+func (tr *trio) passTime() {
+	for _, h := range tr.h {
+		h.clock.now += sys.Instant(time.Second)
 	}
 }
 
@@ -236,6 +246,7 @@ func TestNewLeaderWaitsForItsOwnEntry(t *testing.T) {
 
 	// Node 2 collects the votes, but nothing it sends afterwards arrives.
 	n2 := tr.h[2]
+	tr.passTime()
 	n2.must(n2.node.OnTimer(timerElection))
 	for _, m := range n2.net.peers {
 		tr.h[m.to].must(tr.h[m.to].node.OnPeerMessage(2, m.msg))
@@ -270,5 +281,51 @@ func TestNewLeaderWaitsForItsOwnEntry(t *testing.T) {
 	n2.call(1, wire.KeyFetch, 11, fetchReq("t", 0, 0, 0, 1), &fr)
 	if code := fr.Topics[0].Partitions[0].ErrorCode; !n2.node.Serving() || code != wire.ErrNone {
 		t.Fatalf("after its entry committed: serving=%v, fetch code %d", n2.node.Serving(), code)
+	}
+}
+
+// A leader that has not heard from a majority for three quarters of an
+// election timeout may already have been replaced: it refuses reads, and
+// stops naming itself, until a round of heartbeats is answered. Writes
+// still go to the log, which decides them.
+func TestLeaderReadsNeedTheLease(t *testing.T) {
+	tr := newTrio(t)
+	tr.elect(1, 1, 2, 3)
+	lead := tr.h[1]
+	lead.open(1)
+	lead.send(1, wire.KeyCreateTopics, 4, &wire.CreateTopicsRequest{Topics: []wire.CreateTopic{{Name: "t", NumPartitions: 1, ReplicationFactor: -1}}})
+	tr.deliver(1, 2, 3)
+	lead.net.sent[1] = nil
+
+	fetchCode := func() int16 {
+		var fr wire.FetchResponse
+		lead.call(1, wire.KeyFetch, 11, fetchReq("t", 0, 0, 0, 1), &fr)
+		return fr.Topics[0].Partitions[0].ErrorCode
+	}
+	if code := fetchCode(); code != wire.ErrNone {
+		t.Fatalf("fetch with a fresh lease: code %d", code)
+	}
+	lead.clock.now += sys.Instant(230 * time.Millisecond) // past 3/4 of the 300ms default
+	if code := fetchCode(); code != wire.ErrNotLeaderOrFollower {
+		t.Fatalf("fetch with an expired lease: code %d", code)
+	}
+	if md := lead.metadata(1); md.ControllerID != -1 {
+		t.Fatalf("a leader without its lease names %d as controller", md.ControllerID)
+	}
+	lead.must(lead.node.OnTimer(timerHeartbeat))
+	tr.deliver(1, 2, 3)
+	if code := fetchCode(); code != wire.ErrNone {
+		t.Fatalf("fetch after the heartbeats were answered: code %d", code)
+	}
+
+	// The mutation switch turns the check off.
+	tr2 := newTrio(t)
+	for _, h := range tr2.h {
+		h.node.cfg.UnsafeNoLease = true
+	}
+	tr2.elect(1, 1, 2, 3)
+	tr2.h[1].clock.now += sys.Instant(time.Hour)
+	if !tr2.h[1].node.canRead() {
+		t.Fatal("UnsafeNoLease did not switch the lease off")
 	}
 }

@@ -141,3 +141,7 @@ franz-go one). A failing run prints the broker's full log, so the next
 occurrence, locally or in CI, can be diagnosed. Until it is reproduced and
 explained, treat "no rebalance after a broker restart" for the Java client
 as usually true, not proven.
+
+*Explained in Phase 6* (BUGS.md M7): the Java client re-bootstraps when no
+broker is reachable, and the group leader then rejoins because its cached
+metadata lost the topic. The test client now turns re-bootstrapping off.

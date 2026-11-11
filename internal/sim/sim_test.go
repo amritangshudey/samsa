@@ -4,10 +4,14 @@ import (
 	"flag"
 	"os"
 	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/amritangshudey/samsa/internal/broker"
+	"github.com/amritangshudey/samsa/internal/raft"
 )
 
 var (
@@ -78,6 +82,7 @@ func TestSim(t *testing.T) {
 		total.Leaders += s.Leaders
 		total.NotLeader += s.NotLeader
 		total.ReplicasCompared += s.ReplicasCompared
+		total.Partitions += s.Partitions
 	}
 	t.Logf("%d seeds, %d failed; totals %+v", *seeds, failed, total)
 	// A suite that passes because nothing happened proves nothing.
@@ -88,7 +93,7 @@ func TestSim(t *testing.T) {
 			"recoveries interrupted": total.RecoveriesCut, "client disconnects": total.Disconnects,
 			"group joins": total.GroupJoins, "group syncs": total.GroupSyncs, "offset commits": total.OffsetCommits,
 			"offset fetches checked": total.OffsetFetches, "zombie commits refused": total.ZombiesRefused,
-			"leaders elected": total.Leaders, "requests refused by a non-leader": total.NotLeader, "replica comparisons": total.ReplicasCompared,
+			"leaders elected": total.Leaders, "requests refused by a non-leader": total.NotLeader, "replica comparisons": total.ReplicasCompared, "partitions": total.Partitions,
 		} {
 			if n < *seeds/10 {
 				t.Errorf("only %d %s in %d seeds: the suite is not exercising what it claims", n, name, *seeds)
@@ -107,47 +112,104 @@ func TestDeterminism(t *testing.T) {
 	}
 }
 
-// TestSimCatchesAckBeforeSync breaks the broker's central rule (answer only
-// after the write is durable) and requires the simulator to notice. If
-// this test fails, a green TestSim means nothing.
-func TestSimCatchesAckBeforeSync(t *testing.T) {
-	caught := 0
-	results := runMany(1, 200, func(c *broker.Config) {
-		c.Sync, c.UnsafeAckBeforeSync = broker.SyncAlways, true
-	})
-	for _, res := range results {
-		if res.Err != nil {
-			if caught++; caught == 1 {
-				t.Logf("seed %d: %v", res.Seed, res.Err)
-			}
-		}
+// The mutation suite (docs/design/phase-6.md, section 4): each switch
+// removes one step that correctness depends on, and the simulator must
+// notice within maxSeeds. A mutation that is never caught is a missing
+// fault or a missing invariant. If this test fails, a green TestSim means
+// nothing.
+func TestMutationSuite(t *testing.T) {
+	if raceEnabled {
+		// Thousands of single-threaded runs: the race detector finds
+		// nothing here and makes them ten times slower. `make test` runs it.
+		t.Skip("skipped under the race detector")
 	}
-	t.Logf("broken broker caught by %d of %d seeds", caught, len(results))
-	if caught == 0 {
-		t.Fatal("no seed noticed a broker that acknowledges before syncing")
+	const maxSeeds = 2000
+	for _, tc := range []struct {
+		name   string
+		mutate func(*broker.Config)
+	}{
+		// Not here: committing an earlier term's entry by counting replicas
+		// (raft.MutCommitAnyTerm, Figure 8). Its code path runs thousands of
+		// times in 300 seeds, but doing harm needs five events in a row:
+		// two leaders that each crash with an entry nobody else has, the
+		// first returning to push its entry to a majority, the message with
+		// its own no-op lost, and its death before the next heartbeat. No
+		// seed in 2000 lined them up, with 3 and 5 nodes, 20 ms faults,
+		// partitions and one entry per message. TestRandomSchedulesCatch-
+		// BrokenRaft in internal/raft, which faults far harder, catches it.
+		{"grant a vote before it is on disk", func(c *broker.Config) { c.UnsafeRaft = raft.MutVoteWithoutPersist }},
+		{"grant a vote comparing log length only", func(c *broker.Config) { c.UnsafeRaft = raft.MutVoteByLength }},
+		{"truncate on a message that merely carries fewer entries", func(c *broker.Config) { c.UnsafeRaft = raft.MutTruncateOnStale }},
+		{"acknowledge entries before they are synced", func(c *broker.Config) { c.Sync, c.UnsafeAckBeforeSync = broker.SyncAlways, true }},
+		{"serve as soon as elected", func(c *broker.Config) { c.UnsafeServeEarly = true }},
+		{"answer reads without the lease", func(c *broker.Config) { c.UnsafeNoLease = true }},
+		{"accept offset commits from any generation", func(c *broker.Config) { c.UnsafeNoFencing = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for first := uint64(1); first <= maxSeeds; first += 100 {
+				for _, res := range runMany(first, 100, tc.mutate) {
+					if res.Err == nil {
+						continue
+					}
+					// Only a seed that passes without the mutation shows
+					// the mutation was caught; otherwise it is a bug.
+					if clean := Run(Config{Seed: res.Seed}); clean.Err != nil {
+						t.Fatalf("seed %d fails without the mutation too: %v\nreproduce: make sim SEED=%d", res.Seed, clean.Err, res.Seed)
+					}
+					t.Logf("caught at seed %d (%s): %v", res.Seed, res.Setup, res.Err)
+					return
+				}
+			}
+			t.Errorf("not caught in %d seeds", maxSeeds)
+		})
 	}
 }
 
-// The same for a vote that is granted before it is on disk: after a crash
-// the node votes again, and one term gets two leaders (S1).
-//
-// The third deliberate bug, committing an earlier term's entry by counting
-// replicas (Figure 8), is not caught here: 1000 seeds passed. It needs a
-// leader whose entries reach one follower and not the other, which this
-// phase's network (delays, no loss) almost never produces. The random
-// schedules in internal/raft do catch it. See docs/reports/phase-5.md.
-func TestSimCatchesVoteWithoutPersist(t *testing.T) {
-	caught := 0
-	results := runMany(1, 200, func(c *broker.Config) { c.UnsafeVoteWithoutPersist = true })
-	for _, res := range results {
-		if res.Err != nil {
-			if caught++; caught == 1 {
-				t.Logf("seed %d (%s): %v", res.Seed, res.Setup, res.Err)
+// L1 fires: a cluster that never elects a leader, and a leader that
+// refuses every write, are both reported once faults stop. The workload
+// runs for a millisecond, so nothing else gets the chance to complain.
+func TestLivenessChecksFire(t *testing.T) {
+	for name, tc := range map[string]struct {
+		mutate func(*broker.Config)
+		want   string
+	}{
+		"no election":    {func(c *broker.Config) { c.ElectionTimeout = time.Hour }, "did not all come back, elect a leader"},
+		"writes refused": {func(c *broker.Config) { c.MaxBatchBytes = 16 }, "L1: on a settled cluster, a produce failed"},
+	} {
+		found := false
+		for seed := uint64(1); seed < 50 && !found; seed++ {
+			res := Run(Config{Seed: seed, Duration: time.Millisecond, Mutate: tc.mutate})
+			if !strings.Contains(res.Setup, "nodes=3") {
+				continue
+			}
+			found = true
+			if res.Err == nil || !strings.Contains(res.Err.Error(), tc.want) {
+				t.Errorf("%s: seed %d: got %v, want an error containing %q", name, seed, res.Err, tc.want)
 			}
 		}
+		if !found {
+			t.Fatalf("%s: no three-node seed below 50", name)
+		}
 	}
-	t.Logf("broken broker caught by %d of %d seeds", caught, len(results))
-	if caught == 0 {
-		t.Fatal("no seed noticed a node that votes before persisting its vote")
+}
+
+// TestRegressions runs every seed in regressions.txt.
+func TestRegressions(t *testing.T) {
+	data, err := os.ReadFile("regressions.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		field, _, _ := strings.Cut(line, "#")
+		if field = strings.TrimSpace(field); field == "" {
+			continue
+		}
+		seed, err := strconv.ParseUint(field, 10, 64)
+		if err != nil {
+			t.Fatalf("regressions.txt: %q is not a seed", line)
+		}
+		if res := Run(Config{Seed: seed}); res.Err != nil {
+			t.Errorf("seed %d: %v\nreproduce: make sim SEED=%d", seed, res.Err, seed)
+		}
 	}
 }

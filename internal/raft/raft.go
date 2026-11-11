@@ -48,6 +48,8 @@ type Env interface {
 	CancelTimer(t Timer)
 	// Rand returns a uniformly distributed value.
 	Rand() uint64
+	// Now returns the current time; used only for the read lease.
+	Now() sys.Instant
 }
 
 // Config configures a Raft instance.
@@ -76,11 +78,30 @@ type Config struct {
 	// the weaker fsync policies mean, and under the strict policy it is a
 	// deliberate bug for the simulator to find.
 	AckBeforeSync bool
-	// UnsafeCommitAnyTerm and UnsafeVoteWithoutPersist are deliberate
-	// bugs: committing entries of earlier terms by counting replicas
-	// (the paper's Figure 8), and granting a vote before it is on disk.
-	UnsafeCommitAnyTerm, UnsafeVoteWithoutPersist bool
+	// Unsafe switches on deliberate bugs, so that tests can prove they
+	// notice each one. Zero in production.
+	Unsafe Mutation
 }
+
+// Mutation is a set of deliberate bugs; see the Mut constants.
+type Mutation uint32
+
+// The deliberate bugs. Each removes one step that safety depends on.
+const (
+	// MutCommitAnyTerm commits an earlier term's entry by counting
+	// replicas (the paper's Figure 8).
+	MutCommitAnyTerm Mutation = 1 << iota
+	// MutVoteWithoutPersist grants a vote before it is on disk.
+	MutVoteWithoutPersist
+	// MutVoteByLength grants a vote to any candidate whose log is at
+	// least as long, whatever its last term.
+	MutVoteByLength
+	// MutTruncateOnStale makes a follower drop every entry beyond the
+	// ones a message carries, even when there is no conflict.
+	MutTruncateOnStale
+)
+
+func (r *Raft) mut(m Mutation) bool { return r.cfg.Unsafe&m != 0 }
 
 // progress is what a leader knows about one follower.
 type progress struct {
@@ -89,6 +110,9 @@ type progress struct {
 	// inflight is set while an AppendEntries awaits its response. It is
 	// cleared by the response or, if that never comes, by the heartbeat.
 	inflight bool
+	// acked is the send time of the latest request this follower has
+	// answered: it will not vote for anyone until ElectionTimeout after.
+	acked sys.Instant
 }
 
 // Raft is one node's consensus state. It is driven by exactly one caller,
@@ -114,8 +138,11 @@ type Raft struct {
 	// A follower answers AppendEntries only once the entries are durable.
 	// ackTo is the leader awaiting that answer (noVote if none), ackIndex
 	// the highest index its messages confirmed, ackEcho what to echo.
-	ackTo             sys.NodeID
-	ackIndex, ackEcho int64
+	ackTo                       sys.NodeID
+	ackIndex, ackEcho, ackStamp int64
+	// contact is when this node last heard from the leader of its term,
+	// or started. Until ElectionTimeout after it, it ignores candidates.
+	contact sys.Instant
 
 	err error
 }
@@ -151,6 +178,7 @@ func (r *Raft) Start() error {
 		return fmt.Errorf("open raft log: %w", err)
 	}
 	r.log = log
+	r.contact = r.env.Now() // it may have answered a leader just before it stopped
 	for off := log.StartOffset(); off < log.EndOffset(); {
 		batches, err := log.Read(off, 4<<20)
 		if err != nil {
@@ -195,6 +223,28 @@ func (r *Raft) Leader() (id sys.NodeID, known bool) { return r.leader, r.leader 
 
 // Committed returns the index below which every entry is committed.
 func (r *Raft) Committed() int64 { return r.commit + 1 }
+
+// Lease reports whether this node leads and may answer reads from its own
+// state: a majority, counting itself, has answered a request it sent less
+// than three quarters of an election timeout ago. Each of them ignores
+// candidates for a full election timeout after such a request, so no
+// other leader can exist yet. The quarter is margin for clocks that run at
+// slightly different rates; the clocks need not agree on the time.
+func (r *Raft) Lease() bool {
+	if r.role != Leader || r.err != nil {
+		return false
+	}
+	now := r.env.Now()
+	times := []sys.Instant{now}
+	for _, id := range r.cfg.Peers {
+		if p := r.peers[id]; p != nil {
+			times = append(times, p.acked)
+		}
+	}
+	slices.Sort(times)
+	held := times[len(times)-1-len(r.cfg.Peers)/2] // the majority-th most recent
+	return now < held+sys.Instant(r.cfg.ElectionTimeout*3/4)
+}
 
 // Durable returns the index below which every entry has been synced.
 func (r *Raft) Durable() int64 { return r.log.DurableOffset() }
@@ -390,7 +440,7 @@ func (r *Raft) Flush() {
 // durable now.
 func (r *Raft) sendAck() {
 	if r.err == nil && r.ackTo != noVote && r.ackIndex <= r.stable() {
-		r.send(r.ackTo, message{typ: msgAppendResponse, ok: true, echo: r.ackEcho, index: r.ackIndex})
+		r.send(r.ackTo, message{typ: msgAppendResponse, ok: true, echo: r.ackEcho, index: r.ackIndex, stamp: r.ackStamp})
 		r.ackTo = noVote
 	}
 }
@@ -411,7 +461,7 @@ func (r *Raft) replicate(to sys.NodeID, p *progress) {
 	if r.err != nil {
 		return
 	}
-	m := message{typ: msgAppendEntries, prevIndex: p.next - 1, commit: r.commit}
+	m := message{typ: msgAppendEntries, prevIndex: p.next - 1, commit: r.commit, stamp: int64(r.env.Now())}
 	if m.prevIndex >= 0 {
 		m.prevTerm = r.terms[m.prevIndex]
 	}
@@ -447,7 +497,7 @@ func (r *Raft) advanceCommit() {
 	// older one that is on a majority can still be overwritten by a
 	// leader that never saw it (Figure 8); it commits along with the
 	// first current-term entry after it.
-	if n > r.commit && (r.terms[n] == r.hard.term || r.cfg.UnsafeCommitAnyTerm) {
+	if n > r.commit && (r.terms[n] == r.hard.term || r.mut(MutCommitAnyTerm)) {
 		r.commit = n
 	}
 }
@@ -472,6 +522,13 @@ func (r *Raft) Step(from sys.NodeID, raw []byte) {
 	}
 	m, err := decodeMessage(raw, r.cfg.Log.MaxPayloadBytes-entryHeader)
 	if err != nil {
+		return
+	}
+	// A node that has a live leader ignores candidates altogether, even
+	// their term: that is what makes the leader's read lease sound, and it
+	// keeps a node returning from a partition from deposing a working
+	// leader (the Raft thesis, section 4.2.3).
+	if m.typ == msgRequestVote && (r.role == Leader || r.env.Now() < r.contact+sys.Instant(r.cfg.ElectionTimeout)) {
 		return
 	}
 	// A higher term always wins: whatever this node was, it is a follower
@@ -511,11 +568,14 @@ func (r *Raft) onRequestVote(from sys.NodeID, m message, stale bool) {
 	// The candidate's log must be at least as up to date as ours: a later
 	// last term wins, and only between equal terms does length decide.
 	upToDate := m.lastTerm > r.lastTerm() || (m.lastTerm == r.lastTerm() && m.lastIndex >= r.LastIndex())
+	if r.mut(MutVoteByLength) {
+		upToDate = m.lastIndex >= r.LastIndex()
+	}
 	grant := !stale && upToDate && (r.hard.votedFor == noVote || r.hard.votedFor == from)
 	if grant {
 		// On disk before the answer leaves: a node that forgot its vote
 		// could give a second one in the same term.
-		r.setHard(r.hard.term, from, !r.cfg.UnsafeVoteWithoutPersist)
+		r.setHard(r.hard.term, from, !r.mut(MutVoteWithoutPersist))
 		r.armElection()
 	}
 	r.send(from, message{typ: msgVoteResponse, ok: grant})
@@ -528,6 +588,7 @@ func (r *Raft) onAppendEntries(from sys.NodeID, m message) {
 	}
 	r.follow(m.term) // a candidate yields to the leader of its term
 	r.leader = from
+	r.contact = r.env.Now()
 	r.armElection()
 
 	// The entry before the new ones must be here with the same term;
@@ -536,7 +597,7 @@ func (r *Raft) onAppendEntries(from sys.NodeID, m message) {
 		// shortcut: the leader steps back one entry per round trip when
 		// terms differ. Send the conflicting term's first index if
 		// catching up a long-diverged follower is ever slow.
-		r.send(from, message{typ: msgAppendResponse, echo: m.prevIndex, index: min(r.LastIndex(), m.prevIndex-1)})
+		r.send(from, message{typ: msgAppendResponse, echo: m.prevIndex, index: min(r.LastIndex(), m.prevIndex-1), stamp: m.stamp})
 		return
 	}
 	for i, e := range m.entries {
@@ -562,18 +623,29 @@ func (r *Raft) onAppendEntries(from sys.NodeID, m message) {
 			return
 		}
 	}
+	confirmed := m.prevIndex + int64(len(m.entries))
+	if r.mut(MutTruncateOnStale) && confirmed < r.LastIndex() && confirmed+1 > r.commit {
+		if err := r.log.TruncateSuffix(confirmed + 1); err != nil {
+			r.fail(fmt.Errorf("truncate raft log at %d: %w", confirmed+1, err))
+			return
+		}
+		r.terms = r.terms[:confirmed+1]
+	}
 	// Only up to the last entry this message vouched for: anything beyond
 	// it in our log may be a stale suffix.
-	confirmed := m.prevIndex + int64(len(m.entries))
 	r.commit = max(r.commit, min(m.commit, confirmed))
 	if r.ackTo != from || confirmed > r.ackIndex {
 		r.ackTo, r.ackIndex, r.ackEcho = from, confirmed, m.prevIndex
 	}
-	r.sendAck() // at once if nothing new needs syncing; otherwise after Flush
+	r.ackStamp = max(r.ackStamp, m.stamp) // only the newest contact matters to the lease
+	r.sendAck()                           // at once if nothing new needs syncing; otherwise after Flush
 }
 
 func (r *Raft) onAppendResponse(from sys.NodeID, m message) {
 	p := r.peers[from]
+	// Refusals count too: the follower heard us. A stamp from the future
+	// can only come from a broken peer; it buys nothing.
+	p.acked = max(p.acked, min(sys.Instant(m.stamp), r.env.Now()))
 	switch {
 	case m.ok && m.index <= r.LastIndex():
 		p.match = max(p.match, m.index) // responses can arrive out of order

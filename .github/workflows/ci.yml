@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "17 2 * * *" # nightly: the long simulator run below
 
 permissions:
   contents: read
@@ -33,7 +35,12 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - run: make sim SEEDS=3000
+      # Per push: 3000 seeds (about 35 seeds/s on a 10-core laptop).
+      # Nightly: 30000, from a different first seed each night.
+      - if: github.event_name != 'schedule'
+        run: make sim SEEDS=3000
+      - if: github.event_name == 'schedule'
+        run: go test ./internal/sim -count=1 -v -timeout 5h -run '^TestSim$' -seeds=30000 -base-seed=$(( $(date +%s) / 86400 * 30000 ))
 
   lint:
     runs-on: ubuntu-latest

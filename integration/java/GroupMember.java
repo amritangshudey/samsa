@@ -29,6 +29,11 @@ public class GroupMember {
         p.put("auto.offset.reset", "earliest");
         p.put("session.timeout.ms", "6000"); // so that a killed member is noticed quickly
         p.put("heartbeat.interval.ms", "500");
+        // With one broker, a broker restart leaves no broker reachable, and the
+        // default ("rebootstrap") then empties the client's cached metadata. The
+        // group leader sees its topic vanish and rejoins: a client decision that
+        // says nothing about the broker. See docs/BUGS.md, M7.
+        p.put("metadata.recovery.strategy", "none");
         try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(p)) {
             consumer.subscribe(List.of(args[1]), new ConsumerRebalanceListener() {
                 public void onPartitionsRevoked(Collection<TopicPartition> parts) {
