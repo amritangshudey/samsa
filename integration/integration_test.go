@@ -146,8 +146,6 @@ func franz(t *testing.T, b *broker, opts ...kgo.Opt) *kgo.Client {
 	t.Helper()
 	opts = append([]kgo.Opt{
 		kgo.SeedBrokers(b.addr),
-		// The broker does not implement the idempotent producer (a stated non-goal).
-		kgo.DisableIdempotentWrite(),
 		kgo.RecordPartitioner(kgo.ManualPartitioner()),
 		kgo.RequiredAcks(kgo.AllISRAcks()),
 	}, opts...)
@@ -317,7 +315,7 @@ func TestKcatRoundTrip(t *testing.T) {
 		t.Helper()
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, kcat, append([]string{"-b", b.addr, "-X", "enable.idempotence=false"}, args...)...)
+		cmd := exec.CommandContext(ctx, kcat, append([]string{"-b", b.addr, "-X", "enable.idempotence=true"}, args...)...)
 		cmd.Stdin = strings.NewReader(stdin)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr

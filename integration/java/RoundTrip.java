@@ -35,8 +35,7 @@ public class RoundTrip {
         pp.put("key.serializer", "org.apache.kafka.common.serialization.StringSerializer");
         pp.put("value.serializer", "org.apache.kafka.common.serialization.StringSerializer");
         pp.put("acks", "all");
-        // The broker does not implement the idempotent producer (a stated non-goal).
-        pp.put("enable.idempotence", "false");
+        // Idempotence is left at the client's default, which is on.
         try (KafkaProducer<String, String> producer = new KafkaProducer<>(pp)) {
             List<java.util.concurrent.Future<?>> sent = new ArrayList<>();
             for (int i = 0; i < n; i++) {
