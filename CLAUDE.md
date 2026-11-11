@@ -109,6 +109,8 @@ again if the developer withdraws this instruction.
 | `make integration` | Real clients (franz-go, kcat, Java) against the binary; needs kcat and a JDK |
 | `make sim SEEDS=n` | Run n seeds of the simulator (default 1000); failures print their seed |
 | `make sim SEED=x` | Replay one seed with its full event trace |
+| `make bench` | Throughput and latency of the binary (about 20 min); writes `bench.md` |
+| `make release VERSION=vX.Y.Z` | Binaries for macOS and Linux, arm64 and amd64, and checksums, in `dist/` |
 
 Run the broker: `./bin/samsa -listen localhost:9092 -data ./data`
 (`-sync always|interval|never`, `-log-level debug` to see each request).
@@ -132,4 +134,6 @@ the Raft safety monitor in `monitor.go`, the peer network and partition
 scenarios in `network.go`; seeds that once failed are in
 `regressions.txt`). `realsys/peer.go` is the TCP transport between nodes.
 `integration/` is a separate Go module so that client libraries never enter
-the broker's `go.mod`.
+the broker's `go.mod`; it also holds the benchmark (`bench_test.go`) and
+the quick start's topic tool (`cmd/topic`). The code as built is described
+in `docs/ARCHITECTURE.md`.
