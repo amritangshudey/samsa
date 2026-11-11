@@ -240,6 +240,10 @@ func (n *Node) completeFetch(f *parkedFetch) {
 		}
 	}
 	n.clock.CancelTimer(f.timer)
+	if !n.canRead() { // the lease ran out while it waited
+		n.respond(f.c, f.h, refusal(f.req))
+		return
+	}
 	resp, _, _ := n.buildFetch(f.req)
 	n.respond(f.c, f.h, resp)
 }

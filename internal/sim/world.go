@@ -50,6 +50,7 @@ type Stats struct {
 	// Clusters only: terms that had a leader, requests refused by a node
 	// that was not serving, and replica comparisons made (S4).
 	Leaders, NotLeader, ReplicasCompared int
+	Partitions                           int
 }
 
 // simNode is one machine of the cluster: a disk that outlives the
@@ -76,8 +77,9 @@ type world struct {
 	conns    map[sys.ConnID]*conn
 	nextConn sys.ConnID
 	// The monitor's memory; see monitor.go.
-	leaders   map[int64]int32 // S1: who led each term
-	committed []int64         // S3: the term of each entry first seen committed
+	leaders   map[int64]int32   // S1: who led each term
+	committed []int64           // S3: the term of each entry first seen committed
+	cut       map[[2]int32]bool // directed links that drop everything; see network.go
 
 	model   *Model
 	clients []*client
@@ -224,29 +226,9 @@ func (inc *incarnation) Send(id sys.ConnID, p []byte) {
 	})
 }
 
-// SendPeer implements sys.Network. In this phase the network between
-// nodes loses nothing: a message arrives after a random delay, whole, once,
-// unless its receiver is down then. Messages can overtake one another.
+// SendPeer implements sys.Network; network.go decides the message's fate.
 func (inc *incarnation) SendPeer(to sys.NodeID, msg []byte) {
-	w, from := inc.w, inc.node
-	own := append([]byte(nil), msg...) // the node may reuse msg
-	for _, nd := range w.nodes {
-		if nd.id != int32(to) {
-			continue
-		}
-		// Usually as quick as a client's bytes; now and then slow enough
-		// to be overtaken by many messages and to outlast a heartbeat.
-		delay := w.netDelay()
-		if w.rng.Chance(0.1) {
-			delay = time.Duration(w.rng.Intn(int(w.bcfg.ElectionTimeout / 2)))
-		}
-		w.after(delay, func() {
-			if t := nd.inc; t != nil && !t.dead {
-				w.note(nd.tag("peer"), uint64(from.id), own)
-				w.call(t, t.n.OnPeerMessage(sys.NodeID(from.id), own))
-			}
-		})
-	}
+	inc.w.sendPeer(inc.node, int32(to), append([]byte(nil), msg...)) // the node may reuse msg
 }
 
 // Close implements sys.Network.
@@ -388,7 +370,7 @@ func (w *world) chaos() {
 	if w.quiet || len(w.opts.faults) == 0 {
 		return
 	}
-	if nd := w.nodes[w.rng.Intn(len(w.nodes))]; nd.inc != nil {
+	if nd := w.target(); nd.inc != nil {
 		switch w.opts.faults[w.rng.Intn(len(w.opts.faults))] {
 		case faultPower:
 			w.down(nd, true, "power loss")

@@ -131,6 +131,7 @@ func randomRun(seed uint64, mutate func(*Config)) error {
 			continue
 		case r < crashes+12 && n.armed[TimerElection]:
 			n.armed[TimerElection] = false
+			c.passTime()
 			n.r.OnTimer(TimerElection)
 		case r < 120 && n.armed[TimerHeartbeat]:
 			n.armed[TimerHeartbeat] = false
@@ -196,6 +197,7 @@ func randomRun(seed uint64, mutate func(*Config)) error {
 			}
 		}
 		if !leader && len(c.queue) == 0 {
+			c.passTime()
 			c.r(c.ids[round%len(c.ids)]).OnTimer(TimerElection)
 		}
 	}
@@ -227,9 +229,11 @@ func TestRandomSchedules(t *testing.T) {
 // TestRandomSchedules mean nothing.
 func TestRandomSchedulesCatchBrokenRaft(t *testing.T) {
 	for name, mutate := range map[string]func(*Config){
-		"commit by counting replicas of any term": func(c *Config) { c.UnsafeCommitAnyTerm = true },
-		"vote granted before it is on disk":       func(c *Config) { c.UnsafeVoteWithoutPersist = true },
+		"commit by counting replicas of any term": func(c *Config) { c.Unsafe = MutCommitAnyTerm },
+		"vote granted before it is on disk":       func(c *Config) { c.Unsafe = MutVoteWithoutPersist },
 		"entries acknowledged before sync":        func(c *Config) { c.AckBeforeSync = true },
+		"vote by log length only":                 func(c *Config) { c.Unsafe = MutVoteByLength },
+		"follower truncates on a stale message":   func(c *Config) { c.Unsafe = MutTruncateOnStale },
 	} {
 		caught := false
 		for seed := range uint64(3000) {

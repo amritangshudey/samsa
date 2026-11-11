@@ -2,11 +2,22 @@ package broker
 
 import "github.com/amritangshudey/samsa/internal/wire"
 
+// canRead reports whether this node may answer requests that only the
+// leader answers: it serves, and holds the lease, so no other node can
+// have been elected and accepted writes it has not seen (ADR 0013).
+//
+// Writes need it too. A write is decided by the log, but its refusals are
+// not: "unknown topic" for a produce, or for an offset commit, is read
+// from applied state before anything is proposed (BUGS.md S4).
+func (n *Node) canRead() bool {
+	return n.serving && (n.cfg.UnsafeNoLease || n.raft.Lease())
+}
+
 // leader returns the node that this one believes leads the cluster. A
-// node names itself only once it is serving: until then it would refuse
-// the requests that a client sends to a leader.
+// node names itself only while it can answer reads: otherwise it would
+// refuse the requests a client sends to a leader.
 func (n *Node) leader() (Peer, bool) {
-	if id, ok := n.raft.Leader(); ok && (int32(id) != n.cfg.NodeID || n.serving) {
+	if id, ok := n.raft.Leader(); ok && (int32(id) != n.cfg.NodeID || n.canRead()) {
 		for _, p := range n.cfg.Peers {
 			if p.ID == int32(id) {
 				return p, true

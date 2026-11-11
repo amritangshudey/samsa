@@ -41,6 +41,7 @@ func (n *tnode) SetTimer(t Timer, _ time.Duration) {
 }
 func (n *tnode) CancelTimer(t Timer) { n.armed[t] = false }
 func (n *tnode) Rand() uint64        { return n.c.rng.Uint64() }
+func (n *tnode) Now() sys.Instant    { return n.c.now }
 
 // cluster is a set of Raft nodes with no network and no clock: the test
 // decides which message is delivered and which timer fires.
@@ -51,6 +52,7 @@ type cluster struct {
 	nodes  map[sys.NodeID]*tnode
 	queue  []tmsg
 	mutate func(*Config)
+	now    sys.Instant // moved only by election timers; see passTime
 	// manualFlush stops run from flushing nodes, for tests about what
 	// happens before entries are durable.
 	manualFlush bool
@@ -153,9 +155,18 @@ func (c *cluster) fire(id sys.NodeID, t Timer) {
 		c.t.Fatalf("node %d: timer %d is not armed", id, t)
 	}
 	n.armed[t] = false
+	if t == TimerElection {
+		c.passTime()
+	}
 	n.r.OnTimer(t)
 	c.settle(n)
 }
+
+// passTime moves the clock by two election timeouts, the most an election
+// timer can take: an election timer that fires means at least that much
+// time has passed for its node. Moving everyone's clock is the weakest
+// assumption, since every node then forgets its leader.
+func (c *cluster) passTime() { c.now += sys.Instant(2 * 300 * time.Millisecond) }
 
 // elect makes id the leader with the votes of everyone who will give one.
 func (c *cluster) elect(id sys.NodeID) {
@@ -290,7 +301,7 @@ func TestVoteSurvivesPowerLoss(t *testing.T) {
 	if votesTwice(nil) {
 		t.Error("a node voted twice in one term after a power loss")
 	}
-	if !votesTwice(func(c *Config) { c.UnsafeVoteWithoutPersist = true }) {
+	if !votesTwice(func(c *Config) { c.Unsafe = MutVoteWithoutPersist }) {
 		t.Error("the vote was not lost even without persisting it: this test proves nothing")
 	}
 }
@@ -349,7 +360,7 @@ func TestFigure8(t *testing.T) {
 	if committed(nil) {
 		t.Error("an entry of an earlier term was committed by counting replicas")
 	}
-	if !committed(func(c *Config) { c.UnsafeCommitAnyTerm = true }) {
+	if !committed(func(c *Config) { c.Unsafe = MutCommitAnyTerm }) {
 		t.Error("the entry was not committed even with the rule removed: this test proves nothing")
 	}
 }
@@ -455,9 +466,16 @@ func TestTermAndVoteRules(t *testing.T) {
 	c.fire(3, TimerElection)
 	c.queue = nil            // term 2, lost
 	c.fire(3, TimerElection) // term 3
-	c.run(only(3, 1))        // node 1 sees term 3, steps down, refuses: its log is ahead
-	if c.r(1).Role() != Follower || c.r(1).Term() != 3 || c.r(3).Role() == Leader {
-		t.Fatalf("node 1 role %d term %d; node 3 role %d", c.r(1).Role(), c.r(1).Term(), c.r(3).Role())
+	c.run(only(3, 2))        // node 2 sees term 3 and refuses: its log is ahead
+	if c.r(2).Term() != 3 || c.r(2).hard.votedFor != noVote || c.r(3).Role() == Leader {
+		t.Fatalf("node 2 term %d voted for %d; node 3 role %d", c.r(2).Term(), c.r(2).hard.votedFor, c.r(3).Role())
+	}
+	// A leader ignores candidates (the lease); it learns of term 3 from
+	// node 2's answer to its heartbeat, and steps down.
+	c.fire(1, TimerHeartbeat)
+	c.run(only(1, 2))
+	if c.r(1).Role() != Follower || c.r(1).Term() != 3 {
+		t.Fatalf("node 1 role %d term %d", c.r(1).Role(), c.r(1).Term())
 	}
 	if _, err := c.r(1).Propose([]byte("z")); !errors.Is(err, ErrNotLeader) { // bug 10
 		t.Fatalf("propose on a deposed leader: %v", err)
@@ -468,13 +486,10 @@ func TestTermAndVoteRules(t *testing.T) {
 	if c.r(1).Term() != 3 || c.r(1).hard.votedFor != noVote {
 		t.Fatalf("after restart: term %d, voted for %d", c.r(1).Term(), c.r(1).hard.votedFor)
 	}
-	// Node 2 (log: noop a b, last term 1) asks for a vote in term 4.
-	// Node 1 has the same log and grants it, once.
-	// (Its first attempt, in term 2, only teaches it that term 3 exists.)
-	for range 2 {
-		c.fire(2, TimerElection)
-		c.run(only(1, 2))
-	}
+	// Node 2 (log: noop a b, last term 1; it saw term 3) asks for a vote
+	// in term 4. Node 1 has the same log and grants it, once.
+	c.fire(2, TimerElection)
+	c.run(only(1, 2))
 	if c.r(2).Role() != Leader || c.r(2).Term() != 4 || c.r(1).hard.votedFor != 2 {
 		t.Fatalf("node 2 role %d; node 1 voted for %d", c.r(2).Role(), c.r(1).hard.votedFor)
 	}
@@ -482,6 +497,7 @@ func TestTermAndVoteRules(t *testing.T) {
 	// log of a newer term.
 	ask := func(lastIndex, lastTerm int64) bool {
 		c.queue = nil
+		c.passTime() // node 1 has heard from leader 2: let that age
 		term := c.r(1).Term() + 1
 		c.r(1).Step(3, (&message{typ: msgRequestVote, term: term, lastIndex: lastIndex, lastTerm: lastTerm}).encode())
 		m, err := decodeMessage(c.queue[len(c.queue)-1].raw, 100)

@@ -49,6 +49,10 @@ type message struct {
 	prevIndex, prevTerm, commit int64
 	entries                     []entry
 
+	// AppendEntries: the leader's clock when it sent the message.
+	// AppendResponse: the stamp of the request answered (the lease).
+	stamp int64
+
 	// AppendResponse. echo is the prevIndex of the request answered. On
 	// success, index is the highest index the follower knows to match the
 	// leader's log and holds durably. On refusal it is a hint: the leader
@@ -79,6 +83,7 @@ func (m *message) encode() []byte {
 		i64(m.prevIndex)
 		i64(m.prevTerm)
 		i64(m.commit)
+		i64(m.stamp)
 		b = binary.BigEndian.AppendUint32(b, uint32(len(m.entries)))
 		for _, e := range m.entries {
 			i64(e.term)
@@ -90,6 +95,7 @@ func (m *message) encode() []byte {
 		flag(m.ok)
 		i64(m.echo)
 		i64(m.index)
+		i64(m.stamp)
 	}
 	return b
 }
@@ -127,7 +133,7 @@ func decodeMessage(b []byte, maxCmd int) (message, error) {
 	case msgVoteResponse:
 		m.ok = flag()
 	case msgAppendEntries:
-		m.prevIndex, m.prevTerm, m.commit = i64(), i64(), i64()
+		m.prevIndex, m.prevTerm, m.commit, m.stamp = i64(), i64(), i64(), i64()
 		n := int(binary.BigEndian.Uint32(take(4)))
 		// An entry takes at least 13 bytes, which bounds n by the input.
 		bad = bad || m.prevIndex < -1 || m.prevTerm < 0 || m.commit < -1 || n > len(b)/13
@@ -142,7 +148,7 @@ func decodeMessage(b []byte, maxCmd int) (message, error) {
 		}
 	case msgAppendResponse:
 		m.ok = flag()
-		m.echo, m.index = i64(), i64()
+		m.echo, m.index, m.stamp = i64(), i64(), i64()
 		bad = bad || m.echo < -1 || m.index < -1
 	default:
 		bad = true
