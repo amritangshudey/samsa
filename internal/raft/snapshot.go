@@ -115,7 +115,7 @@ func (s *snapshot) expand() []int64 {
 // loadSnapshot returns the stored snapshot and its bytes, or one with index
 // -1 if none was ever stored.
 func loadSnapshot(disk sys.Disk, dir string) (snapshot, []byte, error) {
-	b, err := readFile(disk, path.Join(dir, snapshotName))
+	b, err := ReadFile(disk, path.Join(dir, snapshotName))
 	if err != nil || b == nil {
 		return snapshot{index: -1}, nil, err
 	}
@@ -213,8 +213,8 @@ func decodeInstall(b []byte) (cut int64, s snapshot, raw []byte, err error) {
 	return cut, s, raw, err
 }
 
-// readFile returns a whole file, or nil if it does not exist.
-func readFile(disk sys.Disk, name string) ([]byte, error) {
+// ReadFile returns a whole file, or nil if it does not exist.
+func ReadFile(disk sys.Disk, name string) ([]byte, error) {
 	f, err := disk.Open(name, sys.ReadOnly)
 	if errors.Is(err, sys.ErrNotExist) {
 		return nil, nil

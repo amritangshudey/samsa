@@ -190,6 +190,12 @@ func messages() map[string]struct {
 			func() Message { return &SyncGroupRequest{} }},
 		"SyncGroupResponse": {KeySyncGroup, &SyncGroupResponse{ErrorCode: 22, Assignment: []byte("a")},
 			func() Message { return &SyncGroupResponse{} }},
+		"InitProducerIdRequest": {KeyInitProducerID, &InitProducerIDRequest{},
+			func() Message { return &InitProducerIDRequest{} }},
+		"InitProducerIdRequestTransactional": {KeyInitProducerID, &InitProducerIDRequest{Transactional: true},
+			func() Message { return &InitProducerIDRequest{} }},
+		"InitProducerIdResponse": {KeyInitProducerID, &InitProducerIDResponse{ErrorCode: 42, ProducerID: 1<<47 | 5, ProducerEpoch: 3},
+			func() Message { return &InitProducerIDResponse{} }},
 	}
 }
 
@@ -274,6 +280,9 @@ func TestSupported(t *testing.T) {
 		{KeyFetch, 11, true},
 		{KeyAPIVersions, 4, true},
 		{KeyAPIVersions, 5, false},
+		{KeyInitProducerID, 0, true},
+		{KeyInitProducerID, 4, true},
+		{KeyInitProducerID, 5, false}, // adds only an error for transactions
 		{99, 0, false},
 	}
 	for _, tt := range tests {
@@ -355,5 +364,49 @@ func TestFetchResponseEncodesNoRecordsAsEmpty(t *testing.T) {
 	(&FetchResponse{Topics: []FetchTopicResponse{{Name: "t", Partitions: []FetchPartitionResponse{{HighWatermark: 3}}}}}).Encode(&w, 11)
 	if !bytes.HasSuffix(w.B, []byte{0, 0, 0, 0}) {
 		t.Fatalf("empty record set not encoded as length 0: % x", w.B[len(w.B)-8:])
+	}
+}
+
+// A batch says which producer sent it in its header; the CRC covers those
+// fields, so stamping them must leave a valid batch.
+func TestBatchProducerFields(t *testing.T) {
+	b := EncodeBatch([]Record{{Value: []byte("a")}, {Value: []byte("b")}, {Value: []byte("c")}})
+	info, code := ParseBatch(b, 1<<20)
+	if code != ErrNone || info.ProducerID != -1 || info.ProducerEpoch != -1 || info.BaseSequence != -1 {
+		t.Fatalf("plain batch: %+v, error %d", info, code)
+	}
+	SetBatchProducer(b, 1<<40|7, 2, 40)
+	info, code = ParseBatch(b, 1<<20)
+	if code != ErrNone || info.ProducerID != 1<<40|7 || info.ProducerEpoch != 2 || info.BaseSequence != 40 || info.Count != 3 {
+		t.Fatalf("stamped batch: %+v, error %d", info, code)
+	}
+	if peek, ok := PeekBatch(b); !ok || peek.ProducerID != info.ProducerID || peek.ProducerEpoch != 2 || peek.BaseSequence != 40 || peek.Count != 3 {
+		t.Fatalf("PeekBatch = %+v, %v", peek, ok)
+	}
+	if _, records, err := DecodeBatch(b); err != nil || len(records) != 3 || string(records[2].Value) != "c" {
+		t.Fatalf("records after stamping: %v, %v", records, err)
+	}
+	// LogValidator.java: a producer id needs a sequence.
+	SetBatchProducer(b, 7, 0, -1)
+	if _, code := ParseBatch(b, 1<<20); code != ErrInvalidRecord {
+		t.Errorf("producer id without a sequence: error %d, want %d", code, ErrInvalidRecord)
+	}
+	// Without a producer id the other two fields mean nothing.
+	SetBatchProducer(b, -1, 5, -9)
+	if _, code := ParseBatch(b, 1<<20); code != ErrNone {
+		t.Errorf("no producer id: error %d", code)
+	}
+}
+
+// AddSequence is DefaultRecordBatch.incrementSequence: sequences run from 0
+// to 2^31-1 and then start again at 0.
+func TestAddSequence(t *testing.T) {
+	const top = 1<<31 - 1
+	for _, tt := range []struct{ seq, n, want int32 }{
+		{0, 0, 0}, {5, 3, 8}, {top - 1, 1, top}, {top, 1, 0}, {top, 5, 4}, {top - 1, 3, 1}, {top, top, top - 1},
+	} {
+		if got := AddSequence(tt.seq, tt.n); got != tt.want {
+			t.Errorf("AddSequence(%d, %d) = %d, want %d", tt.seq, tt.n, got, tt.want)
+		}
 	}
 }

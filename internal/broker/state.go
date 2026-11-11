@@ -59,6 +59,80 @@ type partition struct {
 	next    int64 // offset the next record will get; also the high watermark
 	start   int64 // first offset still available; below it, trimmed away
 	batches []batchRef
+	// producers is what the partition remembers of each idempotent
+	// producer that wrote to it. It is per partition because a client moves
+	// its partitions to a new epoch one at a time.
+	// shortcut: never dropped, so it grows with every producer session;
+	// part (b) of docs/design/a2-idempotent-producer.md expires them.
+	producers map[int64]*producer
+}
+
+// maxProducerBatches is how many of a producer's latest batches a partition
+// remembers, to recognise a retry: clients keep at most that many in flight
+// (ProducerStateEntry.NUM_BATCHES_TO_RETAIN).
+const maxProducerBatches = 5
+
+// sentBatch is one batch accepted from a producer.
+type sentBatch struct {
+	first, last int32 // sequence numbers of its first and last record
+	base        int64 // offset it was appended at
+}
+
+// producer is one idempotent producer, as one partition knows it.
+type producer struct {
+	epoch   int16
+	batches []sentBatch // the latest, oldest first; never empty
+}
+
+// admit applies the idempotence rules to a batch that names a producer:
+// docs/design/a2-idempotent-producer.md, section 2, copied from Kafka's
+// ProducerAppendInfo and ProducerStateEntry. dup is the offset of the batch
+// this one repeats, or -1; a code other than ErrNone refuses the batch.
+func (p *partition) admit(b wire.BatchInfo) (dup int64, code int16) {
+	ps := p.producers[b.ProducerID]
+	switch {
+	case ps == nil:
+		// A partition never written cannot have forgotten a producer, so a
+		// producer must start at 0 there. Anywhere else its state may have
+		// expired, and it continues where it was.
+		if p.next == 0 && b.BaseSequence != 0 {
+			return -1, wire.ErrOutOfOrderSequenceNumber
+		}
+		return -1, wire.ErrNone
+	case b.ProducerEpoch < ps.epoch:
+		return -1, wire.ErrInvalidProducerEpoch
+	case b.ProducerEpoch > ps.epoch:
+		if b.BaseSequence != 0 {
+			return -1, wire.ErrOutOfOrderSequenceNumber
+		}
+		return -1, wire.ErrNone
+	}
+	last := wire.AddSequence(b.BaseSequence, b.Count-1)
+	for _, k := range ps.batches {
+		if k.first == b.BaseSequence && k.last == last {
+			return k.base, wire.ErrNone
+		}
+	}
+	if b.BaseSequence != wire.AddSequence(ps.batches[len(ps.batches)-1].last, 1) {
+		return -1, wire.ErrOutOfOrderSequenceNumber
+	}
+	return -1, wire.ErrNone
+}
+
+// remember records a batch that admit let in and that was appended at base.
+func (p *partition) remember(b wire.BatchInfo, base int64) {
+	ps := p.producers[b.ProducerID]
+	if ps == nil || ps.epoch != b.ProducerEpoch { // a new epoch forgets the old one's batches
+		if p.producers == nil {
+			p.producers = map[int64]*producer{}
+		}
+		ps = &producer{epoch: b.ProducerEpoch}
+		p.producers[b.ProducerID] = ps
+	}
+	if len(ps.batches) == maxProducerBatches {
+		ps.batches = ps.batches[:copy(ps.batches, ps.batches[1:])]
+	}
+	ps.batches = append(ps.batches, sentBatch{b.BaseSequence, wire.AddSequence(b.BaseSequence, b.Count-1), base})
 }
 
 // encodeTrim is the retention command: every batch stored below log index
@@ -84,8 +158,9 @@ type state struct {
 	topics   map[string]*topic
 	names    []string // sorted, for deterministic listing
 	groups   map[string]*group
-	// noFencing is Config.UnsafeNoFencing: a deliberate bug.
-	noFencing bool
+	// noFencing is Config.UnsafeNoFencing, noSequences
+	// Config.UnsafeNoSequenceCheck: deliberate bugs.
+	noFencing, noSequences bool
 }
 
 func newState() *state { return &state{topics: map[string]*topic{}, groups: map[string]*group{}} }
@@ -289,7 +364,7 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 
 	case cmdAppend:
 		name, part := r.String(false), r.Int32()
-		count, maxTime, ok := wire.PeekBatch(r.Rest())
+		info, ok := wire.PeekBatch(r.Rest())
 		if r.Err() != nil || !ok {
 			return result{}, fmt.Errorf("%w: append at index %d", errBadCommand, index)
 		}
@@ -297,9 +372,23 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 		if p == nil {
 			return result{errCode: wire.ErrUnknownTopicOrPartition, baseOffset: -1}, nil
 		}
+		idempotent := info.ProducerID >= 0 && !s.noSequences
+		if idempotent {
+			// Refused or repeated, the entry stays in the log and changes
+			// nothing: only here, after everything before it, is it known
+			// which of the two it is.
+			if dup, code := p.admit(info); code != wire.ErrNone {
+				return result{errCode: code, baseOffset: -1}, nil
+			} else if dup >= 0 {
+				return result{baseOffset: dup}, nil
+			}
+		}
 		base := p.next
-		p.batches = append(p.batches, batchRef{base: base, logIndex: index, maxTimestamp: maxTime})
-		p.next += int64(count)
+		p.batches = append(p.batches, batchRef{base: base, logIndex: index, maxTimestamp: info.MaxTimestamp})
+		p.next += int64(info.Count)
+		if idempotent {
+			p.remember(info, base)
+		}
 		return result{baseOffset: base}, nil
 
 	case cmdOffsetCommit:
@@ -425,6 +514,14 @@ func (s *state) hash() uint32 {
 			add(p.next, p.start, int64(len(p.batches)))
 			for _, b := range p.batches {
 				add(b.base, b.logIndex, b.maxTimestamp)
+			}
+			add(int64(len(p.producers)))
+			for _, id := range sortedKeys(p.producers) {
+				ps := p.producers[id]
+				add(id, int64(ps.epoch), int64(len(ps.batches)))
+				for _, b := range ps.batches {
+					add(int64(b.first), int64(b.last), b.base)
+				}
 			}
 		}
 	}

@@ -99,6 +99,9 @@ type Config struct {
 	// UnsafeTrimEarly deletes log segments as soon as a Trim is applied,
 	// before a snapshot covers it.
 	UnsafeTrimEarly bool
+	// UnsafeNoSequenceCheck appends every batch of an idempotent producer,
+	// retries and gaps included.
+	UnsafeNoSequenceCheck bool
 	// UnsafeNoFencing breaks zombie fencing on purpose: an offset commit
 	// from a member is accepted whatever generation it carries.
 	UnsafeNoFencing bool
@@ -196,6 +199,7 @@ type Node struct {
 	log   *slog.Logger
 
 	raft    *raft.Raft
+	pids    producerIDs
 	st      *state
 	applied int64 // every log entry below this index has been applied
 	// serving is set while this node leads and has applied an entry of
@@ -225,13 +229,20 @@ type Node struct {
 // random source. It does nothing until the driver calls OnStart.
 func New(cfg Config, clock sys.Clock, net sys.Network, disk sys.Disk, rand sys.Random) *Node {
 	cfg = cfg.withDefaults()
-	st := newState()
-	st.noFencing = cfg.UnsafeNoFencing
-	return &Node{
+	n := &Node{
 		cfg: cfg, clock: clock, net: net, disk: disk, rand: rand, log: cfg.Logger,
-		st: st, trimmedAt: -1, conns: map[sys.ConnID]*conn{}, nextTimer: firstFreeTimer,
+		trimmedAt: -1, conns: map[sys.ConnID]*conn{}, nextTimer: firstFreeTimer,
 		timers: map[sys.TimerID]func(){}, groups: map[string]*softGroup{},
 	}
+	n.adopt(newState())
+	return n
+}
+
+// adopt makes st the node's state. The deliberate bugs are switches of the
+// configuration, not state: they are set again on whatever state arrives.
+func (n *Node) adopt(st *state) {
+	st.noFencing, st.noSequences = n.cfg.UnsafeNoFencing, n.cfg.UnsafeNoSequenceCheck
+	n.st = st
 }
 
 // raftEnv is the node as Raft sees it.
@@ -263,6 +274,9 @@ func (n *Node) ackBeforeSync() bool {
 // alone in its cluster learns that before OnStart returns, any other node
 // once it hears from, or becomes, a leader.
 func (n *Node) OnStart() error {
+	if n.cfg.NodeID < 0 || n.cfg.NodeID > maxNodeID {
+		return errNodeIDForProducers
+	}
 	peers := make([]sys.NodeID, len(n.cfg.Peers))
 	for i, p := range n.cfg.Peers {
 		peers[i] = sys.NodeID(p.ID)
@@ -280,13 +294,19 @@ func (n *Node) OnStart() error {
 	if err := n.raft.Start(); err != nil {
 		return err
 	}
+	// Before any request: an id from a block that is not on disk could be
+	// handed out again by the next life of this node.
+	n.pids = producerIDs{disk: n.disk, dir: n.cfg.Dir, node: int64(n.cfg.NodeID)}
+	if err := n.pids.reserve(); err != nil {
+		return err
+	}
 	if i, b := n.raft.Snapshot(); i >= 0 {
 		st, err := decodeState(b)
 		if err != nil {
 			return fmt.Errorf("snapshot at %d: %w", i, err)
 		}
-		st.noFencing = n.cfg.UnsafeNoFencing // a switch, not state
-		n.st, n.applied = st, i+1
+		n.adopt(st)
+		n.applied = i + 1
 	}
 	// A single node has elected itself; one sync makes its whole log
 	// committed, so it serves from the first request on.
@@ -495,8 +515,8 @@ func (n *Node) advance() {
 			n.fatal = fmt.Errorf("installed snapshot at %d: %w", i, err)
 			return
 		}
-		st.noFencing = n.cfg.UnsafeNoFencing
-		n.st, n.applied, n.trimmedAt = st, i+1, -1
+		n.adopt(st)
+		n.applied, n.trimmedAt = i+1, -1
 		n.log.Info("installed snapshot", "index", i)
 	}
 	appended := false
@@ -685,6 +705,9 @@ func (n *Node) dispatch(c *conn, frame []byte) {
 	case wire.KeyOffsetFetch:
 		m := &wire.OffsetFetchRequest{}
 		req, handle = m, func() { n.respond(c, h, n.offsetFetch(m)) }
+	case wire.KeyInitProducerID:
+		m := &wire.InitProducerIDRequest{}
+		req, handle = m, func() { n.respond(c, h, n.initProducerID(m)) }
 	default: // unreachable while wire.APIs and this switch agree
 		n.drop(c, fmt.Sprintf("no handler for key %d", h.Key))
 		return

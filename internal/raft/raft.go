@@ -200,7 +200,7 @@ func (r *Raft) Start() error {
 	if r.latest, r.latestBytes, err = loadSnapshot(r.disk, r.cfg.Dir); err != nil {
 		return err
 	}
-	marker, err := readFile(r.disk, path.Join(r.cfg.Dir, installName))
+	marker, err := ReadFile(r.disk, path.Join(r.cfg.Dir, installName))
 	if err != nil {
 		return err
 	}
