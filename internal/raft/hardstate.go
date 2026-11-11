@@ -78,32 +78,39 @@ func (f *hardStateFile) save(hs hardState) error {
 	b = binary.BigEndian.AppendUint32(b, uint32(hs.votedFor))
 	b = binary.BigEndian.AppendUint32(b, crc32.Checksum(b, castagnoli))
 
-	tmp, name := path.Join(f.dir, "hardstate.tmp"), path.Join(f.dir, "hardstate")
-	file, err := f.disk.Open(tmp, sys.Create)
+	return writeAtomic(f.disk, f.dir, "hardstate", b, f.skipSync, f.skipDirSync)
+}
+
+// writeAtomic replaces dir/name with b, durably: after a crash the file
+// holds either b or what it held before, never anything else. skipSync and
+// skipDirSync each remove one step, for tests that prove a crash test notices.
+func writeAtomic(disk sys.Disk, dir, name string, b []byte, skipSync, skipDirSync bool) error {
+	tmp, final := path.Join(dir, name+".tmp"), path.Join(dir, name)
+	file, err := disk.Open(tmp, sys.Create)
 	if err != nil {
-		return fmt.Errorf("create hard state: %w", err)
+		return fmt.Errorf("create %s: %w", name, err)
 	}
 	defer file.Close()                       //nolint:errcheck // synced below; close cannot lose data
 	if err := file.Truncate(0); err != nil { // a crash may have left an old one
-		return fmt.Errorf("truncate hard state: %w", err)
+		return fmt.Errorf("truncate %s: %w", name, err)
 	}
 	if _, err := file.WriteAt(b, 0); err != nil {
-		return fmt.Errorf("write hard state: %w", err)
+		return fmt.Errorf("write %s: %w", name, err)
 	}
 	// The content must be durable before the name points at it, or the
 	// rename could survive a crash that the bytes did not.
-	if !f.skipSync {
+	if !skipSync {
 		if err := file.Sync(); err != nil {
-			return fmt.Errorf("sync hard state: %w", err)
+			return fmt.Errorf("sync %s: %w", name, err)
 		}
 	}
-	if err := f.disk.Rename(tmp, name); err != nil {
-		return fmt.Errorf("replace hard state: %w", err)
+	if err := disk.Rename(tmp, final); err != nil {
+		return fmt.Errorf("replace %s: %w", name, err)
 	}
-	// And the rename itself, or the old state could come back.
-	if !f.skipDirSync {
-		if err := f.disk.SyncDir(f.dir); err != nil {
-			return fmt.Errorf("sync hard state directory: %w", err)
+	// And the rename itself, or the old file could come back.
+	if !skipDirSync {
+		if err := disk.SyncDir(dir); err != nil {
+			return fmt.Errorf("sync %s directory: %w", name, err)
 		}
 	}
 	return nil
