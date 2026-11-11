@@ -34,6 +34,14 @@ type Loop struct {
 
 	start     time.Time // carries a monotonic reading
 	startWall int64
+
+	// Set by Peers before Run; see peer.go.
+	self     sys.NodeID
+	peerLn   net.Listener
+	peerOut  map[sys.NodeID]chan []byte
+	peerMu   sync.Mutex
+	peerIn   map[net.Conn]struct{} // inbound peer connections, closed at shutdown
+	peerAddr map[sys.NodeID]string
 }
 
 type eventKind uint8
@@ -43,6 +51,7 @@ const (
 	evData
 	evClose
 	evTimer
+	evPeer
 )
 
 type event struct {
@@ -51,6 +60,7 @@ type event struct {
 	data  []byte
 	timer sys.TimerID
 	gen   uint64
+	from  sys.NodeID
 }
 
 // armed is one arming of a timer. gen tells a firing that is still wanted
@@ -96,6 +106,7 @@ func (l *Loop) Run(ctx context.Context, h sys.Handler) error {
 	}
 	l.wg.Add(1)
 	go l.accept()
+	l.startPeers()
 
 	for ctx.Err() == nil {
 		var ev event
@@ -137,6 +148,8 @@ func (l *Loop) deliver(h sys.Handler, ev event) error {
 		}
 		delete(l.timers, ev.timer)
 		return h.OnTimer(ev.timer)
+	case evPeer:
+		return h.OnPeerMessage(ev.from, ev.data)
 	}
 	return nil
 }
@@ -154,6 +167,7 @@ func (l *Loop) shutdown() {
 	for _, tc := range l.conns {
 		tc.c.Close() //nolint:errcheck // shutting down
 	}
+	l.stopPeers()
 	// The events channel is never closed: a timer callback may still post
 	// after this returns, and a send on a closed channel would panic.
 	l.wg.Wait()
@@ -300,6 +314,3 @@ func (l *Loop) CancelTimer(id sys.TimerID) {
 		delete(l.timers, id) // a firing already queued now fails the gen check
 	}
 }
-
-// SendPeer implements sys.Network.
-func (l *Loop) SendPeer(sys.NodeID, []byte) {}
