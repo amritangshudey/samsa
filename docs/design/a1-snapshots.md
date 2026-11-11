@@ -119,3 +119,17 @@ Second pass, looking for the ways a snapshot could lie:
    no state; the snapshot index is a Raft index, so they need nothing.
 5. `UnsafeNoFencing` and other switches live in `state`, not in its
    encoding: decoding must restore them from the config, not from disk.
+
+## 6. As built (part a)
+
+- **Start-up is not yet bounded by the snapshot interval.** Measured by
+  `BenchmarkRestart` (simulated disk, 64 KiB segments): 50 000 entries
+  restart in 1.6 ms with snapshots against 55 ms without (34 times less),
+  but the time still grows with the log, by about 30 ns an entry against
+  1 100. What remains is the snapshot itself: one batch reference per
+  batch ever written, and one term per entry expanded in memory. Both
+  shrink only when old batches can be dropped, which is part (b).
+- Storage recovery checksums the whole active segment at every start; that
+  is bounded by the segment size, not by the log.
+- The simulator counts starts from a snapshot (`SnapshotStarts`) and
+  requires them in `TestSim`.

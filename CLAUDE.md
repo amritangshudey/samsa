@@ -127,7 +127,7 @@ holds the interfaces; `internal/realsys` is the only impure package under
 `internal/`; everything else there is core: `storage` (the log), `wire`
 (Kafka encoding), `raft` (consensus as a pure state machine; its log is
 the command log), `broker` (the node; `state.go` is the applied state
-machine, `groups.go` the group coordinator's soft state, `leader.go` what
+machine and `snapshot.go` its encoding for snapshots, `groups.go` the group coordinator's soft state, `leader.go` what
 a non-leader answers), `simsys` (simulated disk), `sim` (the simulator:
 world, clients, the history checker in `history.go` and `groups.go`, and
 the Raft safety monitor in `monitor.go`, the peer network and partition
