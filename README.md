@@ -28,6 +28,8 @@ kcat -b localhost:9092 -C -t demo -p 0 -o beginning -e
 Topics are never created automatically, hence the `topic` tool. `-sync
 always` (the default) acknowledges a write only after fsync; `interval` and
 `never` trade that for speed, on a single node only: a cluster needs `always`.
+`-retention-bytes N` keeps about N bytes of log, deleting the oldest
+segments; consumers below the new start get `OFFSET_OUT_OF_RANGE`.
 
 A three-node cluster on one machine (each node: id, client address, peer
 address):
@@ -72,7 +74,8 @@ fetch, metadata, offsets, topics) and [ADR 0008](docs/adr/0008-group-api-version
 
 Transactions, the idempotent producer (clients must set
 `enable.idempotence=false`; franz-go: `DisableIdempotentWrite`), log
-compaction, retention and deletion, ACLs, SASL, TLS, tiered storage,
+compaction, retention by time or per topic (only `-retention-bytes`, one
+bound for the whole log), deleting records, ACLs, SASL, TLS, tiered storage,
 cluster membership changes, the KIP-848 group protocol, static membership,
 deleting topics or adding partitions, fetch sessions, more than one Raft
 group (all partitions share one log, [ADR 0010](docs/adr/0010-one-raft-group.md)),

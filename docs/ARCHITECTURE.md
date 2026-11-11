@@ -41,8 +41,8 @@ a lone node elects itself, and an entry commits when it is synced
 
 What this shape costs: every node stores every partition and one leader
 takes all writes, so adding nodes adds no capacity; partitions interleave in
-the log, so fetches have poor locality; nothing is ever deleted (no
-retention yet); `acks=0` and `acks=1` behave as `acks=all`.
+the log, so fetches have poor locality; retention is one size bound for the whole log,
+not per topic; `acks=0` and `acks=1` behave as `acks=all`.
 
 **Snapshots** ([design](design/a1-snapshots.md)). Every `SnapshotEvery`
 applied entries (default 10 000), the node syncs its log and writes a
@@ -50,6 +50,17 @@ snapshot: the terms of the entries so far, as runs, and the encoded state
 machine (`broker/snapshot.go`; record data stays in the log). A start loads
 it, reads only the entries after it, and applies from there. A snapshot
 that the log cannot back stops the node.
+
+**Retention** ([design](design/a1-snapshots.md), section 3). When its log
+exceeds `RetentionBytes`, the leader proposes `Trim(C)`, C a segment base
+at or below the commit index. Applying it, on every replica, drops batch
+references below C and moves each partition's start; fetches below it
+answer `OFFSET_OUT_OF_RANGE`. The node then snapshots, and deletes
+segments only below its newest snapshot's log start
+(`raft.Compact`). A follower whose next entry was deleted gets the
+leader's snapshot by InstallSnapshot (`raft/snapshot.go`), in chunks,
+keeps it as an `install` marker until its log is durable past it, and
+meanwhile applies nothing.
 
 The rules that keep it correct (roadmap R1–R7): apply reads no clock, no
 randomness and no unordered map, and anything time- or chance-dependent is

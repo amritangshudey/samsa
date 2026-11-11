@@ -1,6 +1,6 @@
 # A1 design — snapshots and log truncation
 
-Status: draft, 2026-11-11. Roadmap section 7, A1. Done in two parts, each
+Status: built, 2026-11-11 (both parts; see sections 6 and 7). Roadmap section 7, A1. Done in two parts, each
 its own PR: **(a) local snapshots**, which bound start-up work; **(b)
 retention and log truncation**, which bound disk use and need
 InstallSnapshot for followers behind the cut.
@@ -211,3 +211,46 @@ Second pass on part (b):
   is bounded by the segment size, not by the log.
 - The simulator counts starts from a snapshot (`SnapshotStarts`) and
   requires them in `TestSim`.
+
+## 7. As built (part b)
+
+Where the code differs from section 3, and why:
+
+- **InstallSnapshot carries the snapshot whole, not a file in chunks on
+  disk.** The follower buffers chunks in memory and writes the `install`
+  marker (snapshot bytes, cut, CRC) once the last arrives. *shortcut:* the
+  memory is the snapshot's size; stream to `install.tmp` if snapshots grow
+  past a few MiB. Chunks are at most `MaxPayloadBytes` less the entry
+  header: the first version used `MaxAppendBytes` alone, the decoder
+  refused the larger chunks, and no install ever finished (found by the
+  Raft random schedules, seed 8).
+- **"Really behind" is a term match, not an index test.** A follower
+  answers "not needed" only if it holds entry C − 1 with the leader's term
+  for it (`prevTerm` in the message). Comparing indexes alone livelocked a
+  follower whose log had diverged below C: it kept refusing the snapshot
+  and refusing the entries (random schedules, seed 1053).
+- **The broker's state carries `logStart` and each partition's `start`**
+  (snapshot version 2; version 1 still decodes). The leader proposes a
+  Trim at most once per cut while serving, and again after a change of
+  leader, since the earlier proposal may have been lost.
+- **Produce v5+** now answers `LogStartOffset` = -1, the schema's default
+  (ProduceResponse.json, checked 2026-11-11), instead of a 0 that became
+  false once the log could be cut. Fetch carries the real value.
+- **What checks it:** the Raft random schedules compact and install
+  (thousands of installs in 3000 seeds; mutation "compact past the
+  snapshot" caught); the simulator draws `RetentionBytes` from {off, off,
+  64 KiB, 8 KiB} and requires trims and installs in `TestSim`; the history
+  checker's rule R1 (the start never moves back, never passes the end,
+  nothing is returned below it, and only records below it may vanish) has
+  its own `TestModel` cases; mutation `UnsafeTrimEarly` is caught at seed 1
+  (a restart finds a snapshot its log cannot back). `TestRetentionTrimsTheLog`
+  checks fetch, ListOffsets and restart on one node.
+- **The checker trusts the start.** R1 lets any record below the reported
+  start vanish; a broker that raised its start for no reason would pass.
+  Retention is a size bound the model does not compute. *shortcut:* model
+  the cut if a bug is ever suspected there.
+- **I6 restarts run with retention off:** a restarted leader may
+  legitimately trim again, which changes the state hash. The first run of
+  the suite reported that as a violation (seeds 55, 498, 975); it was the
+  check, not the broker.
+- Retention by size only, one bound for the whole log, not per topic.
