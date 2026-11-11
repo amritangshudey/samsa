@@ -212,8 +212,11 @@ func (w *world) finalChecks() {
 			return
 		}
 		w.node = inc
+		// Each start elects the node again, which adds one no-op entry
+		// to the log and nothing to the state.
+		applied++
 		if a, h := inc.n.StateHash(); a != applied || h != hash {
-			w.fail("I6: after a restart (power loss: %v) the node applied %d commands with state hash %08x, before it %d with %08x", power, a, h, applied, hash)
+			w.fail("I6: after a restart (power loss: %v) the node applied %d entries with state hash %08x; expected %d with %08x", power, a, h, applied, hash)
 			return
 		}
 	}

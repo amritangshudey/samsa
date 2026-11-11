@@ -110,8 +110,8 @@ func (n *Node) soft(name string) *softGroup {
 	return sg
 }
 
-// startGroups arms the timers that applied group state calls for. It runs
-// once, at the end of recovery.
+// startGroups arms the timers that applied group state calls for. It runs each
+// time the node starts serving as leader.
 func (n *Node) startGroups() {
 	for _, name := range sortedKeys(n.st.groups) {
 		g := n.st.groups[name]
@@ -427,7 +427,12 @@ func (n *Node) findCoordinator(req *wire.FindCoordinatorRequest) *wire.FindCoord
 	if req.KeyType != 0 { // only groups have a coordinator here
 		return &wire.FindCoordinatorResponse{ErrorCode: wire.ErrCoordinatorNotAvailable, NodeID: -1}
 	}
-	return &wire.FindCoordinatorResponse{NodeID: n.cfg.NodeID, Host: n.cfg.Host, Port: n.cfg.Port}
+	// The leader coordinates every group. Any node can say who that is.
+	p, ok := n.leader()
+	if !ok {
+		return &wire.FindCoordinatorResponse{ErrorCode: wire.ErrCoordinatorNotAvailable, NodeID: -1}
+	}
+	return &wire.FindCoordinatorResponse{NodeID: p.ID, Host: p.Host, Port: p.Port}
 }
 
 func (n *Node) joinGroup(c *conn, h wire.RequestHeader, req *wire.JoinGroupRequest) {

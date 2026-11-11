@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -40,6 +41,10 @@ func (s *script) events() []string {
 func (s *script) OnStart() error               { return nil }
 func (s *script) OnConnOpen(sys.ConnID) error  { s.note("open"); return nil }
 func (s *script) OnConnClose(sys.ConnID) error { s.note("close"); return nil }
+func (s *script) OnPeerMessage(from sys.NodeID, p []byte) error {
+	s.note(fmt.Sprintf("peer %d %s", from, p))
+	return nil
+}
 func (s *script) OnTimer(id sys.TimerID) error {
 	s.note("timer" + string(rune('0'+id)))
 	return nil

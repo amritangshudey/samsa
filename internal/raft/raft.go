@@ -196,6 +196,9 @@ func (r *Raft) Leader() (id sys.NodeID, known bool) { return r.leader, r.leader 
 // Committed returns the index below which every entry is committed.
 func (r *Raft) Committed() int64 { return r.commit + 1 }
 
+// Durable returns the index below which every entry has been synced.
+func (r *Raft) Durable() int64 { return r.log.DurableOffset() }
+
 // LastIndex returns the index of the last entry in the log, or -1.
 func (r *Raft) LastIndex() int64 { return int64(len(r.terms)) - 1 }
 
@@ -294,7 +297,9 @@ func (r *Raft) maybeLead() {
 		}
 	}
 	r.env.CancelTimer(TimerElection)
-	r.env.SetTimer(TimerHeartbeat, r.cfg.HeartbeatInterval)
+	if len(r.peers) > 0 { // alone, there is nobody to tell
+		r.env.SetTimer(TimerHeartbeat, r.cfg.HeartbeatInterval)
+	}
 	// An entry of this term: until it commits, nothing from earlier terms
 	// can be known to be committed (the paper's Figure 8).
 	if _, err := r.append(entry{term: r.hard.term, kind: kindNoop}); err != nil {

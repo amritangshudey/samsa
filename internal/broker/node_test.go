@@ -42,6 +42,7 @@ type fakeNet struct {
 
 func (n *fakeNet) Send(c sys.ConnID, p []byte) { n.sent[c] = append(n.sent[c], p...) }
 func (n *fakeNet) Close(c sys.ConnID)          { n.closed = append(n.closed, c) }
+func (n *fakeNet) SendPeer(sys.NodeID, []byte) {}
 
 // harness drives one node with no goroutines and no sockets.
 type harness struct {
@@ -689,7 +690,7 @@ func TestSyncPolicies(t *testing.T) {
 	if !h.recv(1, wire.KeyCreateTopics, 4, corr, &ct) || len(h.clock.timers) != 0 {
 		t.Fatal("SyncNever did not answer immediately")
 	}
-	if h.node.cmds.DurableOffset() != 0 {
+	if h.node.raft.Durable() != 0 {
 		t.Fatal("SyncNever synced")
 	}
 
@@ -697,11 +698,11 @@ func TestSyncPolicies(t *testing.T) {
 	h = newHarness(t, Config{Sync: SyncInterval, SyncInterval: 100 * time.Millisecond})
 	h.open(1)
 	h.send(1, wire.KeyCreateTopics, 4, &wire.CreateTopicsRequest{Topics: []wire.CreateTopic{{Name: "t", NumPartitions: 1, ReplicationFactor: 1}}})
-	if len(h.net.sent[1]) == 0 || h.node.cmds.DurableOffset() != 0 {
+	if len(h.net.sent[1]) == 0 || h.node.raft.Durable() != 0 {
 		t.Fatal("SyncInterval must answer before syncing")
 	}
 	h.advance(100 * time.Millisecond)
-	if h.node.cmds.DurableOffset() != 1 {
+	if h.node.raft.Durable() != 2 { // the leader's no-op and the command
 		t.Fatal("SyncInterval timer did not sync")
 	}
 	h.advance(100 * time.Millisecond)

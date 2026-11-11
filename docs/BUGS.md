@@ -111,6 +111,26 @@ for how much that is worth.
 - **Lesson:** ADR 0007's causality rule is easy to state and easy to
   forget in each new check.
 
+### M5. A node that failed to start was called again, and its death blamed on its successor (Phase 5)
+
+**Found by:** `TestSim` seed 69, the first run of the single-node
+simulator on top of Raft ("the final read did not finish").
+
+**What happened.** When power was lost during `OnStart`, the harness threw
+the incarnation away without marking it dead. Until Phase 5 that was
+harmless, because `OnStart` armed its first timer only after the last disk
+operation. Now Raft arms the election timer, and the node its sync timer,
+before the first sync. The orphan's timer fired later, its handler failed
+on file handles from before the power loss, and the harness answered by
+taking down the node that was running at that moment, every 173 ms, for
+ever.
+
+**Why it was wrong.** The contract in `sys.Handler` says a driver must not
+call a node again after an error. The harness broke it.
+
+**Fix.** `world.start` marks the incarnation dead when `OnStart` fails.
+No broker code changed. The same 200 seeds then pass.
+
 ### M3. The checker condemned records that an earlier crash had spared (Phase 3)
 
 - **Seeds:** 1, 3 and 6, under the `interval` and `never` fsync policies.

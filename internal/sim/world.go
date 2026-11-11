@@ -206,6 +206,9 @@ func (inc *incarnation) Send(id sys.ConnID, p []byte) {
 	})
 }
 
+// SendPeer implements sys.Network. There is one node: nobody to send to.
+func (inc *incarnation) SendPeer(sys.NodeID, []byte) {}
+
 // Close implements sys.Network.
 func (inc *incarnation) Close(id sys.ConnID) {
 	w := inc.w
@@ -304,6 +307,7 @@ func (w *world) start() {
 	inc.n = broker.New(w.bcfg, inc, inc, w.disk, w.rng.Fork())
 	w.note("node-start", 0, nil)
 	if err := inc.n.OnStart(); err != nil {
+		inc.dead = true // it may have armed timers before it failed
 		if !w.disk.Crashed() {
 			w.fail("recovery failed: %v", err)
 			return

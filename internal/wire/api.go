@@ -24,6 +24,8 @@ const (
 	ErrOffsetOutOfRange            int16 = 1
 	ErrCorruptMessage              int16 = 2
 	ErrUnknownTopicOrPartition     int16 = 3
+	ErrLeaderNotAvailable          int16 = 5
+	ErrNotLeaderOrFollower         int16 = 6
 	ErrMessageTooLarge             int16 = 10
 	ErrOffsetMetadataTooLarge      int16 = 12
 	ErrCoordinatorNotAvailable     int16 = 15
@@ -40,6 +42,7 @@ const (
 	ErrTopicAlreadyExists          int16 = 36
 	ErrInvalidPartitions           int16 = 37
 	ErrInvalidReplicationFactor    int16 = 38
+	ErrNotController               int16 = 41
 	ErrInvalidRequest              int16 = 42
 	ErrUnsupportedForMessageFormat int16 = 43
 	ErrMemberIDRequired            int16 = 79

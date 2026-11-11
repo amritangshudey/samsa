@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/amritangshudey/samsa/internal/raft"
 	"github.com/amritangshudey/samsa/internal/storage"
 	"github.com/amritangshudey/samsa/internal/sys"
 	"github.com/amritangshudey/samsa/internal/wire"
@@ -28,15 +29,29 @@ const (
 	SyncNever
 )
 
+// Peer is one node of the cluster as clients see it.
+type Peer struct {
+	ID   int32
+	Host string // where Kafka clients connect
+	Port int32
+}
+
 // Config configures a Node. Zero values select the defaults named below.
 type Config struct {
 	// NodeID, Host and Port are what Metadata responses tell clients.
 	NodeID int32
 	Host   string
 	Port   int32
+	// Peers lists every node of the cluster, this one included. The list
+	// is the same on every node and never changes. Default: this node
+	// alone.
+	Peers []Peer
+	// ElectionTimeout and HeartbeatInterval tune Raft; see raft.Config.
+	ElectionTimeout   time.Duration
+	HeartbeatInterval time.Duration
 	// ClusterID is reported in Metadata. Default "samsa".
 	ClusterID string
-	// Dir is the directory of the command log on the node's disk. Default "log".
+	// Dir is the directory of the Raft log on the node's disk. Default "raft".
 	Dir string
 	// Sync is the fsync policy; SyncInterval is its period (default 1s).
 	Sync         SyncPolicy
@@ -62,9 +77,12 @@ type Config struct {
 	Logger *slog.Logger
 
 	// UnsafeAckBeforeSync breaks the commit rule on purpose: under
-	// SyncAlways, commands count as committed when appended, not when
+	// SyncAlways, commands count as durable here when appended, not when
 	// synced. It exists so that the simulator can prove it notices.
 	UnsafeAckBeforeSync bool
+	// UnsafeCommitAnyTerm and UnsafeVoteWithoutPersist are Raft's
+	// deliberate bugs; see raft.Config.
+	UnsafeCommitAnyTerm, UnsafeVoteWithoutPersist bool
 	// UnsafeNoFencing breaks zombie fencing on purpose: an offset commit
 	// from a member is accepted whatever generation it carries.
 	UnsafeNoFencing bool
@@ -75,7 +93,10 @@ func (c Config) withDefaults() Config {
 		c.ClusterID = "samsa"
 	}
 	if c.Dir == "" {
-		c.Dir = "log"
+		c.Dir = "raft"
+	}
+	if len(c.Peers) == 0 {
+		c.Peers = []Peer{{ID: c.NodeID, Host: c.Host, Port: c.Port}}
 	}
 	if c.SyncInterval <= 0 {
 		c.SyncInterval = time.Second
@@ -114,8 +135,10 @@ const commandOverhead = 512
 // Timer ids. Delayed fetches and the group coordinator take ids from
 // firstFreeTimer upwards.
 const (
-	timerFlush sys.TimerID = 1
-	timerSync  sys.TimerID = 2
+	timerFlush     sys.TimerID = 1
+	timerSync      sys.TimerID = 2
+	timerElection  sys.TimerID = 3
+	timerHeartbeat sys.TimerID = 4
 
 	firstFreeTimer sys.TimerID = 16
 )
@@ -153,11 +176,16 @@ type Node struct {
 	rand  sys.Random
 	log   *slog.Logger
 
-	cmds    *storage.Log
+	raft    *raft.Raft
 	st      *state
-	applied int64 // every command below this index has been applied
+	applied int64 // every log entry below this index has been applied
+	// serving is set while this node leads and has applied an entry of
+	// its own term: only then does it know that its state holds
+	// everything clients were ever told. servingTerm is that term.
+	serving     bool
+	servingTerm int64
 
-	waiters    []waiter // ascending by index
+	waiters    []waiter // ascending by index; non-empty only while serving
 	flushArmed bool
 	conns      map[sys.ConnID]*conn
 	parked     []*parkedFetch // in arrival order
@@ -184,37 +212,69 @@ func New(cfg Config, clock sys.Clock, net sys.Network, disk sys.Disk, rand sys.R
 	}
 }
 
-// OnStart opens the command log, recovering it if needed, and rebuilds the
-// state machine by applying every command in it.
+// raftEnv is the node as Raft sees it.
+type raftEnv struct{ n *Node }
+
+func (e raftEnv) Send(to sys.NodeID, msg []byte) { e.n.net.SendPeer(to, msg) }
+func (e raftEnv) Rand() uint64                   { return e.n.rand.Uint64() }
+func (e raftEnv) SetTimer(t raft.Timer, d time.Duration) {
+	e.n.clock.SetTimer(raftTimer(t), d)
+}
+func (e raftEnv) CancelTimer(t raft.Timer) { e.n.clock.CancelTimer(raftTimer(t)) }
+
+func raftTimer(t raft.Timer) sys.TimerID {
+	if t == raft.TimerElection {
+		return timerElection
+	}
+	return timerHeartbeat
+}
+
+// ackBeforeSync reports whether an entry counts as durable on this node
+// before it is synced: the meaning of the weaker fsync policies.
+func (n *Node) ackBeforeSync() bool {
+	return n.cfg.Sync != SyncAlways || n.cfg.UnsafeAckBeforeSync
+}
+
+// OnStart opens the Raft log, recovering it if needed. The state machine
+// starts empty and is rebuilt as Raft reports entries committed: a node
+// alone in its cluster learns that before OnStart returns, any other node
+// once it hears from, or becomes, a leader.
 func (n *Node) OnStart() error {
-	cmds, err := storage.Open(n.disk, n.cfg.Dir, storage.Config{
-		SegmentBytes:    n.cfg.SegmentBytes,
-		MaxPayloadBytes: n.cfg.MaxBatchBytes + commandOverhead,
-		SyncBytes:       -1, // the node decides when to sync
-	})
-	if err != nil {
-		return fmt.Errorf("open command log: %w", err)
+	peers := make([]sys.NodeID, len(n.cfg.Peers))
+	for i, p := range n.cfg.Peers {
+		peers[i] = sys.NodeID(p.ID)
 	}
-	n.cmds = cmds
-	for off := cmds.StartOffset(); off < cmds.EndOffset(); {
-		batches, err := cmds.Read(off, 4<<20)
-		if err != nil {
-			return fmt.Errorf("replay command log at %d: %w", off, err)
-		}
-		for _, b := range batches {
-			if _, err := n.st.apply(b.Base, b.Payload); err != nil {
-				return err
-			}
-			off = b.Base + int64(b.Count)
-		}
+	n.raft = raft.New(raft.Config{
+		ID: sys.NodeID(n.cfg.NodeID), Peers: peers, Dir: n.cfg.Dir,
+		Log: storage.Config{
+			SegmentBytes:    n.cfg.SegmentBytes,
+			MaxPayloadBytes: n.cfg.MaxBatchBytes + commandOverhead,
+		},
+		ElectionTimeout: n.cfg.ElectionTimeout, HeartbeatInterval: n.cfg.HeartbeatInterval,
+		AckBeforeSync:            n.ackBeforeSync(),
+		UnsafeCommitAnyTerm:      n.cfg.UnsafeCommitAnyTerm,
+		UnsafeVoteWithoutPersist: n.cfg.UnsafeVoteWithoutPersist,
+	}, raftEnv{n}, n.disk)
+	if err := n.raft.Start(); err != nil {
+		return err
 	}
-	n.applied = cmds.EndOffset()
+	// A single node has elected itself; one sync makes its whole log
+	// committed, so it serves from the first request on.
+	if len(peers) == 1 {
+		n.raft.Flush()
+	}
 	if n.cfg.Sync == SyncInterval {
 		n.clock.SetTimer(timerSync, n.cfg.SyncInterval)
 	}
-	n.startGroups()
-	n.log.Info("started", "commands", n.applied, "topics", len(n.st.names), "groups", len(n.st.groups))
-	return nil
+	err := n.settle()
+	n.log.Info("started", "entries", n.raft.LastIndex()+1, "applied", n.applied, "topics", len(n.st.names), "groups", len(n.st.groups))
+	return err
+}
+
+// OnPeerMessage implements sys.Handler.
+func (n *Node) OnPeerMessage(from sys.NodeID, msg []byte) error {
+	n.raft.Step(from, msg)
+	return n.settle()
 }
 
 // OnConnOpen implements sys.Handler.
@@ -266,10 +326,14 @@ func (n *Node) OnTimer(id sys.TimerID) error {
 	switch id {
 	case timerFlush:
 		n.flushArmed = false
-		n.sync()
+		n.raft.Flush()
 	case timerSync:
-		n.sync()
+		n.raft.Sync()
 		n.clock.SetTimer(timerSync, n.cfg.SyncInterval)
+	case timerElection:
+		n.raft.OnTimer(raft.TimerElection)
+	case timerHeartbeat:
+		n.raft.OnTimer(raft.TimerHeartbeat)
 	default:
 		if fn := n.timers[id]; fn != nil {
 			delete(n.timers, id)
@@ -286,81 +350,137 @@ func (n *Node) OnTimer(id sys.TimerID) error {
 	return n.settle()
 }
 
-func (n *Node) sync() {
-	if n.fatal == nil {
-		if err := n.cmds.Sync(); err != nil {
-			n.fatal = fmt.Errorf("sync command log: %w", err)
-		}
-	}
-}
-
-// settle ends every handler: it applies whatever has become committed,
-// which may complete requests, which may start further requests, until
-// nothing moves. It returns the node's fatal error, if any.
+// settle ends every handler: it notices a change of leadership, applies
+// whatever has become committed, which may complete requests, which may
+// start further requests, until nothing moves. It returns the node's
+// fatal error, if any.
 func (n *Node) settle() error {
 	for n.fatal == nil {
-		before := n.applied
+		if n.fatal = n.raft.Err(); n.fatal != nil {
+			break
+		}
+		applied, serving := n.applied, n.serving
+		n.lead()
 		n.advance()
-		if n.applied == before {
+		if n.raft.NeedsFlush() {
+			if n.ackBeforeSync() {
+				n.raft.Flush() // nothing to wait for
+				continue
+			}
+			// A zero-delay timer fires after the events already waiting,
+			// so everything that is ready now shares one sync: group commit.
+			if !n.flushArmed {
+				n.flushArmed = true
+				n.clock.SetTimer(timerFlush, 0)
+			}
+		}
+		if n.applied == applied && n.serving == serving {
 			break
 		}
 	}
 	return n.fatal
 }
 
-// committed returns the index below which commands are committed under the
-// configured policy.
-func (n *Node) committed() int64 {
-	if n.cfg.Sync == SyncAlways && !n.cfg.UnsafeAckBeforeSync {
-		return n.cmds.DurableOffset()
+// lead starts or stops serving clients as leadership comes and goes.
+func (n *Node) lead() {
+	leader, term := n.raft.Role() == raft.Leader, n.raft.Term()
+	if n.serving && (!leader || term != n.servingTerm) {
+		n.serving = false
+		n.stopServing()
 	}
-	return n.cmds.EndOffset()
+	// The leader's first entry of its term is a no-op; once that is
+	// applied, so is everything before it.
+	if !n.serving && leader && n.applied > 0 && n.raft.EntryTerm(n.applied-1) == term {
+		n.serving, n.servingTerm = true, term
+		n.startGroups()
+		n.log.Info("serving as leader", "term", term, "applied", n.applied)
+	}
+}
+
+// stopServing drops everything a leader holds for clients (roadmap rule
+// R5): commands awaiting commit, parked fetches, group rounds and timers.
+// The connections with a request in progress are closed, which every
+// client treats as "ask again"; the next answer names the new leader.
+//
+// shortcut: closes the connection instead of answering each held request
+// with its not-leader error; answer in place if reconnect storms on a
+// leader change ever matter.
+func (n *Node) stopServing() {
+	n.log.Info("no longer serving", "term", n.servingTerm, "waiters", len(n.waiters))
+	n.waiters = nil // whether these commit is unknown; nobody is told they did
+	for _, f := range n.parked {
+		n.clock.CancelTimer(f.timer)
+	}
+	n.parked = nil
+	for _, id := range sortedKeys(n.timers) {
+		n.cancel(id)
+	}
+	n.groups = map[string]*softGroup{}
+	for _, id := range sortedKeys(n.conns) { // in a fixed order, for the simulator
+		if c := n.conns[id]; c.busy {
+			c.onClose = nil
+			n.drop(c, "leadership lost while a request was in progress")
+		}
+	}
 }
 
 // propose appends cmd to the log and arranges for done to be called with
 // the result once the command has been committed and applied. A success
-// response may only be sent from done (roadmap rule R4).
+// response may only be sent from done (roadmap rule R4). It is called only
+// while serving; if leadership is lost first, done is never called and the
+// connection is closed instead.
 func (n *Node) propose(cmd []byte, done func(result)) {
 	if n.fatal != nil {
 		return
 	}
-	index, err := n.cmds.Append(cmd, 1)
+	index, err := n.raft.Propose(cmd)
 	if errors.Is(err, storage.ErrTooLarge) {
 		done(result{errCode: wire.ErrMessageTooLarge, baseOffset: -1})
 		return
 	}
 	if err != nil {
-		n.fatal = fmt.Errorf("append command: %w", err)
+		n.fatal = fmt.Errorf("propose command: %w", err)
 		return
 	}
 	n.waiters = append(n.waiters, waiter{index: index, cmd: cmd, done: done})
-	// A zero-delay timer fires after the events already waiting, so every
-	// request that is ready now shares the one sync: group commit.
-	if n.cfg.Sync == SyncAlways && !n.flushArmed {
-		n.flushArmed = true
-		n.clock.SetTimer(timerFlush, 0)
-	}
 }
 
-// advance applies committed commands in order and completes their waiters.
+// advance applies committed entries in order and completes their waiters.
 func (n *Node) advance() {
 	appended := false
-	for n.fatal == nil && n.applied < n.committed() {
-		if len(n.waiters) == 0 || n.waiters[0].index != n.applied {
-			n.fatal = fmt.Errorf("broker: no waiter for committed command %d", n.applied)
-			return
+	for n.fatal == nil && n.applied < n.raft.Committed() {
+		var w waiter
+		if len(n.waiters) > 0 && n.waiters[0].index <= n.applied {
+			w = n.waiters[0]
+			n.waiters[0] = waiter{}
+			n.waiters = n.waiters[1:]
+			if w.index != n.applied {
+				n.fatal = fmt.Errorf("broker: waiter for command %d was passed over at %d", w.index, n.applied)
+				return
+			}
 		}
-		w := n.waiters[0]
-		n.waiters[0] = waiter{}
-		n.waiters = n.waiters[1:]
-		res, err := n.st.apply(w.index, w.cmd)
+		cmd, noop := w.cmd, false
+		if w.done == nil {
+			var err error
+			if cmd, noop, err = n.raft.Read(n.applied); err != nil {
+				n.fatal = fmt.Errorf("read committed entry %d: %w", n.applied, err)
+				return
+			}
+		}
+		if noop {
+			n.applied++
+			continue
+		}
+		res, err := n.st.apply(n.applied, cmd)
 		if err != nil {
 			n.fatal = err
 			return
 		}
 		n.applied++
-		appended = appended || (w.cmd[0] == cmdAppend && res.errCode == wire.ErrNone)
-		w.done(res)
+		appended = appended || (cmd[0] == cmdAppend && res.errCode == wire.ErrNone)
+		if w.done != nil {
+			w.done(res)
+		}
 	}
 	if len(n.waiters) == 0 {
 		n.waiters = nil // release the backing array
@@ -505,6 +625,16 @@ func (n *Node) dispatch(c *conn, frame []byte) {
 	if r.Err() != nil {
 		n.drop(c, fmt.Sprintf("malformed request body: key %d version %d", h.Key, h.Version))
 		return
+	}
+	if !n.serving {
+		if resp := refusal(req); resp != nil {
+			if p, ok := req.(*wire.ProduceRequest); ok && p.Acks == 0 {
+				n.finish(c) // the client asked for no answer, and gets none
+			} else {
+				n.respond(c, h, resp)
+			}
+			return
+		}
 	}
 	handle()
 }

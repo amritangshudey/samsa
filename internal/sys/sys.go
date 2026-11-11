@@ -59,6 +59,12 @@ type Handler interface {
 	// OnConnClose reports that c is gone, whether the peer closed it, it
 	// failed, or the node called [Network.Close]. It is the last call for c.
 	OnConnClose(c ConnID) error
+
+	// OnPeerMessage delivers one whole message that the node named from
+	// passed to [Network.SendPeer]. The driver vouches for nothing about
+	// it but its boundaries: the content is untrusted input. msg is valid
+	// only during the call.
+	OnPeerMessage(from NodeID, msg []byte) error
 }
 
 // Clock is the node's only source of time.
@@ -79,7 +85,8 @@ type Clock interface {
 	CancelTimer(id TimerID)
 }
 
-// Network sends on connections that were announced by [Handler.OnConnOpen].
+// Network sends on connections that were announced by [Handler.OnConnOpen],
+// and to the other nodes of the cluster.
 type Network interface {
 	// Send queues p for delivery on c, in order, and returns immediately.
 	// p may be reused by the caller afterwards. Delivery is not guaranteed:
@@ -91,6 +98,12 @@ type Network interface {
 	// Close closes c after sending what is already queued. The node then
 	// receives OnConnClose.
 	Close(c ConnID)
+
+	// SendPeer sends msg to another node of the cluster, whole or not at
+	// all, and returns immediately. Nothing else is promised: it may be
+	// lost, delayed, repeated or overtaken by a later message, and the
+	// sender is not told. msg may be reused by the caller afterwards.
+	SendPeer(to NodeID, msg []byte)
 }
 
 // Random is the node's only source of randomness.

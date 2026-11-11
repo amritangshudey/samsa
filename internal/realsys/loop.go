@@ -300,3 +300,6 @@ func (l *Loop) CancelTimer(id sys.TimerID) {
 		delete(l.timers, id) // a firing already queued now fails the gen check
 	}
 }
+
+// SendPeer implements sys.Network.
+func (l *Loop) SendPeer(sys.NodeID, []byte) {}
