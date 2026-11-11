@@ -46,7 +46,7 @@ and not yet merged.
 | Broker without fencing (Phase 4) | still caught, 140 of 200 |
 | **Broker that commits earlier-term entries by counting (Figure 8)** | **not caught by the simulator: 0 of 1000 seeds** |
 | Three processes, franz-go, leader killed twice with a restart between | every acknowledged record read back, in order; 0 duplicates in the runs made; with one node of three left, nothing is acknowledged |
-| Time to a new leader after SIGKILL (one run) | 759 ms until another node is named leader, with the default 300–600 ms election timeout |
+| Time to a new leader after SIGKILL (two runs) | 0.76 s and 1.32 s until another node is named leader, with the default 300–600 ms election timeout |
 | All earlier real-client tests (franz-go, Java, kcat) against one node on Raft | pass |
 
 Bugs found (details in `docs/BUGS.md`):
@@ -109,9 +109,9 @@ from `log/` to `raft/` and its entries have a new header.
   were run against one node only, so the not-leader codes are verified
   against the official error table but not against those clients'
   behaviour.
-- **Failover as a client sees it is slow**: in the one run measured, the
+- **Failover as a client sees it is slow**: in both runs measured, the
   franz-go producer needed about 5 s to continue after the leader died,
-  though a new leader existed after 0.76 s. The cause was not
+  though a new leader existed after 0.76 s and 1.32 s. The cause was not
   investigated; the client's metadata refresh is the suspect.
 - **Held requests are dropped by closing connections** on a leadership
   change. Correct, and rough on clients.
