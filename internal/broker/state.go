@@ -23,6 +23,7 @@ const (
 	cmdOffsetCommit    byte = 3
 	cmdGroupGeneration byte = 4
 	cmdGroupAssignment byte = 5
+	cmdTrim            byte = 6
 )
 
 // errBadCommand marks a command in the log that cannot be decoded. The log
@@ -56,7 +57,16 @@ type batchRef struct {
 
 type partition struct {
 	next    int64 // offset the next record will get; also the high watermark
+	start   int64 // first offset still available; below it, trimmed away
 	batches []batchRef
+}
+
+// encodeTrim is the retention command: every batch stored below log index
+// cut is dropped (docs/design/a1-snapshots.md, section 3.1).
+func encodeTrim(cut int64) []byte {
+	w := wire.Writer{B: []byte{cmdTrim}}
+	w.Int64(cut)
+	return w.B
 }
 
 type topic struct {
@@ -68,9 +78,12 @@ type topic struct {
 // deterministic function of the commands applied so far: no clock, no
 // randomness, no I/O, no map iteration (roadmap rule R1).
 type state struct {
-	topics map[string]*topic
-	names  []string // sorted, for deterministic listing
-	groups map[string]*group
+	// logStart is the log index below which nothing is referenced: the
+	// cut of the latest Trim applied.
+	logStart int64
+	topics   map[string]*topic
+	names    []string // sorted, for deterministic listing
+	groups   map[string]*group
 	// noFencing is Config.UnsafeNoFencing: a deliberate bug.
 	noFencing bool
 }
@@ -332,6 +345,27 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 		*g = next
 		return result{}, nil
 
+	case cmdTrim:
+		cut := r.Int64()
+		if r.Err() != nil || cut < 0 || cut > index {
+			return result{}, fmt.Errorf("%w: trim at index %d", errBadCommand, index)
+		}
+		if cut <= s.logStart {
+			return result{}, nil // an older proposal, overtaken
+		}
+		s.logStart = cut
+		for _, name := range s.names {
+			for _, p := range s.topics[name].parts {
+				keep := sort.Search(len(p.batches), func(i int) bool { return p.batches[i].logIndex >= cut })
+				p.batches = slices.Delete(p.batches, 0, keep)
+				p.start = p.next
+				if len(p.batches) > 0 {
+					p.start = p.batches[0].base
+				}
+			}
+		}
+		return result{}, nil
+
 	case cmdGroupAssignment:
 		name, generation := r.String(false), r.Int32()
 		assignments := wire.Array(r, false, func() wire.MemberAssignment {
@@ -382,12 +416,13 @@ func (s *state) hash() uint32 {
 			sum = crc32.Update(sum, table, b[:])
 		}
 	}
+	add(s.logStart)
 	for _, name := range s.names { // sorted: never iterate the map
 		t := s.topics[name]
 		sum = crc32.Update(sum, table, []byte(name))
 		add(int64(len(t.parts)))
 		for _, p := range t.parts {
-			add(p.next, int64(len(p.batches)))
+			add(p.next, p.start, int64(len(p.batches)))
 			for _, b := range p.batches {
 				add(b.base, b.logIndex, b.maxTimestamp)
 			}

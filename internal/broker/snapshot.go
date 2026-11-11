@@ -9,7 +9,8 @@ import (
 
 // snapshotVersion leads every encoded state, so that a newer build can tell
 // an older snapshot apart.
-const snapshotVersion = 1
+// Version 2 adds the log start and each partition's start offset.
+const snapshotVersion = 2
 
 // encode returns the whole state machine as bytes, for a Raft snapshot
 // (docs/design/a1-snapshots.md). Maps are walked in sorted order, so equal
@@ -17,6 +18,7 @@ const snapshotVersion = 1
 // the log, and batches are referred to by log index.
 func (s *state) encode() []byte {
 	w := wire.Writer{B: []byte{snapshotVersion}}
+	w.Int64(s.logStart)
 	w.ArrayLen(false, len(s.names))
 	for _, name := range s.names {
 		t := s.topics[name]
@@ -24,6 +26,7 @@ func (s *state) encode() []byte {
 		w.ArrayLen(false, len(t.parts))
 		for _, p := range t.parts {
 			w.Int64(p.next)
+			w.Int64(p.start)
 			w.ArrayLen(false, len(p.batches))
 			for _, b := range p.batches {
 				w.Int64(b.base)
@@ -77,19 +80,29 @@ func (s *state) encode() []byte {
 // input, as for network input (roadmap rule R7); nothing in the result
 // aliases b.
 func decodeState(b []byte) (*state, error) {
-	if len(b) == 0 || b[0] != snapshotVersion {
+	if len(b) == 0 || b[0] < 1 || b[0] > snapshotVersion {
 		return nil, fmt.Errorf("%w: snapshot of unknown version", errBadCommand)
 	}
+	v := b[0]
 	r := wire.NewReader(b[1:])
 	s := newState()
+	if v >= 2 {
+		s.logStart = r.Int64()
+	}
 	bad := false // a structure the encoder could not have written
 	wire.Array(r, false, func() struct{} {
 		t := &topic{name: r.String(false)}
 		t.parts = wire.Array(r, false, func() *partition {
 			p := &partition{next: r.Int64()}
+			if v >= 2 {
+				p.start = r.Int64()
+			}
 			p.batches = wire.Array(r, false, func() batchRef {
 				return batchRef{base: r.Int64(), logIndex: r.Int64(), maxTimestamp: r.Int64()}
 			})
+			if p.start < 0 || p.start > p.next || len(p.batches) > 0 && (p.batches[0].base != p.start || p.batches[0].logIndex < s.logStart) {
+				bad = true
+			}
 			return p
 		})
 		if r.Err() == nil && (s.topics[t.name] != nil || len(t.parts) == 0 || len(s.names) > 0 && s.names[len(s.names)-1] >= t.name) {

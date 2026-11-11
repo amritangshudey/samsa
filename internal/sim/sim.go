@@ -119,6 +119,7 @@ func Run(cfg Config) Result {
 		w.bcfg.MaxAppendBytes = []int{0, 0, 1}[pick.Intn(3)]
 	}
 	w.bcfg.SnapshotEvery = []int64{-1, 1, 7, 100}[pick.Intn(4)]
+	w.bcfg.RetentionBytes = []int64{0, 0, 64 << 10, 8 << 10}[pick.Intn(4)]
 	if cfg.Mutate != nil {
 		cfg.Mutate(&w.bcfg)
 	}
@@ -132,8 +133,11 @@ func Run(cfg Config) Result {
 		w.opts.faults = slices.DeleteFunc(w.opts.faults, func(f fault) bool { return f != faultKill })
 	}
 	w.model = NewModel(strict)
-	res := Result{Seed: cfg.Seed, Setup: fmt.Sprintf("nodes=%d sync=%d segment=%d election=%v faults=%v every=%v drop=%v dup=%v partitions=%v append=%d snapshot=%d disconnects=%v producers=%d consumers=%d vandals=%d members=%d",
-		w.opts.nodes, w.bcfg.Sync, w.bcfg.SegmentBytes, w.bcfg.ElectionTimeout, w.opts.faults, w.opts.faultEvery, w.opts.drop, w.opts.dup, w.opts.partitions, w.bcfg.MaxAppendBytes, w.bcfg.SnapshotEvery, w.opts.disconnects, w.opts.producers, w.opts.consumers, w.opts.vandals, w.opts.members)}
+	if w.bcfg.RetentionBytes > 0 {
+		w.model.Trimming()
+	}
+	res := Result{Seed: cfg.Seed, Setup: fmt.Sprintf("nodes=%d sync=%d segment=%d election=%v faults=%v every=%v drop=%v dup=%v partitions=%v append=%d snapshot=%d retention=%d disconnects=%v producers=%d consumers=%d vandals=%d members=%d",
+		w.opts.nodes, w.bcfg.Sync, w.bcfg.SegmentBytes, w.bcfg.ElectionTimeout, w.opts.faults, w.opts.faultEvery, w.opts.drop, w.opts.dup, w.opts.partitions, w.bcfg.MaxAppendBytes, w.bcfg.SnapshotEvery, w.bcfg.RetentionBytes, w.opts.disconnects, w.opts.producers, w.opts.consumers, w.opts.vandals, w.opts.members)}
 	if w.trace != nil {
 		_, _ = fmt.Fprintf(w.trace, "seed %d: %s\n", cfg.Seed, res.Setup)
 	}
@@ -202,7 +206,7 @@ func (w *world) finalChecks() {
 		}
 	}
 	w.model.BeginFinal()
-	v := &client{w: w, rng: w.rng.Fork(), pin: leader}
+	v := &client{w: w, rng: w.rng.Fork(), pin: leader, fetchMin: 5} // v5+ tells where the log starts
 	v.c = w.connect(v)
 	done := false
 	var read func(i int, offset int64)
@@ -215,14 +219,17 @@ func (w *world) finalChecks() {
 			return
 		}
 		tp := tps[i]
-		f := Fetch{TP: tp, Offset: offset, Floor: w.model.Floor(tp), Epoch: w.model.Epoch(), Known: w.model.Known(tp)}
+		f := Fetch{TP: tp, Offset: offset, Floor: w.model.Floor(tp), Epoch: w.model.Epoch(), Known: w.model.Known(tp), Start: w.model.Start(tp)}
 		req := &wire.FetchRequest{MaxBytes: 1 << 20, Topics: []wire.FetchTopic{{Name: tp.Topic, Partitions: []wire.FetchPartition{
 			{Index: tp.Part, Offset: offset, MaxBytes: 1 << 20},
 		}}}}
-		v.fetch(req, []Fetch{f}, func(_ Fetch, next int64) {
-			if next >= 0 {
+		v.fetch(req, []Fetch{f}, func(f Fetch, next int64) {
+			switch {
+			case next >= 0:
 				read(i, next)
-			} else {
+			case f.Err == wire.ErrOffsetOutOfRange && f.LogStart > offset:
+				read(i, f.LogStart) // retention cut the start
+			default:
 				read(i+1, 0) // end of this partition, or it does not exist
 			}
 		})
@@ -246,6 +253,10 @@ func (w *world) finalChecks() {
 	// everything applied was synced first. Every node is restarted at
 	// once; the cluster must come back to the state it had.
 	_, hash := leader.inc.n.StateHash()
+	// A restarted leader may legitimately trim again; I6 is about replay.
+	for _, nd := range w.nodes {
+		nd.cfg.RetentionBytes = 0
+	}
 	for _, power := range []bool{false, true} {
 		if power && !w.model.strict {
 			break
@@ -347,7 +358,7 @@ func (w *world) settled() *simNode {
 			return nil
 		}
 		r := nd.inc.n.Raft()
-		for i := int64(0); nd != leader && i <= lr.LastIndex(); i++ {
+		for i := max(lr.LogStart(), r.LogStart()); nd != leader && i <= lr.LastIndex(); i++ {
 			a, _, errA := lr.Read(i)
 			b, _, errB := r.Read(i)
 			if errA != nil || errB != nil || lr.EntryTerm(i) != r.EntryTerm(i) || !bytes.Equal(a, b) {

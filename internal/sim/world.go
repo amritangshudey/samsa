@@ -53,6 +53,9 @@ type Stats struct {
 	Partitions                           int
 	// Starts that began from a snapshot instead of the whole log.
 	SnapshotStarts int
+	// Log prefixes deleted by retention, and snapshots installed from a
+	// leader (counted when they begin).
+	Trims, Installs int
 }
 
 // simNode is one machine of the cluster: a disk that outlives the
@@ -102,6 +105,9 @@ type incarnation struct {
 	dead   bool
 	// S5 and S3: how far this life has been seen to commit, and checked.
 	commit int64
+	// What retention and InstallSnapshot have been seen to do.
+	logStart   int64
+	installing bool
 }
 
 // conn is one client connection: two ordered byte streams.

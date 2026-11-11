@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"path"
 	"slices"
 	"time"
 
@@ -102,6 +103,9 @@ const (
 	// MutSnapshotUnsynced writes a snapshot without first syncing the log
 	// up to its index.
 	MutSnapshotUnsynced
+	// MutTrimPastSnapshot lets Compact remove entries that no snapshot
+	// on disk covers yet.
+	MutTrimPastSnapshot
 )
 
 func (r *Raft) mut(m Mutation) bool { return r.cfg.Unsafe&m != 0 }
@@ -116,6 +120,9 @@ type progress struct {
 	// acked is the send time of the latest request this follower has
 	// answered: it will not vote for anyone until ElectionTimeout after.
 	acked sys.Instant
+	// snapIndex and snapOff track a snapshot being sent: which one, and
+	// the next byte to send.
+	snapIndex, snapOff int64
 }
 
 // Raft is one node's consensus state. It is driven by exactly one caller,
@@ -147,8 +154,13 @@ type Raft struct {
 	// or started. Until ElectionTimeout after it, it ignores candidates.
 	contact sys.Instant
 
-	loaded    snapshot // what Start found on disk, for the caller
-	snapIndex int64    // index of the newest snapshot on disk, or -1
+	latest      snapshot // the newest snapshot on disk; index -1 if none
+	latestBytes []byte   // its encoding, for sending to followers
+	// pending is the snapshot being installed while the log is fetched
+	// again from its cut; nil otherwise. inst is one being received.
+	pending      *snapshot
+	pendingBytes []byte
+	inst         *transfer
 
 	err error
 }
@@ -169,7 +181,7 @@ func New(cfg Config, env Env, disk sys.Disk) *Raft {
 	}
 	cfg.Log.SyncBytes = -1
 	return &Raft{cfg: cfg, env: env, disk: disk, hsf: hardStateFile{disk: disk, dir: cfg.Dir},
-		leader: noVote, commit: -1, ackTo: noVote, snapIndex: -1}
+		leader: noVote, commit: -1, ackTo: noVote, latest: snapshot{index: -1}}
 }
 
 // Start recovers the log and the hard state from disk and begins as a
@@ -185,17 +197,39 @@ func (r *Raft) Start() error {
 	}
 	r.log = log
 	r.contact = r.env.Now() // it may have answered a leader just before it stopped
-	if r.loaded, err = loadSnapshot(r.disk, r.cfg.Dir); err != nil {
+	if r.latest, r.latestBytes, err = loadSnapshot(r.disk, r.cfg.Dir); err != nil {
 		return err
 	}
-	r.snapIndex = r.loaded.index
+	marker, err := readFile(r.disk, path.Join(r.cfg.Dir, installName))
+	if err != nil {
+		return err
+	}
 	from := log.StartOffset()
-	if s := r.loaded; s.index >= 0 {
+	if marker != nil {
+		cut, s, raw, err := decodeInstall(marker)
+		if err != nil {
+			return err
+		}
+		if s.index <= r.latest.index { // promoted just before a crash
+			if err := r.disk.Remove(path.Join(r.cfg.Dir, installName)); err != nil {
+				return fmt.Errorf("remove install marker: %w", err)
+			}
+			marker = nil
+		} else {
+			if err := r.beginInstall(cut, s, raw); err != nil {
+				return err
+			}
+			from = cut
+		}
+	}
+	if s := r.latest; marker == nil && s.index >= 0 {
 		if err := r.checkSnapshot(s); err != nil {
 			return err
 		}
 		r.terms, from = s.expand(), s.index+1
 		r.commit = s.index // the caller applied it, so it was committed
+	} else if marker == nil && log.StartOffset() > 0 {
+		return fmt.Errorf("%w: log starts at %d and there is no snapshot", errBadSnapshot, log.StartOffset())
 	}
 	for off := from; off < log.EndOffset(); {
 		batches, err := log.Read(off, 4<<20)
@@ -217,6 +251,7 @@ func (r *Raft) Start() error {
 	if last := r.lastTerm(); last > r.hard.term {
 		return fmt.Errorf("%w: log holds term %d, hard state says %d", errBadHardState, last, r.hard.term)
 	}
+	r.maybePromote()
 	if len(r.cfg.Peers) == 1 {
 		r.campaign()
 	} else {
@@ -228,8 +263,10 @@ func (r *Raft) Start() error {
 // checkSnapshot refuses a snapshot that the log cannot back: one that
 // reaches past the log's end, or whose last entry has another term.
 func (r *Raft) checkSnapshot(s snapshot) error {
-	if r.log.StartOffset() != 0 || s.index >= r.log.EndOffset() {
-		return fmt.Errorf("%w: snapshot at %d, log holds %d to %d", errBadSnapshot, s.index, r.log.StartOffset(), r.log.EndOffset())
+	if start := r.log.StartOffset(); start > s.index+1 || s.index >= r.log.EndOffset() {
+		return fmt.Errorf("%w: snapshot at %d, log holds %d to %d", errBadSnapshot, s.index, start, r.log.EndOffset())
+	} else if s.index < start {
+		return nil // the log starts just after it
 	}
 	batches, err := r.log.Read(s.index, 0)
 	if err != nil {
@@ -468,6 +505,7 @@ func (r *Raft) Flush() {
 	if !r.cfg.AckBeforeSync {
 		r.Sync()
 	}
+	r.maybePromote()
 	r.dirty = false
 	r.sendAck()
 	r.advanceCommit()
@@ -496,6 +534,10 @@ func (r *Raft) broadcast(force bool) {
 // next index, as many as fit, or none if it is up to date (a heartbeat).
 func (r *Raft) replicate(to sys.NodeID, p *progress) {
 	if r.err != nil {
+		return
+	}
+	if p.next < r.log.StartOffset() {
+		r.sendSnapshot(to, p)
 		return
 	}
 	m := message{typ: msgAppendEntries, prevIndex: p.next - 1, commit: r.commit, stamp: int64(r.env.Now())}
@@ -598,6 +640,16 @@ func (r *Raft) Step(from sys.NodeID, raw []byte) {
 		if !stale && r.role == Leader {
 			r.onAppendResponse(from, m)
 		}
+	case msgInstallSnapshot:
+		if stale {
+			r.send(from, message{typ: msgAppendResponse, echo: -1, index: -1})
+			return
+		}
+		r.onInstallSnapshot(from, m)
+	case msgInstallResponse:
+		if !stale && r.role == Leader {
+			r.onInstallResponse(from, m)
+		}
 	}
 }
 
@@ -675,6 +727,7 @@ func (r *Raft) onAppendEntries(from sys.NodeID, m message) {
 		r.ackTo, r.ackIndex, r.ackEcho = from, confirmed, m.prevIndex
 	}
 	r.ackStamp = max(r.ackStamp, m.stamp) // only the newest contact matters to the lease
+	r.maybePromote()                      // under AckBeforeSync, appended is enough
 	r.sendAck()                           // at once if nothing new needs syncing; otherwise after Flush
 }
 

@@ -431,7 +431,7 @@ func (m *ProduceResponse) Encode(w *Writer, v int16) {
 			w.Int64(p.BaseOffset)
 			w.Int64(-1) // LogAppendTimeMs: record timestamps are the producer's
 			if v >= 5 {
-				w.Int64(0) // LogStartOffset: nothing is ever deleted
+				w.Int64(-1) // LogStartOffset: the schema's default, "unknown"; Fetch carries it
 			}
 			if v >= 8 {
 				w.ArrayLen(false, 0)
@@ -535,10 +535,11 @@ func (m *FetchRequest) Encode(w *Writer, v int16) {
 
 // FetchPartitionResponse is one partition's result in a Fetch response.
 type FetchPartitionResponse struct {
-	Index         int32
-	ErrorCode     int16
-	HighWatermark int64
-	Records       []byte // whole record batches, or nil
+	Index          int32
+	ErrorCode      int16
+	HighWatermark  int64
+	LogStartOffset int64  // v5+: the first offset still available
+	Records        []byte // whole record batches, or nil
 }
 
 // FetchTopicResponse is one topic of a Fetch response.
@@ -562,7 +563,7 @@ func (m *FetchResponse) Decode(r *Reader, v int16) {
 			p := FetchPartitionResponse{Index: r.Int32(), ErrorCode: r.Int16(), HighWatermark: r.Int64()}
 			r.Int64() // LastStableOffset, v4+
 			if v >= 5 {
-				r.Int64() // LogStartOffset
+				p.LogStartOffset = r.Int64()
 			}
 			Array(r, false, func() struct{} { // AbortedTransactions, v4+
 				r.Int64()
@@ -597,7 +598,7 @@ func (m *FetchResponse) Encode(w *Writer, v int16) {
 			w.Int64(p.HighWatermark)
 			w.Int64(p.HighWatermark) // LastStableOffset: no transactions
 			if v >= 5 {
-				w.Int64(0) // LogStartOffset
+				w.Int64(p.LogStartOffset)
 			}
 			w.ArrayLen(false, -1) // AbortedTransactions: null
 			if v >= 11 {

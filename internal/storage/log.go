@@ -488,19 +488,8 @@ func (l *Log) TruncateSuffix(offset int64) error {
 	keep := sort.Search(len(l.segs), func(i int) bool { return l.segs[i].base > offset })
 	for len(l.segs) > keep {
 		s := l.active()
-		if s.file != nil {
-			_ = s.file.Close() // the file is about to be removed
-		}
-		if err := l.disk.Remove(segName(l.dir, s.base, ".log")); err != nil {
-			return l.fail(fmt.Errorf("remove segment %d: %w", s.base, err))
-		}
-		// A sealed segment has an index file; nothing reads it without
-		// its segment, but it should not be left to confuse a reader.
-		if err := l.disk.Remove(segName(l.dir, s.base, ".index")); err != nil && !errors.Is(err, sys.ErrNotExist) {
-			return l.fail(fmt.Errorf("remove index %d: %w", s.base, err))
-		}
-		if err := l.disk.SyncDir(l.dir); err != nil {
-			return l.fail(fmt.Errorf("sync log directory %s: %w", l.dir, err))
+		if err := l.remove(s); err != nil {
+			return err
 		}
 		l.segs = l.segs[:len(l.segs)-1]
 		l.end = s.base
@@ -543,12 +532,91 @@ func (l *Log) TruncateSuffix(offset int64) error {
 	return nil
 }
 
+// remove deletes segment s and its index, durably: when it returns, a crash
+// cannot bring them back.
+func (l *Log) remove(s *segment) error {
+	if s.file != nil {
+		_ = s.file.Close() // the file is about to be removed
+		s.file = nil
+	}
+	if err := l.disk.Remove(segName(l.dir, s.base, ".log")); err != nil {
+		return l.fail(fmt.Errorf("remove segment %d: %w", s.base, err))
+	}
+	// A sealed segment has an index file; nothing reads it without
+	// its segment, but it should not be left to confuse a reader.
+	if err := l.disk.Remove(segName(l.dir, s.base, ".index")); err != nil && !errors.Is(err, sys.ErrNotExist) {
+		return l.fail(fmt.Errorf("remove index %d: %w", s.base, err))
+	}
+	if err := l.disk.SyncDir(l.dir); err != nil {
+		return l.fail(fmt.Errorf("sync log directory %s: %w", l.dir, err))
+	}
+	return nil
+}
+
+// TruncatePrefix removes the sealed segments that hold only records below
+// offset, oldest first, each removal durable before the next, so that a
+// crash leaves a contiguous log. Records at or after offset are kept, and so
+// are records below it that share a segment with them: StartOffset may stay
+// below offset. The active segment is never removed.
+func (l *Log) TruncatePrefix(offset int64) error {
+	if l.err != nil {
+		return l.err
+	}
+	for len(l.segs) > 1 && l.segs[1].base <= offset {
+		if err := l.remove(l.segs[0]); err != nil {
+			return err
+		}
+		l.segs = l.segs[1:]
+	}
+	return nil
+}
+
+// Reset removes every record and makes base the offset of the next one,
+// for a node that will receive its log afresh from base. Segments go newest
+// first: a crash leaves a prefix of the old log, or an empty directory,
+// which Open then starts at 0. The caller must notice either and reset
+// again.
+func (l *Log) Reset(base int64) error {
+	if l.err != nil {
+		return l.err
+	}
+	if base < 0 {
+		return fmt.Errorf("%w: reset to %d", ErrOffsetOutOfRange, base)
+	}
+	for len(l.segs) > 0 {
+		if err := l.remove(l.active()); err != nil {
+			return err
+		}
+		l.segs = l.segs[:len(l.segs)-1]
+	}
+	if err := l.addSegment(base); err != nil {
+		return l.fail(err)
+	}
+	l.end, l.durable, l.unsynced = base, base, 0
+	return nil
+}
+
 // corrupt turns a bad frame met outside recovery into ErrCorrupt.
 func corrupt(err error) error {
 	if errors.Is(err, errBadFrame) {
 		return fmt.Errorf("%w: %w", ErrCorrupt, err)
 	}
 	return err
+}
+
+// CutFor returns the base of the oldest segment from which on the log holds
+// at most maxBytes, never past the active segment: where to cut so that
+// about maxBytes remain.
+func (l *Log) CutFor(maxBytes int64) int64 {
+	var total int64
+	for _, s := range l.segs {
+		total += s.size
+	}
+	i := 0
+	for ; i < len(l.segs)-1 && total > maxBytes; i++ {
+		total -= l.segs[i].size
+	}
+	return l.segs[i].base
 }
 
 // StartOffset returns the offset of the first record in the log.

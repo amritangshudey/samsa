@@ -61,6 +61,7 @@ type client struct {
 	cursors  map[TP]int64 // consumers: next offset to read
 	mem      *membership  // group members: their place in the group
 	pin      *simNode     // if set, the only node this client connects to
+	fetchMin int16        // lowest Fetch version to use
 }
 
 // tick is the client's heartbeat: connect, misbehave, or issue a request.
@@ -453,7 +454,7 @@ func (cl *client) consume() {
 	}
 	var asked []Fetch
 	for _, tp := range cl.distinctTPs(1 + cl.rng.Intn(3)) {
-		f := Fetch{TP: tp, Offset: cl.cursors[tp], Floor: m.Floor(tp), Epoch: m.Epoch(), Known: m.Known(tp)}
+		f := Fetch{TP: tp, Offset: cl.cursors[tp], Floor: m.Floor(tp), Epoch: m.Epoch(), Known: m.Known(tp), Start: m.Start(tp)}
 		switch cl.rng.Intn(10) {
 		case 0:
 			f.Offset = int64(cl.rng.Intn(int(f.Floor) + 3)) // anywhere, perhaps just past the end
@@ -470,7 +471,7 @@ func (cl *client) consume() {
 		case next >= 0:
 			cl.cursors[f.TP] = next
 		case f.Err == wire.ErrOffsetOutOfRange || m.stale(f.Epoch):
-			cl.cursors[f.TP] = 0 // the log may have been cut: start over
+			cl.cursors[f.TP] = max(f.LogStart, 0) // the log may have been cut: start over
 		}
 	})
 }
@@ -480,7 +481,8 @@ func (cl *client) consume() {
 func (cl *client) fetch(req *wire.FetchRequest, asked []Fetch, each func(f Fetch, next int64)) {
 	w := cl.w
 	resp := &wire.FetchResponse{}
-	cl.request(wire.KeyFetch, cl.version(wire.KeyFetch), req, resp, func(ok bool) {
+	version := max(cl.version(wire.KeyFetch), cl.fetchMin)
+	cl.request(wire.KeyFetch, version, req, resp, func(ok bool) {
 		if !ok {
 			return
 		}
@@ -496,7 +498,10 @@ func (cl *client) fetch(req *wire.FetchRequest, asked []Fetch, each func(f Fetch
 				return
 			}
 			p := t.Partitions[0]
-			f.Err, f.HW, f.Records, f.MustProgress = p.ErrorCode, p.HighWatermark, p.Records, bytesSoFar == 0
+			f.Err, f.HW, f.Records, f.MustProgress, f.LogStart = p.ErrorCode, p.HighWatermark, p.Records, bytesSoFar == 0, -1
+			if version >= 5 {
+				f.LogStart = p.LogStartOffset
+			}
 			bytesSoFar += len(p.Records)
 			next, err := w.model.Fetched(f)
 			if err != nil {

@@ -154,7 +154,40 @@ for how much that is worth.
   round-trip test's sample request now carries one, and fails without the
   fix.
 
+### R1. Snapshot chunks too large for the decoder: no install ever finished (A1 part b)
+
+- **Found by:** `TestRandomSchedules` in `internal/raft`, seed 8, while
+  InstallSnapshot was being written (never merged with the bug).
+- **Violated:** liveness of the random schedule: a follower behind the
+  leader's log start never caught up.
+- **Cause:** the leader cut its snapshot into chunks of `MaxAppendBytes`,
+  which may exceed the largest message the receiver's decoder accepts; every
+  chunk was refused as malformed and resent.
+- **Fix:** chunks are at most `MaxPayloadBytes` less the entry header.
+
+### R2. A diverged follower refused both the snapshot and the entries (A1 part b)
+
+- **Found by:** `TestRandomSchedules`, seed 1053, same stage.
+- **Violated:** liveness: a livelock between leader and follower.
+- **Cause:** the follower answered "not needed" whenever its log reached
+  past the cut, even when its entry at C − 1 was of another term; the
+  leader then sent entries from C, which the follower refused for the
+  mismatch at C − 1, and the leader went back to the snapshot.
+- **Fix:** InstallSnapshot carries the term at C − 1 (`prevTerm`), and the
+  follower declines only if it holds that entry with that term.
+
 ## Bugs in the simulator and tests
+
+### M8. I6 blamed the broker for a Trim proposed after the final restart (A1 part b)
+
+- **Seeds:** 55, 498 and 975, the first run with retention.
+- **Reported as:** I6, "after a restart the state hash is ...; before it
+  was ...".
+- **Cause:** I6 restarts every node and requires the same state hash. A
+  restarted leader writes a no-op, its log crosses a segment, and it
+  proposes a Trim: a legitimate change of state.
+- **Fix:** the final restarts run with retention off. I6 is about replay
+  rebuilding the same state, which this still checks.
 
 ### M1. Torn block destroyed bytes that had been synced (Phase 1)
 

@@ -25,210 +25,234 @@ var randomSeeds = flag.Int("raft-seeds", 300, "number of seeds for the random sc
 //
 // and, once faults stop, that the cluster elects a leader and every log
 // becomes the same.
-func randomRun(seed uint64, mutate func(*Config)) error {
+// randomRun returns how many times a node was seen installing a snapshot
+// from its leader, so that the suite can show the path ran.
+func randomRun(seed uint64, mutate func(*Config)) (installs int, err error) {
 	// Each seed picks its own mix of faults: a bug that needs many crashes
 	// or one entry per message hides from any single fixed mix.
-	crashes := []int{2, 8, 30}[seed/2%3]
-	c := newSeededCluster(nil, seed, 3+2*int(seed%2), func(cfg *Config) {
-		if seed/6%2 == 1 {
-			cfg.MaxAppendBytes = 1 // one entry per message
-		}
-		if mutate != nil {
-			mutate(cfg)
-		}
-	})
-	rng := c.rng
-	type seen struct {
-		term int64
-		cmd  []byte
-	}
-	var (
-		leaders   = map[int64]sys.NodeID{}
-		committed []seen // by index: the first sighting of each committed entry
-		checked   = map[sys.NodeID]int64{}
-		terms     = map[sys.NodeID]int64{}
-		proposals int
-	)
-	check := func(id sys.NodeID) error {
-		r := c.r(id)
-		if err := r.Err(); err != nil {
-			return err
-		}
-		if r.Term() < terms[id] {
-			return fmt.Errorf("S5: node %d went from term %d back to %d", id, terms[id], r.Term())
-		}
-		terms[id] = r.Term()
-		if r.Role() == Leader {
-			if other, ok := leaders[r.Term()]; ok && other != id {
-				return fmt.Errorf("S1: nodes %d and %d both led term %d", other, id, r.Term())
+	err = func() error {
+		crashes := []int{2, 8, 30}[seed/2%3]
+		c := newSeededCluster(nil, seed, 3+2*int(seed%2), func(cfg *Config) {
+			if seed/6%2 == 1 {
+				cfg.MaxAppendBytes = 1 // one entry per message
 			}
-			leaders[r.Term()] = id
-		}
-		for i := checked[id]; i < r.Committed(); i++ {
-			cmd, _, err := r.Read(i)
-			if err != nil {
-				return fmt.Errorf("node %d: committed entry %d: %w", id, i, err)
+			if mutate != nil {
+				mutate(cfg)
 			}
-			got := seen{r.EntryTerm(i), slices.Clone(cmd)}
-			if int(i) == len(committed) {
-				committed = append(committed, got)
-			} else if w := committed[i]; w.term != got.term || !bytes.Equal(w.cmd, got.cmd) {
-				return fmt.Errorf("S3: node %d committed %d:%q at index %d, where %d:%q was committed before", id, got.term, got.cmd, i, w.term, w.cmd)
-			}
+		})
+		rng := c.rng
+		type seen struct {
+			term int64
+			cmd  []byte
 		}
-		checked[id] = r.Committed()
-		return nil
-	}
-	matching := func() error {
-		for _, a := range c.ids {
-			for _, b := range c.ids {
-				if c.nodes[a].down || c.nodes[b].down {
-					continue // a dead node's object describes a disk that no longer exists
+		var (
+			leaders   = map[int64]sys.NodeID{}
+			committed []seen // by index: the first sighting of each committed entry
+			checked   = map[sys.NodeID]int64{}
+			terms     = map[sys.NodeID]int64{}
+			proposals int
+		)
+		check := func(id sys.NodeID) error {
+			r := c.r(id)
+			if err := r.Err(); err != nil {
+				return err
+			}
+			if r.Installing() {
+				installs++
+			}
+			if r.Term() < terms[id] {
+				return fmt.Errorf("S5: node %d went from term %d back to %d", id, terms[id], r.Term())
+			}
+			terms[id] = r.Term()
+			if r.Role() == Leader {
+				if other, ok := leaders[r.Term()]; ok && other != id {
+					return fmt.Errorf("S1: nodes %d and %d both led term %d", other, id, r.Term())
 				}
-				ra, rb := c.r(a), c.r(b)
-				for i := min(ra.LastIndex(), rb.LastIndex()); a < b && i >= 0; i-- {
-					if ra.EntryTerm(i) != rb.EntryTerm(i) {
-						continue
+				leaders[r.Term()] = id
+			}
+			// Entries below the log start are gone by design; the node checked
+			// them before, or its leader did before sending a snapshot.
+			from := max(checked[id], r.LogStart())
+			if from > int64(len(committed)) && from < r.Committed() {
+				return fmt.Errorf("node %d starts its log at %d, but only %d entries were ever seen committed", id, from, len(committed))
+			}
+			for i := from; i < r.Committed(); i++ {
+				cmd, _, err := r.Read(i)
+				if err != nil {
+					return fmt.Errorf("node %d: committed entry %d: %w", id, i, err)
+				}
+				got := seen{r.EntryTerm(i), slices.Clone(cmd)}
+				if int(i) == len(committed) {
+					committed = append(committed, got)
+				} else if w := committed[i]; w.term != got.term || !bytes.Equal(w.cmd, got.cmd) {
+					return fmt.Errorf("S3: node %d committed %d:%q at index %d, where %d:%q was committed before", id, got.term, got.cmd, i, w.term, w.cmd)
+				}
+			}
+			checked[id] = r.Committed()
+			return nil
+		}
+		matching := func() error {
+			for _, a := range c.ids {
+				for _, b := range c.ids {
+					if c.nodes[a].down || c.nodes[b].down {
+						continue // a dead node's object describes a disk that no longer exists
 					}
-					for ; i >= 0; i-- { // from the highest shared (index, term) down, all must be equal
-						ca, _, _ := ra.Read(i)
-						cb, _, _ := rb.Read(i)
-						if ra.EntryTerm(i) != rb.EntryTerm(i) || !bytes.Equal(ca, cb) {
-							return fmt.Errorf("S2: nodes %d and %d differ at index %d below a matching entry", a, b, i)
+					ra, rb := c.r(a), c.r(b)
+					for i := min(ra.LastIndex(), rb.LastIndex()); a < b && i >= 0; i-- {
+						if ra.EntryTerm(i) != rb.EntryTerm(i) {
+							continue
+						}
+						for floor := max(ra.LogStart(), rb.LogStart()); i >= floor; i-- { // from the highest shared (index, term) down, all must be equal
+							ca, _, _ := ra.Read(i)
+							cb, _, _ := rb.Read(i)
+							if ra.EntryTerm(i) != rb.EntryTerm(i) || !bytes.Equal(ca, cb) {
+								return fmt.Errorf("S2: nodes %d and %d differ at index %d below a matching entry", a, b, i)
+							}
 						}
 					}
 				}
 			}
+			return nil
 		}
-		return nil
-	}
-	restart := func(id sys.NodeID) error {
-		checked[id] = 0
-		if err := c.open(id); err != nil {
-			return fmt.Errorf("restart node %d: %w", id, err)
-		}
-		if i, state := c.r(id).Snapshot(); i >= 0 && string(state) != fmt.Sprintf("s%d", i) {
-			return fmt.Errorf("node %d: snapshot at %d holds %q", id, i, state)
-		}
-		return check(id)
-	}
-	for _, id := range c.ids {
-		if err := restart(id); err != nil {
-			return err
-		}
-	}
-
-	pick := func() *tnode { return c.nodes[c.ids[rng.Intn(len(c.ids))]] }
-	for step := range 4000 {
-		n := pick()
-		switch r := rng.Intn(1000); {
-		case n.down:
-			if r < 100 {
-				if err := restart(n.id); err != nil {
-					return err
-				}
+		restart := func(id sys.NodeID) error {
+			checked[id] = 0
+			if err := c.open(id); err != nil {
+				return fmt.Errorf("restart node %d: %w", id, err)
 			}
-			continue
-		case r < crashes: // power loss: whatever was not synced is gone
-			c.crash(n.id)
-			continue
-		case r < crashes+12 && n.armed[TimerElection]:
-			n.armed[TimerElection] = false
-			c.passTime()
-			n.r.OnTimer(TimerElection)
-		case r < 120 && n.armed[TimerHeartbeat]:
-			n.armed[TimerHeartbeat] = false
-			n.r.OnTimer(TimerHeartbeat)
-		case r < 250:
-			if n.r.Role() == Leader {
-				proposals++
-				if _, err := n.r.Propose(fmt.Appendf(nil, "c%d", proposals)); err != nil {
-					return fmt.Errorf("propose on leader %d: %w", n.id, err)
-				}
+			if i, state := c.r(id).Snapshot(); i >= 0 && string(state) != fmt.Sprintf("s%d", i) {
+				return fmt.Errorf("node %d: snapshot at %d holds %q", id, i, state)
 			}
-		case r < 440:
-			n.r.Flush()
-		case r < 450: // a snapshot of everything committed; restarts then start from it
-			if i := n.r.Committed() - 1; i >= 0 {
-				n.r.SaveSnapshot(i, fmt.Appendf(nil, "s%d", i))
-			}
-		case len(c.queue) > 0:
-			i := rng.Intn(len(c.queue))
-			m := c.queue[i]
-			switch {
-			case r < 500: // lost
-				c.queue = slices.Delete(c.queue, i, i+1)
-			case r < 540: // delivered, and delivered again later
-			default:
-				c.queue = slices.Delete(c.queue, i, i+1)
-			}
-			if r >= 500 && !c.nodes[m.to].down {
-				n = c.nodes[m.to]
-				n.r.Step(m.from, m.raw)
-			}
+			return check(id)
 		}
-		if err := check(n.id); err != nil {
-			return fmt.Errorf("step %d: %w", step, err)
-		}
-		if step%500 == 0 {
-			if err := matching(); err != nil {
-				return fmt.Errorf("step %d: %w", step, err)
-			}
-		}
-	}
-
-	// Faults stop. Everyone comes back; messages arrive; timers fire.
-	for _, id := range c.ids {
-		if c.nodes[id].down {
+		for _, id := range c.ids {
 			if err := restart(id); err != nil {
 				return err
 			}
 		}
-	}
-	for round := range 300 {
-		for len(c.queue) > 0 {
-			m := c.queue[0]
-			c.queue = c.queue[1:]
-			c.r(m.to).Step(m.from, m.raw)
-		}
-		leader := false
-		for _, id := range c.ids {
-			n := c.nodes[id]
-			n.r.Flush()
-			if n.r.Role() == Leader && n.armed[TimerHeartbeat] {
-				leader = true
+
+		pick := func() *tnode { return c.nodes[c.ids[rng.Intn(len(c.ids))]] }
+		for step := range 4000 {
+			n := pick()
+			switch r := rng.Intn(1000); {
+			case n.down:
+				if r < 100 {
+					if err := restart(n.id); err != nil {
+						return err
+					}
+				}
+				continue
+			case r < crashes: // power loss: whatever was not synced is gone
+				c.crash(n.id)
+				continue
+			case r < crashes+12 && n.armed[TimerElection]:
+				n.armed[TimerElection] = false
+				c.passTime()
+				n.r.OnTimer(TimerElection)
+			case r < 120 && n.armed[TimerHeartbeat]:
+				n.armed[TimerHeartbeat] = false
 				n.r.OnTimer(TimerHeartbeat)
+			case r < 250:
+				if n.r.Role() == Leader {
+					proposals++
+					if _, err := n.r.Propose(fmt.Appendf(nil, "c%d", proposals)); err != nil {
+						return fmt.Errorf("propose on leader %d: %w", n.id, err)
+					}
+				}
+			case r < 440:
+				n.r.Flush()
+			case r < 450: // a snapshot of everything committed; restarts then start from it
+				if i := n.r.Committed() - 1; i >= 0 && !n.r.Installing() {
+					n.r.SaveSnapshot(i, fmt.Appendf(nil, "s%d", i))
+				}
+			case r < 460: // drop what the snapshot covers; a lagging follower then needs it
+				n.r.Compact(n.r.Committed())
+			case len(c.queue) > 0:
+				i := rng.Intn(len(c.queue))
+				m := c.queue[i]
+				switch {
+				case r < 500: // lost
+					c.queue = slices.Delete(c.queue, i, i+1)
+				case r < 540: // delivered, and delivered again later
+				default:
+					c.queue = slices.Delete(c.queue, i, i+1)
+				}
+				if r >= 500 && !c.nodes[m.to].down {
+					n = c.nodes[m.to]
+					n.r.Step(m.from, m.raw)
+				}
 			}
-			if err := check(id); err != nil {
-				return fmt.Errorf("healing: %w", err)
+			if err := check(n.id); err != nil {
+				return fmt.Errorf("step %d: %w", step, err)
+			}
+			if step%500 == 0 {
+				if err := matching(); err != nil {
+					return fmt.Errorf("step %d: %w", step, err)
+				}
 			}
 		}
-		if !leader && len(c.queue) == 0 {
-			c.passTime()
-			c.r(c.ids[round%len(c.ids)]).OnTimer(TimerElection)
+
+		// Faults stop. Everyone comes back; messages arrive; timers fire.
+		for _, id := range c.ids {
+			if c.nodes[id].down {
+				if err := restart(id); err != nil {
+					return err
+				}
+			}
 		}
-	}
-	if err := matching(); err != nil {
-		return err
-	}
-	last := c.r(c.ids[0]).LastIndex()
-	for _, id := range c.ids {
-		if r := c.r(id); r.LastIndex() != last || r.Committed() != last+1 {
-			return fmt.Errorf("after healing node %d has last index %d and %d committed; node %d has last index %d",
-				id, r.LastIndex(), r.Committed(), c.ids[0], last)
+		for round := range 300 {
+			for len(c.queue) > 0 {
+				m := c.queue[0]
+				c.queue = c.queue[1:]
+				c.r(m.to).Step(m.from, m.raw)
+			}
+			leader := false
+			for _, id := range c.ids {
+				n := c.nodes[id]
+				n.r.Flush()
+				if n.r.Role() == Leader && n.armed[TimerHeartbeat] {
+					leader = true
+					n.r.OnTimer(TimerHeartbeat)
+				}
+				if err := check(id); err != nil {
+					return fmt.Errorf("healing: %w", err)
+				}
+			}
+			if !leader && len(c.queue) == 0 {
+				c.passTime()
+				c.r(c.ids[round%len(c.ids)]).OnTimer(TimerElection)
+			}
 		}
-	}
-	if len(committed) == 0 { // a crash-heavy seed commits little; none at all means healing failed
-		return fmt.Errorf("nothing was ever committed")
-	}
-	return nil
+		if err := matching(); err != nil {
+			return err
+		}
+		last := c.r(c.ids[0]).LastIndex()
+		for _, id := range c.ids {
+			if r := c.r(id); r.LastIndex() != last || r.Committed() != last+1 {
+				return fmt.Errorf("after healing node %d has last index %d and %d committed; node %d has last index %d",
+					id, r.LastIndex(), r.Committed(), c.ids[0], last)
+			}
+		}
+		if len(committed) == 0 { // a crash-heavy seed commits little; none at all means healing failed
+			return fmt.Errorf("nothing was ever committed")
+		}
+		return nil
+
+	}()
+	return installs, err
 }
 
 func TestRandomSchedules(t *testing.T) {
+	installs := 0
 	for seed := range uint64(*randomSeeds) {
-		if err := randomRun(seed, nil); err != nil {
+		n, err := randomRun(seed, nil)
+		if err != nil {
 			t.Fatalf("seed %d: %v", seed, err)
 		}
+		installs += n
+	}
+	t.Logf("%d seeds; nodes seen installing a snapshot %d times", *randomSeeds, installs)
+	if *randomSeeds >= 100 && installs == 0 {
+		t.Error("no node ever installed a snapshot: the path is untested")
 	}
 }
 
@@ -242,10 +266,11 @@ func TestRandomSchedulesCatchBrokenRaft(t *testing.T) {
 		"vote by log length only":                 func(c *Config) { c.Unsafe = MutVoteByLength },
 		"follower truncates on a stale message":   func(c *Config) { c.Unsafe = MutTruncateOnStale },
 		"snapshot before the log is synced":       func(c *Config) { c.Unsafe = MutSnapshotUnsynced },
+		"compact past the snapshot":               func(c *Config) { c.Unsafe = MutTrimPastSnapshot },
 	} {
 		caught := false
 		for seed := range uint64(3000) {
-			if err := randomRun(seed, mutate); err != nil {
+			if _, err := randomRun(seed, mutate); err != nil {
 				t.Logf("%s: caught at seed %d: %v", name, seed, err)
 				caught = true
 				break
@@ -263,6 +288,8 @@ func FuzzDecodeMessage(f *testing.F) {
 		{typ: msgVoteResponse, term: 3, ok: true},
 		{typ: msgAppendEntries, term: 3, prevIndex: 1, prevTerm: 1, commit: 1, entries: []entry{{term: 2, cmd: []byte("x")}, {term: 3, kind: kindNoop}}},
 		{typ: msgAppendResponse, term: 3, ok: true, echo: 1, index: 3},
+		{typ: msgInstallSnapshot, term: 3, stamp: 9, cut: 5, prevTerm: 2, snapIndex: 6, total: 10, offset: 4, data: []byte("chunk")},
+		{typ: msgInstallResponse, term: 3, stamp: 9, offset: -1, index: 4},
 	} {
 		f.Add(m.encode())
 	}

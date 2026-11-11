@@ -187,7 +187,7 @@ func (n *Node) listOffsets(req *wire.ListOffsetsRequest) *wire.ListOffsetsRespon
 			case q.Timestamp == wire.TimestampLatest:
 				pr.Offset = p.next
 			case q.Timestamp == wire.TimestampEarliest:
-				pr.Offset = 0
+				pr.Offset = p.start
 			case q.Timestamp < 0:
 				pr.ErrorCode = wire.ErrInvalidRequest // other special values are not supported
 			default:
@@ -293,10 +293,10 @@ func (n *Node) buildFetch(req *wire.FetchRequest) (resp *wire.FetchResponse, siz
 			switch {
 			case p == nil:
 				pr.ErrorCode = wire.ErrUnknownTopicOrPartition
-			case q.Offset < 0 || q.Offset > p.next:
-				pr.ErrorCode, pr.HighWatermark = wire.ErrOffsetOutOfRange, p.next
+			case q.Offset < p.start || q.Offset > p.next:
+				pr.ErrorCode, pr.HighWatermark, pr.LogStartOffset = wire.ErrOffsetOutOfRange, p.next, p.start
 			default:
-				pr.HighWatermark = p.next
+				pr.HighWatermark, pr.LogStartOffset = p.next, p.start
 				// The response's first batch is sent whatever its size, so
 				// a consumer can always make progress.
 				pr.Records = n.readBatches(p, q.Offset, min(int(q.MaxBytes), budget-size), size == 0)

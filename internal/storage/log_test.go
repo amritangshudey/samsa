@@ -417,3 +417,67 @@ func TestTruncateSuffix(t *testing.T) {
 	appendN(0, 1, "again")
 	check("again-00")
 }
+
+func TestTruncatePrefixAndReset(t *testing.T) {
+	disk := simsys.NewDisk(simsys.NewRand(1), simsys.DiskConfig{})
+	cfg := Config{SegmentBytes: 100, MaxPayloadBytes: 40, SyncBytes: -1} // a few records per segment
+	l, err := Open(disk, "log", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 30 {
+		if _, err := l.Append([]byte(fmt.Sprintf("record %02d", i)), 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := l.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.TruncatePrefix(17); err != nil {
+		t.Fatal(err)
+	}
+	start := l.StartOffset()
+	if start == 0 || start > 17 {
+		t.Fatalf("after cutting below 17 the log starts at %d", start)
+	}
+	if _, err := l.Read(start-1, 0); err == nil {
+		t.Fatalf("read below the start %d succeeded", start)
+	}
+	reopen := func() {
+		t.Helper()
+		l.Close()
+		if l, err = Open(disk, "log", cfg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reopen()
+	if l.StartOffset() != start || l.EndOffset() != 30 {
+		t.Fatalf("reopened: [%d, %d), want [%d, 30)", l.StartOffset(), l.EndOffset(), start)
+	}
+	if b, err := l.Read(17, 0); err != nil || string(b[0].Payload) != "record 17" {
+		t.Fatalf("record 17 after the cut: %v %v", b, err)
+	}
+	if err := l.TruncatePrefix(1000); err != nil || l.EndOffset() != 30 {
+		t.Fatalf("cutting past the end must keep the active segment: %v, end %d", err, l.EndOffset())
+	}
+
+	if err := l.Reset(500); err != nil {
+		t.Fatal(err)
+	}
+	if l.StartOffset() != 500 || l.EndOffset() != 500 || l.DurableOffset() != 500 {
+		t.Fatalf("after reset: start %d end %d durable %d", l.StartOffset(), l.EndOffset(), l.DurableOffset())
+	}
+	if base, err := l.Append([]byte("x"), 1); err != nil || base != 500 {
+		t.Fatalf("append after reset: %d %v", base, err)
+	}
+	if err := l.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	disk.Restart() // power loss: the reset and the synced append survive
+	if l, err = Open(disk, "log", cfg); err != nil {
+		t.Fatal(err)
+	}
+	if l.StartOffset() != 500 || l.EndOffset() != 501 {
+		t.Fatalf("after power loss: [%d, %d), want [500, 501)", l.StartOffset(), l.EndOffset())
+	}
+}

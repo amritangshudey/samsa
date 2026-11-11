@@ -33,12 +33,36 @@ func TestModel(t *testing.T) {
 		_, err := w.m.Fetched(Fetch{TP: tp, Offset: offset, Floor: floor, Epoch: w.m.Epoch(), Known: true, MustProgress: true, HW: hw, Records: records})
 		return err
 	}
+	// readAt is a v5+ fetch answer that reports the log start.
+	readAt := func(w world, offset, start, hw int64, code int16, records []byte) error {
+		_, err := w.m.Fetched(Fetch{TP: tp, Offset: offset, Floor: w.m.Floor(tp), Epoch: w.m.Epoch(), Known: true, Start: w.m.Start(tp),
+			HW: hw, LogStart: start, Err: code, Records: records})
+		return err
+	}
 	tests := []struct {
 		name   string
 		strict bool
 		run    func(w world) error
 		want   string // substring of the error; "" means the history is fine
 	}{
+		{"retention: below the start is out of range", true, func(w world) error {
+			return readAt(w, 0, 2, 2, wire.ErrOffsetOutOfRange, nil)
+		}, ""},
+		{"retention: out of range below the end, with the start under it", true, func(w world) error {
+			return readAt(w, 1, 0, 2, wire.ErrOffsetOutOfRange, nil)
+		}, "I1"},
+		{"retention: the start moves back", true, func(w world) error {
+			if err := readAt(w, 0, 2, 2, wire.ErrOffsetOutOfRange, nil); err != nil {
+				return err
+			}
+			return readAt(w, 0, 1, 2, wire.ErrOffsetOutOfRange, nil)
+		}, "R1"},
+		{"retention: records returned below the start", true, func(w world) error {
+			return readAt(w, 0, 1, 2, wire.ErrNone, batchAt(w.a, 2, 0))
+		}, "R1"},
+		{"retention: start past the end", true, func(w world) error {
+			return readAt(w, 0, 3, 2, wire.ErrOffsetOutOfRange, nil)
+		}, "R1"},
 		{"good read", true, func(w world) error {
 			return read(w, 0, w.m.Floor(tp), 5, append(batchAt(w.a, 2, 0), batchAt(w.b, 3, 2)...))
 		}, ""},
