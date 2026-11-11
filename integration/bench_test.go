@@ -29,7 +29,11 @@ func TestBench(t *testing.T) {
 
 	var rows []string
 	for _, nodes := range []int{1, 3} {
-		for _, policy := range []string{"always", "interval", "never"} {
+		policies := []string{"always", "interval", "never"}
+		if nodes > 1 {
+			policies = policies[:1] // a cluster refuses the weak policies (ADR 0012)
+		}
+		for _, policy := range policies {
 			for _, size := range []int{100, 1024, 10240} {
 				var runs []benchRun
 				for range reps {

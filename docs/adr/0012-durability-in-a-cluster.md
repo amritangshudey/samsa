@@ -45,8 +45,16 @@ and all are both answered after commit.
 - *Under weak policies, sync on followers but not on the leader* (or the
   reverse): a half measure with no clear statement of what survives.
 - *Refuse to start a multi-node cluster with a weak policy.* Considered
-  seriously, because the failure mode is ugly. Rejected for now; see the
+  seriously, because the failure mode is ugly. Rejected at first; see the
   question in the Phase 5 report.
+
+## Amendment (2026-11-11)
+
+The developer chose to refuse: `samsa` exits with an error when `-peers`
+names more than one node and `-sync` is not `always`. The rules above for
+the weak policies stay in the code, and the simulator still runs them in
+clusters (it configures nodes directly), but no released binary can start
+in that state.
 
 ## Consequences
 

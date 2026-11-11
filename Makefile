@@ -62,7 +62,7 @@ integration: build $(JARS)
 	cd integration && SAMSA_BIN=$(CURDIR)/bin/samsa go test -count=1 -v ./...
 
 # Throughput and latency of the built binary; method in docs/design/phase-7.md.
-# Takes about 20 minutes. Results go to bench.md.
+# Takes about 15 minutes. Results go to bench.md.
 bench: build
 	cd integration && SAMSA_BIN=$(CURDIR)/bin/samsa SAMSA_BENCH=1 SAMSA_BENCH_OUT=$(CURDIR)/bench.md go test -count=1 -v -timeout 2h -run '^TestBench$$' .
 

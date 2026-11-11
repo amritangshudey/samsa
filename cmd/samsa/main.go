@@ -101,6 +101,10 @@ func run() error {
 		if peers, addrs, err = parsePeers(*peersText); err != nil {
 			return fmt.Errorf("-peers: %w", err)
 		}
+		// A node that forgets acknowledged entries breaks Raft (ADR 0012).
+		if len(peers) > 1 && policy != broker.SyncAlways {
+			return fmt.Errorf("-sync=%s: a cluster of several nodes needs -sync=always", *syncMode)
+		}
 		own, ok := addrs[sys.NodeID(*nodeID)]
 		if !ok {
 			return fmt.Errorf("-peers: node %d (-node-id) is not in the list", *nodeID)

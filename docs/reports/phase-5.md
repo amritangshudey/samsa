@@ -134,6 +134,7 @@ from `log/` to `raft/` and its entries have a new header.
 1. **Should a cluster refuse to start with `-sync=interval` or `never`?**
    It currently starts, and a power cut can then break replica agreement
    (ADR 0012). Refusing is one line.
+   *Answered 2026-11-11: refuse. Done; see the ADR 0012 amendment.*
 2. **PR #5 (Phase 4) is green and unmerged**: merging was denied to me by
    the permission system. Phase 5 is stacked on it.
 
