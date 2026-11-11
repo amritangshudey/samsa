@@ -1,0 +1,91 @@
+package broker
+
+import "github.com/amritangshudey/samsa/internal/wire"
+
+// leader returns the node that this one believes leads the cluster. A
+// node names itself only once it is serving: until then it would refuse
+// the requests that a client sends to a leader.
+func (n *Node) leader() (Peer, bool) {
+	if id, ok := n.raft.Leader(); ok && (int32(id) != n.cfg.NodeID || n.serving) {
+		for _, p := range n.cfg.Peers {
+			if p.ID == int32(id) {
+				return p, true
+			}
+		}
+	}
+	return Peer{ID: -1}, false
+}
+
+// refusal is the answer of a node that is not serving as leader: for each
+// API, the retriable error that makes a client look for the leader again
+// (ADR 0011). It returns nil for the requests any node answers.
+func refusal(req wire.Message) wire.Message {
+	switch m := req.(type) {
+	case *wire.CreateTopicsRequest:
+		resp := &wire.CreateTopicsResponse{}
+		for _, t := range m.Topics {
+			resp.Topics = append(resp.Topics, wire.CreateTopicResult{Name: t.Name, ErrorCode: wire.ErrNotController, ErrorMessage: "this node is not the leader"})
+		}
+		return resp
+	case *wire.ProduceRequest:
+		resp := &wire.ProduceResponse{}
+		for _, t := range m.Topics {
+			tr := wire.ProduceTopicResponse{Name: t.Name}
+			for _, p := range t.Partitions {
+				tr.Partitions = append(tr.Partitions, wire.ProducePartitionResponse{Index: p.Index, ErrorCode: wire.ErrNotLeaderOrFollower, BaseOffset: -1})
+			}
+			resp.Topics = append(resp.Topics, tr)
+		}
+		return resp
+	case *wire.FetchRequest:
+		resp := &wire.FetchResponse{}
+		for _, t := range m.Topics {
+			tr := wire.FetchTopicResponse{Name: t.Name}
+			for _, p := range t.Partitions {
+				tr.Partitions = append(tr.Partitions, wire.FetchPartitionResponse{Index: p.Index, ErrorCode: wire.ErrNotLeaderOrFollower, HighWatermark: -1})
+			}
+			resp.Topics = append(resp.Topics, tr)
+		}
+		return resp
+	case *wire.ListOffsetsRequest:
+		resp := &wire.ListOffsetsResponse{}
+		for _, t := range m.Topics {
+			tr := wire.ListOffsetsTopicResponse{Name: t.Name}
+			for _, p := range t.Partitions {
+				tr.Partitions = append(tr.Partitions, wire.ListOffsetsPartitionResponse{Index: p.Index, ErrorCode: wire.ErrNotLeaderOrFollower, Timestamp: -1, Offset: -1})
+			}
+			resp.Topics = append(resp.Topics, tr)
+		}
+		return resp
+	case *wire.JoinGroupRequest:
+		return &wire.JoinGroupResponse{ErrorCode: wire.ErrNotCoordinator, GenerationID: -1}
+	case *wire.SyncGroupRequest:
+		return &wire.SyncGroupResponse{ErrorCode: wire.ErrNotCoordinator}
+	case *wire.HeartbeatRequest:
+		return &wire.HeartbeatResponse{ErrorCode: wire.ErrNotCoordinator}
+	case *wire.LeaveGroupRequest:
+		return &wire.LeaveGroupResponse{ErrorCode: wire.ErrNotCoordinator}
+	case *wire.OffsetCommitRequest:
+		resp := &wire.OffsetCommitResponse{}
+		for _, t := range m.Topics {
+			tr := wire.OffsetCommitTopicResponse{Name: t.Name}
+			for _, p := range t.Partitions {
+				tr.Partitions = append(tr.Partitions, wire.PartitionError{Index: p.Index, ErrorCode: wire.ErrNotCoordinator})
+			}
+			resp.Topics = append(resp.Topics, tr)
+		}
+		return resp
+	case *wire.OffsetFetchRequest:
+		// Version 1 has no top-level error, so each partition carries it too.
+		resp := &wire.OffsetFetchResponse{ErrorCode: wire.ErrNotCoordinator}
+		for _, t := range m.Topics {
+			tr := wire.OffsetFetchTopicResponse{Name: t.Name}
+			for _, index := range t.Partitions {
+				tr.Partitions = append(tr.Partitions, wire.OffsetFetchPartition{Index: index, Offset: -1, LeaderEpoch: -1, ErrorCode: wire.ErrNotCoordinator})
+			}
+			resp.Topics = append(resp.Topics, tr)
+		}
+		return resp
+	}
+	return nil // APIVersions, Metadata, FindCoordinator
+}

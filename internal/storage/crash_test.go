@@ -116,7 +116,7 @@ func crashRun(seed uint64, mutate func(*Config)) error {
 		}
 		var err error
 		switch r := rng.Intn(100); {
-		case r < 70:
+		case r < 67:
 			size := 24
 			if !fixed {
 				size = rng.Intn(65)
@@ -130,6 +130,18 @@ func crashRun(seed uint64, mutate func(*Config)) error {
 			var base int64
 			if base, err = l.Append(p, m.count); err == nil && base != m.base {
 				return fmt.Errorf("append returned base %d, want %d", base, m.base)
+			}
+		case r < 73 && len(model) > 0: // cut the log back to a record boundary
+			i := rng.Intn(len(model))
+			cut := model[i].base
+			// Whatever happens, nothing at or after the cut is promised
+			// any more; only a cut that returned is known to have happened.
+			durable = min(durable, cut)
+			if err = l.TruncateSuffix(cut); err == nil {
+				model = model[:i]
+				if l.EndOffset() != cut || l.DurableOffset() != cut {
+					return fmt.Errorf("after truncating at %d: end %d, durable %d", cut, l.EndOffset(), l.DurableOffset())
+				}
 			}
 		case r < 80:
 			err = l.Sync()
@@ -196,6 +208,7 @@ func TestCrashPropertyCatchesBrokenProtocol(t *testing.T) {
 		mutate func(*Config)
 	}{
 		{"segment created without directory sync", func(c *Config) { c.skipRollDirSync = true }},
+		{"suffix truncated without sync", func(c *Config) { c.skipTruncateSync = true }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -60,6 +60,7 @@ type client struct {
 	progress uint64
 	cursors  map[TP]int64 // consumers: next offset to read
 	mem      *membership  // group members: their place in the group
+	pin      *simNode     // if set, the only node this client connects to
 }
 
 // tick is the client's heartbeat: connect, misbehave, or issue a request.
@@ -152,6 +153,15 @@ func (cl *client) onData(c *conn, p []byte) {
 			return
 		}
 		cl.progress++
+		if refused(q.resp) {
+			// The node is not the leader. Whether the request did
+			// anything is treated as unknown, which claims less than the
+			// truth (it did nothing); then look for the leader.
+			cl.w.stats.NotLeader++
+			q.done(false)
+			cl.hangUp()
+			return
+		}
 		q.done(true)
 		if cl.c == c && len(cl.pending) > 0 {
 			cl.watch()
@@ -179,6 +189,37 @@ func (cl *client) lost() {
 	for _, q := range pending {
 		q.done(false)
 	}
+}
+
+// refused reports whether resp is the answer of a node that is not serving
+// as leader: one of the three not-leader codes, wherever the API puts it.
+func refused(resp wire.Message) bool {
+	is := func(code int16) bool {
+		return code == wire.ErrNotLeaderOrFollower || code == wire.ErrNotCoordinator || code == wire.ErrNotController
+	}
+	switch m := resp.(type) {
+	case *wire.CreateTopicsResponse:
+		return len(m.Topics) > 0 && is(m.Topics[0].ErrorCode)
+	case *wire.ProduceResponse:
+		return len(m.Topics) > 0 && len(m.Topics[0].Partitions) > 0 && is(m.Topics[0].Partitions[0].ErrorCode)
+	case *wire.FetchResponse:
+		return len(m.Topics) > 0 && len(m.Topics[0].Partitions) > 0 && is(m.Topics[0].Partitions[0].ErrorCode)
+	case *wire.ListOffsetsResponse:
+		return len(m.Topics) > 0 && len(m.Topics[0].Partitions) > 0 && is(m.Topics[0].Partitions[0].ErrorCode)
+	case *wire.OffsetCommitResponse:
+		return len(m.Topics) > 0 && len(m.Topics[0].Partitions) > 0 && is(m.Topics[0].Partitions[0].ErrorCode)
+	case *wire.OffsetFetchResponse:
+		return is(m.ErrorCode) || (len(m.Topics) > 0 && len(m.Topics[0].Partitions) > 0 && is(m.Topics[0].Partitions[0].ErrorCode))
+	case *wire.JoinGroupResponse:
+		return is(m.ErrorCode)
+	case *wire.SyncGroupResponse:
+		return is(m.ErrorCode)
+	case *wire.HeartbeatResponse:
+		return is(m.ErrorCode)
+	case *wire.LeaveGroupResponse:
+		return is(m.ErrorCode)
+	}
+	return false
 }
 
 // check reports a model violation, if any.
@@ -234,7 +275,7 @@ func (cl *client) misc() {
 		return
 	}
 	tp := cl.randomTP()
-	known, epoch := m.Known(TP{tp.Topic, 0}), m.Epoch()
+	known, epoch, asked := m.Known(TP{tp.Topic, 0}), m.Epoch(), cl.c.inc.node.id
 	req, resp := &wire.MetadataRequest{Topics: []string{tp.Topic}, AllTopics: cl.rng.Chance(0.3)}, &wire.MetadataResponse{}
 	cl.request(wire.KeyMetadata, cl.version(wire.KeyMetadata), req, resp, func(ok bool) {
 		if !ok || m.stale(epoch) {
@@ -250,8 +291,11 @@ func (cl *client) misc() {
 				cl.w.fail("I4: metadata reports topic %q with %d partitions", t.Name, len(t.Partitions))
 			}
 		}
-		if known && !found {
-			cl.w.fail("I1: metadata does not list topic %q, which was created", tp.Topic)
+		// Any node answers Metadata, from what it has applied. Only the
+		// leader, which names itself controller, is sure to have applied
+		// everything that was acknowledged; a follower may be behind.
+		if known && !found && resp.ControllerID == asked {
+			cl.w.fail("I1: metadata from the leader does not list topic %q, which was created", tp.Topic)
 		}
 	})
 }
@@ -272,7 +316,7 @@ func (cl *client) createTopic() {
 		m.TopicAttempted(name, t.parts)
 	}
 	epoch := m.Epoch()
-	req := &wire.CreateTopicsRequest{Topics: []wire.CreateTopic{{Name: name, NumPartitions: parts, ReplicationFactor: 1}}, TimeoutMs: 1000}
+	req := &wire.CreateTopicsRequest{Topics: []wire.CreateTopic{{Name: name, NumPartitions: parts, ReplicationFactor: int16(len(cl.w.nodes))}}, TimeoutMs: 1000}
 	resp := &wire.CreateTopicsResponse{}
 	cl.request(wire.KeyCreateTopics, v, req, resp, func(ok bool) {
 		if !ok {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/amritangshudey/samsa/internal/realsys"
@@ -341,4 +342,78 @@ func TestIndexRoundTripAndRejects(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
+}
+
+func TestTruncateSuffix(t *testing.T) {
+	disk := simsys.NewDisk(simsys.NewRand(1), simsys.DiskConfig{})
+	cfg := Config{SegmentBytes: 100, MaxPayloadBytes: 40, SyncBytes: -1} // a few records per segment
+	l, err := Open(disk, "log", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendN := func(from, n int, tag string) {
+		t.Helper()
+		for i := from; i < from+n; i++ {
+			if _, err := l.Append([]byte(fmt.Sprintf("%s-%02d", tag, i)), 1); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	// check reads the whole log and compares it with want.
+	check := func(want ...string) {
+		t.Helper()
+		var got []string
+		for off := l.StartOffset(); off < l.EndOffset(); {
+			batches, err := l.Read(off, 1<<20)
+			if err != nil {
+				t.Fatalf("read at %d: %v", off, err)
+			}
+			for _, b := range batches {
+				got = append(got, string(b.Payload))
+				off = b.Base + int64(b.Count)
+			}
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("log holds %v, want %v", got, want)
+		}
+	}
+	appendN(0, 20, "old")
+	if len(l.segs) < 3 {
+		t.Fatalf("test needs several segments, got %d", len(l.segs))
+	}
+	if err := l.TruncateSuffix(21); !errors.Is(err, ErrOffsetOutOfRange) {
+		t.Fatalf("truncate past the end: %v", err)
+	}
+	if err := l.TruncateSuffix(20); err != nil || l.EndOffset() != 20 {
+		t.Fatalf("truncate at the end must do nothing: %v, end %d", err, l.EndOffset())
+	}
+	// Across segment boundaries, into the middle of an earlier segment.
+	if err := l.TruncateSuffix(4); err != nil {
+		t.Fatal(err)
+	}
+	if l.EndOffset() != 4 || l.DurableOffset() != 4 {
+		t.Fatalf("after truncate: end %d, durable %d", l.EndOffset(), l.DurableOffset())
+	}
+	appendN(4, 10, "new")
+	want := []string{"old-00", "old-01", "old-02", "old-03"}
+	for i := 4; i < 14; i++ {
+		want = append(want, fmt.Sprintf("new-%02d", i))
+	}
+	check(want...)
+	// A power loss now may lose the unsynced new records, and nothing else:
+	// in particular no old record past the cut comes back.
+	disk.Restart()
+	if l, err = Open(disk, "log", cfg); err != nil {
+		t.Fatal(err)
+	}
+	if l.EndOffset() < 4 {
+		t.Fatalf("records below the cut were lost: end %d", l.EndOffset())
+	}
+	check(want[:l.EndOffset()]...)
+	// Everything can go.
+	if err := l.TruncateSuffix(0); err != nil || l.EndOffset() != 0 {
+		t.Fatalf("truncate to empty: %v, end %d", err, l.EndOffset())
+	}
+	appendN(0, 1, "again")
+	check("again-00")
 }

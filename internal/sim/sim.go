@@ -1,8 +1,10 @@
 package sim
 
 import (
+	"bytes"
 	"fmt"
 	"io"
+	"slices"
 	"time"
 
 	"github.com/amritangshudey/samsa/internal/broker"
@@ -57,6 +59,7 @@ type options struct {
 	consumers   int
 	vandals     int
 	members     int
+	nodes       int
 }
 
 func (f fault) String() string {
@@ -72,9 +75,9 @@ func Run(cfg Config) Result {
 	rng := simsys.NewRand(cfg.Seed)
 	w := &world{
 		rng: rng.Fork(), now: epochStart, trace: cfg.Trace,
-		conns: map[sys.ConnID]*conn{},
+		conns: map[sys.ConnID]*conn{}, leaders: map[int64]int32{},
 	}
-	w.disk = simsys.NewDisk(rng.Fork(), simsys.DiskConfig{})
+	diskRng := rng.Fork()
 
 	// Swarm testing: each seed enables a random subset of faults and picks
 	// its own sizes, so that seeds differ in kind and not only in detail.
@@ -99,17 +102,42 @@ func Run(cfg Config) Result {
 	w.opts.faultEvery = []time.Duration{100 * time.Millisecond, 500 * time.Millisecond, 2 * time.Second}[pick.Intn(3)]
 	w.opts.producers, w.opts.consumers, w.opts.vandals = 1+pick.Intn(3), 1+pick.Intn(3), pick.Intn(2)
 	w.opts.members = pick.Intn(5)
+	w.opts.nodes = []int{1, 3, 3}[pick.Intn(3)]
+	// Short, so that elections happen many times within a run.
+	w.bcfg.ElectionTimeout = []time.Duration{100, 150, 300}[pick.Intn(3)] * time.Millisecond
+	w.bcfg.HeartbeatInterval = w.bcfg.ElectionTimeout / 5
 	if cfg.Mutate != nil {
 		cfg.Mutate(&w.bcfg)
 	}
-	w.model = NewModel(w.bcfg.Sync == broker.SyncAlways)
-	res := Result{Seed: cfg.Seed, Setup: fmt.Sprintf("sync=%d segment=%d faults=%v every=%v disconnects=%v producers=%d consumers=%d vandals=%d members=%d",
-		w.bcfg.Sync, w.bcfg.SegmentBytes, w.opts.faults, w.opts.faultEvery, w.opts.disconnects, w.opts.producers, w.opts.consumers, w.opts.vandals, w.opts.members)}
+	strict := w.bcfg.Sync == broker.SyncAlways
+	if w.opts.nodes > 1 && !strict {
+		// A cluster whose nodes acknowledge before syncing has no defence
+		// against a power cut: one node forgetting what it acknowledged
+		// breaks what Raft is built on (ADR 0012). That combination is
+		// not simulated; only process kills, which lose nothing.
+		w.opts.diskCrash = false
+		w.opts.faults = slices.DeleteFunc(w.opts.faults, func(f fault) bool { return f != faultKill })
+	}
+	w.model = NewModel(strict)
+	res := Result{Seed: cfg.Seed, Setup: fmt.Sprintf("nodes=%d sync=%d segment=%d election=%v faults=%v every=%v disconnects=%v producers=%d consumers=%d vandals=%d members=%d",
+		w.opts.nodes, w.bcfg.Sync, w.bcfg.SegmentBytes, w.bcfg.ElectionTimeout, w.opts.faults, w.opts.faultEvery, w.opts.disconnects, w.opts.producers, w.opts.consumers, w.opts.vandals, w.opts.members)}
 	if w.trace != nil {
 		_, _ = fmt.Fprintf(w.trace, "seed %d: %s\n", cfg.Seed, res.Setup)
 	}
 
-	w.start()
+	for id := int32(1); id <= int32(w.opts.nodes); id++ {
+		w.bcfg.Peers = append(w.bcfg.Peers, broker.Peer{ID: id, Host: "sim", Port: 9091 + id})
+	}
+	for _, p := range w.bcfg.Peers {
+		nd := &simNode{id: p.ID, cfg: w.bcfg, disk: simsys.NewDisk(diskRng.Fork(), simsys.DiskConfig{})}
+		nd.cfg.NodeID, nd.cfg.Port = p.ID, p.Port
+		nd.cfg.Logger = w.bcfg.Logger.With("node", p.ID)
+		w.nodes = append(w.nodes, nd)
+	}
+	for _, nd := range w.nodes {
+		w.start(nd)
+	}
+	w.after(100*time.Millisecond, w.compareReplicas)
 	behaviours := []struct {
 		n    int
 		step func(*client)
@@ -127,11 +155,13 @@ func Run(cfg Config) Result {
 	w.after(w.opts.faultEvery, w.chaos)
 	w.runUntil(w.now+sys.Instant(cfg.Duration), nil)
 
-	// Quiesce: no new faults or requests. Let the node come back and every
+	// Quiesce: no new faults or requests. Let the nodes come back and every
 	// outstanding request finish or time out, then judge the final state.
 	w.quiet = true
-	w.disk.CrashAfter(0)
-	w.disk.SetSyncErrorRate(0)
+	for _, nd := range w.nodes {
+		nd.disk.CrashAfter(0)
+		nd.disk.SetSyncErrorRate(0)
+	}
 	w.runUntil(w.now+sys.Instant(2*answerBound), nil)
 	if w.err == nil {
 		w.finalChecks()
@@ -143,8 +173,8 @@ func Run(cfg Config) Result {
 // finalChecks reads every partition from the start (the whole-history half
 // of I1 to I5) and then checks that recovery is repeatable (I6).
 func (w *world) finalChecks() {
-	if w.node == nil {
-		w.fail("the node did not come back after faults stopped")
+	leader := w.settled()
+	if leader == nil {
 		return
 	}
 	var tps []TP
@@ -154,7 +184,7 @@ func (w *world) finalChecks() {
 		}
 	}
 	w.model.BeginFinal()
-	v := &client{w: w, rng: w.rng.Fork()}
+	v := &client{w: w, rng: w.rng.Fork(), pin: leader}
 	v.c = w.connect(v)
 	done := false
 	var read func(i int, offset int64)
@@ -195,26 +225,77 @@ func (w *world) finalChecks() {
 
 	// I6. A kill loses nothing, so a restart must rebuild the same state.
 	// Under the strict policy the same holds across a power loss, since
-	// everything applied was synced first.
-	applied, hash := w.node.n.StateHash()
+	// everything applied was synced first. Every node is restarted at
+	// once; the cluster must come back to the state it had.
+	_, hash := leader.inc.n.StateHash()
 	for _, power := range []bool{false, true} {
 		if power && !w.model.strict {
 			break
 		}
-		w.node.dead = true
-		if power {
-			w.disk.Restart()
+		for _, nd := range w.nodes {
+			w.down(nd, power, "final restart")
 		}
-		inc := &incarnation{w: w, timers: map[sys.TimerID]uint64{}}
-		inc.n = broker.New(w.bcfg, inc, inc, w.disk, w.rng.Fork())
-		if err := inc.n.OnStart(); err != nil {
-			w.fail("I6: restart on a quiet disk failed: %v", err)
+		if leader = w.settled(); leader == nil {
 			return
 		}
-		w.node = inc
-		if a, h := inc.n.StateHash(); a != applied || h != hash {
-			w.fail("I6: after a restart (power loss: %v) the node applied %d commands with state hash %08x, before it %d with %08x", power, a, h, applied, hash)
+		if _, h := leader.inc.n.StateHash(); h != hash {
+			w.fail("I6: after a restart (power loss: %v) the state hash is %08x; before it was %08x", power, h, hash)
 			return
 		}
 	}
+}
+
+// settled waits, with no faults and no clients, until every node is up,
+// one of them serves as leader, and all have applied the same entries. It
+// then checks that they agree (S2 on whole logs, S4) and returns the
+// leader; or it records a violation and returns nil.
+func (w *world) settled() *simNode {
+	var leader *simNode
+	agree := func() bool {
+		leader = nil
+		for _, nd := range w.nodes {
+			if nd.inc == nil {
+				return false
+			}
+			if nd.inc.n.Serving() {
+				leader = nd
+			}
+		}
+		if leader == nil {
+			return false
+		}
+		last := leader.inc.n.Raft().LastIndex()
+		for _, nd := range w.nodes {
+			if a, _ := nd.inc.n.StateHash(); a != last+1 || nd.inc.n.Raft().LastIndex() != last {
+				return false
+			}
+		}
+		return true
+	}
+	w.runUntil(w.now+sys.Instant(answerBound), agree)
+	if w.err != nil {
+		return nil
+	}
+	if !agree() {
+		w.fail("with faults stopped for %v the nodes did not all come back, elect a leader and catch up", answerBound)
+		return nil
+	}
+	lr := leader.inc.n.Raft()
+	_, want := leader.inc.n.StateHash()
+	for _, nd := range w.nodes {
+		if _, h := nd.inc.n.StateHash(); h != want {
+			w.fail("S4: nodes %d and %d applied the same %d entries and differ: state hash %08x and %08x", leader.id, nd.id, lr.LastIndex()+1, want, h)
+			return nil
+		}
+		r := nd.inc.n.Raft()
+		for i := int64(0); nd != leader && i <= lr.LastIndex(); i++ {
+			a, _, errA := lr.Read(i)
+			b, _, errB := r.Read(i)
+			if errA != nil || errB != nil || lr.EntryTerm(i) != r.EntryTerm(i) || !bytes.Equal(a, b) {
+				w.fail("S2: nodes %d and %d differ at log index %d (%v, %v)", leader.id, nd.id, i, errA, errB)
+				return nil
+			}
+		}
+	}
+	return leader
 }

@@ -1,7 +1,6 @@
 package broker
 
 import (
-	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -10,18 +9,22 @@ import (
 	"github.com/amritangshudey/samsa/internal/wire"
 )
 
-// metadata describes the cluster (this one node) and the requested topics.
+// metadata describes the cluster and the requested topics. Every node
+// answers it, from its own applied state, which on a follower may be a
+// little behind. Every node holds every partition, and the leader of the
+// cluster leads them all.
 func (n *Node) metadata(req *wire.MetadataRequest) *wire.MetadataResponse {
-	resp := &wire.MetadataResponse{
-		Brokers:      []wire.Broker{{NodeID: n.cfg.NodeID, Host: n.cfg.Host, Port: n.cfg.Port}},
-		ClusterID:    n.cfg.ClusterID,
-		ControllerID: n.cfg.NodeID,
+	leader, known := n.leader()
+	resp := &wire.MetadataResponse{ClusterID: n.cfg.ClusterID, ControllerID: leader.ID}
+	var all []int32
+	for _, p := range n.cfg.Peers {
+		resp.Brokers = append(resp.Brokers, wire.Broker{NodeID: p.ID, Host: p.Host, Port: p.Port})
+		all = append(all, p.ID)
 	}
 	names := req.Topics
 	if req.AllTopics {
 		names = n.st.names
 	}
-	self := []int32{n.cfg.NodeID}
 	for _, name := range names {
 		t := n.st.topics[name]
 		if t == nil {
@@ -30,9 +33,11 @@ func (n *Node) metadata(req *wire.MetadataRequest) *wire.MetadataResponse {
 		}
 		tm := wire.TopicMetadata{Name: name}
 		for i := range t.parts {
-			tm.Partitions = append(tm.Partitions, wire.PartitionMetadata{
-				Index: int32(i), Leader: n.cfg.NodeID, Replicas: self, ISR: self,
-			})
+			pm := wire.PartitionMetadata{Index: int32(i), Leader: leader.ID, Replicas: all, ISR: all}
+			if !known {
+				pm.ErrorCode = wire.ErrLeaderNotAvailable
+			}
+			tm.Partitions = append(tm.Partitions, pm)
 		}
 		resp.Topics = append(resp.Topics, tm)
 	}
@@ -82,8 +87,8 @@ func (n *Node) createTopics(c *conn, h wire.RequestHeader, req *wire.CreateTopic
 			res.ErrorCode, res.ErrorMessage = wire.ErrInvalidRequest, "manual replica assignment is not supported"
 		case parts < 1 || parts > n.cfg.MaxPartitions:
 			res.ErrorCode, res.ErrorMessage = wire.ErrInvalidPartitions, "partition count out of range"
-		case t.ReplicationFactor != -1 && t.ReplicationFactor != 1:
-			res.ErrorCode, res.ErrorMessage = wire.ErrInvalidReplicationFactor, "this is a single node: replication factor must be 1"
+		case t.ReplicationFactor != -1 && int(t.ReplicationFactor) != len(n.cfg.Peers):
+			res.ErrorCode, res.ErrorMessage = wire.ErrInvalidReplicationFactor, "every node holds every partition: the replication factor is the cluster size"
 		case n.st.topics[t.Name] != nil:
 			res.ErrorCode, res.ErrorMessage = wire.ErrTopicAlreadyExists, "topic already exists"
 		}
@@ -314,19 +319,16 @@ func (n *Node) readBatches(p *partition, offset int64, limit int, force bool) []
 	var out []byte
 	for ; i < len(p.batches); i++ {
 		ref := p.batches[i]
-		got, err := n.cmds.Read(ref.logIndex, 0)
-		if err != nil || len(got) == 0 {
+		cmd, _, err := n.raft.Read(ref.logIndex)
+		if err != nil {
 			// A read failure of committed data: the log is corrupt or
 			// poisoned. Never guess; stop the node.
-			if err == nil {
-				err = errors.New("command log returned nothing")
-			}
 			if n.fatal == nil {
 				n.fatal = fmt.Errorf("read committed batch at log index %d: %w", ref.logIndex, err)
 			}
 			return out
 		}
-		batch := appendBatch(got[0].Payload)
+		batch := appendBatch(cmd)
 		if len(out)+len(batch) > limit && (len(out) > 0 || !force) {
 			break
 		}

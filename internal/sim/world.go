@@ -47,22 +47,37 @@ type Stats struct {
 	Starts, Disconnects                                 int
 	GroupJoins, GroupSyncs, OffsetCommits               int
 	OffsetFetches, ZombiesRefused                       int
+	// Clusters only: terms that had a leader, requests refused by a node
+	// that was not serving, and replica comparisons made (S4).
+	Leaders, NotLeader, ReplicasCompared int
 }
 
-// world owns virtual time and everything outside the node.
+// simNode is one machine of the cluster: a disk that outlives the
+// processes (incarnations) that run on it.
+type simNode struct {
+	id        int32
+	cfg       broker.Config
+	disk      *simsys.Disk
+	inc       *incarnation // nil while the node is down
+	powerLost bool         // the disk must be restarted before the node
+	term      int64        // S5: the highest term seen on this node, ever
+}
+
+// world owns virtual time and everything outside the nodes.
 type world struct {
 	opts  options
-	bcfg  broker.Config
+	bcfg  broker.Config // what every node's configuration is made from
 	rng   *simsys.Rand
 	now   sys.Instant
 	seq   uint64
 	queue eventHeap
 
-	disk      *simsys.Disk
-	node      *incarnation // nil while the node is down
-	powerLost bool         // the disk must be restarted before the node
-	conns     map[sys.ConnID]*conn
-	nextConn  sys.ConnID
+	nodes    []*simNode
+	conns    map[sys.ConnID]*conn
+	nextConn sys.ConnID
+	// The monitor's memory; see monitor.go.
+	leaders   map[int64]int32 // S1: who led each term
+	committed []int64         // S3: the term of each entry first seen committed
 
 	model   *Model
 	clients []*client
@@ -77,9 +92,12 @@ type world struct {
 // node's clock and network.
 type incarnation struct {
 	w      *world
+	node   *simNode
 	n      *broker.Node
 	timers map[sys.TimerID]uint64 // id -> seq of the arming that counts
 	dead   bool
+	// S5 and S3: how far this life has been seen to commit, and checked.
+	commit int64
 }
 
 // conn is one client connection: two ordered byte streams.
@@ -182,7 +200,7 @@ func (inc *incarnation) SetTimer(id sys.TimerID, after time.Duration) {
 			return // cancelled, replaced, or the node died
 		}
 		delete(inc.timers, id)
-		w.note("timer", uint64(id), nil)
+		w.note(inc.node.tag("timer"), uint64(id), nil)
 		w.call(inc, inc.n.OnTimer(id))
 	})
 }
@@ -204,6 +222,31 @@ func (inc *incarnation) Send(id sys.ConnID, p []byte) {
 			c.cl.onData(c, piece)
 		}
 	})
+}
+
+// SendPeer implements sys.Network. In this phase the network between
+// nodes loses nothing: a message arrives after a random delay, whole, once,
+// unless its receiver is down then. Messages can overtake one another.
+func (inc *incarnation) SendPeer(to sys.NodeID, msg []byte) {
+	w, from := inc.w, inc.node
+	own := append([]byte(nil), msg...) // the node may reuse msg
+	for _, nd := range w.nodes {
+		if nd.id != int32(to) {
+			continue
+		}
+		// Usually as quick as a client's bytes; now and then slow enough
+		// to be overtaken by many messages and to outlast a heartbeat.
+		delay := w.netDelay()
+		if w.rng.Chance(0.1) {
+			delay = time.Duration(w.rng.Intn(int(w.bcfg.ElectionTimeout / 2)))
+		}
+		w.after(delay, func() {
+			if t := nd.inc; t != nil && !t.dead {
+				w.note(nd.tag("peer"), uint64(from.id), own)
+				w.call(t, t.n.OnPeerMessage(sys.NodeID(from.id), own))
+			}
+		})
+	}
 }
 
 // Close implements sys.Network.
@@ -241,83 +284,103 @@ func (w *world) call(inc *incarnation, err error) {
 	if inc.dead {
 		return
 	}
+	nd := inc.node
 	switch {
-	case err == nil && !w.disk.Crashed():
-	case w.disk.Crashed() || errors.Is(err, simsys.ErrCrashed):
-		w.down(true, "power loss during a disk operation")
+	case err == nil && !nd.disk.Crashed():
+		w.monitor(inc)
+	case nd.disk.Crashed() || errors.Is(err, simsys.ErrCrashed):
+		w.down(nd, true, "power loss during a disk operation")
 	case errors.Is(err, simsys.ErrInjected):
 		// The node stopped because a sync failed, as it must. What the
 		// unsynced data now holds is unknown: model it as a power loss.
 		w.stats.SyncFailures++
-		w.down(true, "failed sync")
+		w.down(nd, true, "failed sync")
 	default:
-		w.fail("node stopped with an error no fault explains: %v", err)
+		w.fail("node %d stopped with an error no fault explains: %v", nd.id, err)
 	}
 }
 
+// powerLoss tells the checkers that a node lost power. Under a policy
+// that acknowledges before syncing, entries that were committed may be
+// gone, and others may be committed in their place: S3 starts over. (Only
+// a single node runs that combination; see Run.)
+func (w *world) powerLoss() {
+	w.model.PowerLoss()
+	if !w.model.strict {
+		w.committed = nil
+	}
+}
+
+// tag names an event of this node in the trace.
+func (nd *simNode) tag(what string) string { return fmt.Sprintf("%s@%d", what, nd.id) }
+
 // down ends the node's current life. power says whether unsynced data is
 // lost (power loss) or kept (the process was killed).
-func (w *world) down(power bool, why string) {
-	inc := w.node
+func (w *world) down(nd *simNode, power bool, why string) {
+	inc := nd.inc
 	if inc == nil {
 		return
 	}
-	w.note("node-down: "+why, 0, nil)
+	w.note(nd.tag("node-down: "+why), 0, nil)
 	inc.dead = true
-	w.node = nil
+	nd.inc = nil
 	if power {
 		w.stats.PowerLosses++
-		w.disk.Crash()
-		w.powerLost = true
-		w.model.PowerLoss()
+		nd.disk.Crash()
+		nd.powerLost = true
+		w.powerLoss()
 	} else {
 		w.stats.Kills++
 	}
 	ids := make([]sys.ConnID, 0, len(w.conns))
-	for id := range w.conns {
-		ids = append(ids, id)
+	for id, c := range w.conns {
+		if c.inc == inc {
+			ids = append(ids, id)
+		}
 	}
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] }) // map order must not reach the schedule
 	for _, id := range ids {
 		c := w.conns[id]
 		c.nodeClosed = true
+		delete(w.conns, id)
 		w.hangUp(c)
 	}
-	clear(w.conns)
-	w.after(time.Duration(1+w.rng.Intn(int(300*time.Millisecond))), w.start)
+	w.after(time.Duration(1+w.rng.Intn(int(300*time.Millisecond))), func() { w.start(nd) })
 }
 
-// start brings the node up on whatever the disk now holds.
-func (w *world) start() {
-	if w.node != nil || w.err != nil {
+// start brings a node up on whatever its disk now holds.
+func (w *world) start(nd *simNode) {
+	if nd.inc != nil || w.err != nil {
 		return
 	}
-	if w.powerLost {
-		w.disk.Restart()
-		w.powerLost = false
+	if nd.powerLost {
+		nd.disk.Restart()
+		nd.powerLost = false
 	}
-	w.disk.SetSyncErrorRate(0)
+	nd.disk.SetSyncErrorRate(0)
 	if !w.quiet && w.opts.diskCrash && w.rng.Chance(0.25) {
-		w.disk.CrashAfter(1 + w.rng.Intn(40)) // lands inside recovery, or soon after
+		nd.disk.CrashAfter(1 + w.rng.Intn(40)) // lands inside recovery, or soon after
 	}
-	inc := &incarnation{w: w, timers: map[sys.TimerID]uint64{}}
-	inc.n = broker.New(w.bcfg, inc, inc, w.disk, w.rng.Fork())
-	w.note("node-start", 0, nil)
+	inc := &incarnation{w: w, node: nd, timers: map[sys.TimerID]uint64{}}
+	inc.n = broker.New(nd.cfg, inc, inc, nd.disk, w.rng.Fork())
+	w.note(nd.tag("node-start"), 0, nil)
 	if err := inc.n.OnStart(); err != nil {
-		if !w.disk.Crashed() {
-			w.fail("recovery failed: %v", err)
+		inc.dead = true // it may have armed timers before it failed
+		if !nd.disk.Crashed() {
+			w.fail("recovery of node %d failed: %v", nd.id, err)
 			return
 		}
-		w.note("node-down: power loss during recovery", 0, nil)
+		w.note(nd.tag("node-down: power loss during recovery"), 0, nil)
 		w.stats.RecoveriesCut++
 		w.stats.PowerLosses++
-		w.powerLost = true
-		w.model.PowerLoss()
-		w.after(time.Duration(1+w.rng.Intn(int(300*time.Millisecond))), w.start)
+		nd.powerLost = true
+		w.powerLoss()
+		w.after(time.Duration(1+w.rng.Intn(int(300*time.Millisecond))), func() { w.start(nd) })
 		return
 	}
-	w.node = inc
+	nd.inc = inc
 	w.stats.Starts++
+	w.monitor(inc)
 }
 
 // chaos injects one fault and schedules the next.
@@ -325,16 +388,16 @@ func (w *world) chaos() {
 	if w.quiet || len(w.opts.faults) == 0 {
 		return
 	}
-	if w.node != nil {
+	if nd := w.nodes[w.rng.Intn(len(w.nodes))]; nd.inc != nil {
 		switch w.opts.faults[w.rng.Intn(len(w.opts.faults))] {
 		case faultPower:
-			w.down(true, "power loss")
+			w.down(nd, true, "power loss")
 		case faultDiskCrash:
-			w.disk.CrashAfter(1 + w.rng.Intn(30))
+			nd.disk.CrashAfter(1 + w.rng.Intn(30))
 		case faultKill:
-			w.down(false, "process killed")
+			w.down(nd, false, "process killed")
 		case faultSync:
-			w.disk.SetSyncErrorRate(1) // the next sync fails
+			nd.disk.SetSyncErrorRate(1) // the next sync fails
 		}
 	}
 	w.after(time.Duration(1+w.rng.Intn(2*int(w.opts.faultEvery))), w.chaos)
@@ -342,9 +405,15 @@ func (w *world) chaos() {
 
 // --- the clients' side -----------------------------------------------------
 
-// connect opens a connection for cl, or returns nil if the node is down.
+// connect opens a connection for cl to the node it is pinned to, or else
+// to any node, and returns nil if that node is down. A client that picked
+// a node which is not the leader is told so, hangs up, and picks again.
 func (w *world) connect(cl *client) *conn {
-	inc := w.node
+	nd := cl.pin
+	if nd == nil {
+		nd = w.nodes[cl.rng.Intn(len(w.nodes))]
+	}
+	inc := nd.inc
 	if inc == nil {
 		return nil
 	}
