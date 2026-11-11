@@ -75,22 +75,84 @@ simulated disk and times `OnStart` with and without a snapshot; it must
 show start-up work bounded by the entries after the snapshot, not by the
 log.
 
-## 3. Part (b): retention and truncation (sketch; detailed in its PR)
+## 3. Part (b): retention and truncation
 
-- **Retention** is global (one log): by total size or by age of the oldest
-  batch. The cut *C* is the first entry still wanted; it must be ≤ *S*+1 so
-  that the state for everything below it is in the snapshot.
-- **The cut** deletes whole sealed segments below *C*. Partitions' start
-  offsets move up: ListOffsets earliest and Fetch below the start answer
-  as Kafka does (`OFFSET_OUT_OF_RANGE`), verified against the protocol
-  documentation first.
-- **Raft with a log that starts at *C*:** terms known from the snapshot;
-  a follower whose next entry is below the leader's *C* is sent
-  InstallSnapshot (state in chunks) and then the retained log from *C* by
-  ordinary AppendEntries.
-- **Mutation:** "truncate past the snapshot index". The history checker
-  must also learn that records below the start are gone by design, and
-  check that nothing above it ever is.
+### 3.1 Where the cut is decided
+
+**Retention is a command.** Nodes cut their logs at different moments, but
+what clients see must not depend on which node answers. So the leader,
+when its log exceeds `RetentionBytes`, proposes `Trim(C)`: C is the base
+of one of its own segments, chosen so that at most `RetentionBytes` remain
+from C on, and C ≤ the commit index. Applying `Trim(C)` (deterministic,
+on every replica) sets the state's log start to C and drops every batch
+reference whose log index is below C; each partition's start offset
+becomes its first remaining batch, or its end if none remains.
+
+*shortcut:* size only, global; retention by time needs a clock decision
+in the proposer and is left out.
+
+**Kafka's answers** (checked against `FetchResponse.json` and `Errors.java`
+in apache/kafka, 2026-11-11): Fetch v5+ carries `LogStartOffset`; a fetch
+below it answers `OFFSET_OUT_OF_RANGE` (1), as one above the end does;
+ListOffsets with timestamp -2 (earliest) answers the start offset.
+
+### 3.2 When a node deletes
+
+A node deletes log segments only below the log start recorded in **its own
+newest snapshot**. That snapshot was taken after `Trim` was applied, so it
+holds no reference below the cut: a restart from it never needs a deleted
+entry. Right after applying a `Trim`, the node takes a snapshot so that the
+deletion is not delayed by a whole interval. Segments are deleted oldest
+first, syncing the directory after each, so that a crash leaves a
+contiguous log. **Mutation `UnsafeTrimEarly`: delete as soon as `Trim` is
+applied**, before a snapshot covers it; a restart then finds a snapshot
+whose batches or following entries are gone.
+
+### 3.3 A follower behind the cut: InstallSnapshot
+
+When a follower's next index is below the leader's log start C, the leader
+cannot send entries. Record data is in the log, not the snapshot, so the
+follower needs both: the leader's newest snapshot (index S ≥ C − 1), then
+the entries from C by ordinary AppendEntries.
+
+- **Leader:** sends `InstallSnapshot{term, stamp, cut C, offset, chunk,
+  done}` with chunks of its snapshot file, one message in flight per
+  follower, as for AppendEntries. A response that asks for an offset other
+  than the next restarts from there.
+- **Follower:** accepts it only from the leader of its term (it counts as
+  contact, for the lease) and only while it really is behind (C − 1 >
+  its last index, and S > its commit index); anything else is a stale copy
+  and is answered with what it has. Chunks are written in order to
+  `install.tmp`; out of order, it asks for the offset it expects.
+- **On the last chunk:** the file is decoded and checked, made durable and
+  renamed to `install` (the marker). Then the log is reset to an empty log
+  starting at C. Entries below C are now known only as terms (from the
+  snapshot's runs) and as committed. The follower answers "match C − 1",
+  and the leader continues with AppendEntries from C.
+- **While the marker exists** the node is *installing*: it does not apply
+  anything, so the broker keeps its old state and serves nothing new. It
+  votes and appends as a node whose log ends where its log ends, which is
+  no less safe than before the install: it forgets only entries below C,
+  all committed, and keeps their terms.
+- **Promotion:** once its log is durable past S, the node renames `install`
+  to `snapshot`. The broker then restores the snapshot's state and applies
+  from S + 1.
+- **A restart while installing** finds the marker, resets the log to C if
+  it does not start there (a crash between rename and reset), and promotes
+  at once if the log already reaches past S.
+
+### 3.4 What checks it
+
+- Raft random schedules: nodes trim below their snapshots, followers are
+  brought back by InstallSnapshot; every existing check, reading committed
+  entries from each node's log start.
+- Simulator: `RetentionBytes` drawn per seed (off, small, tiny), chunk
+  size drawn small. The history checker learns one new rule: **a
+  partition's start offset never moves backwards, records at or after it
+  never change, and only offsets below it may become unavailable**, and
+  only through `OFFSET_OUT_OF_RANGE` or an earliest offset that moved.
+  Clients that read below the start go back to the earliest offset.
+- Mutation `UnsafeTrimEarly`, which must be caught.
 
 ## 4. Alternatives rejected
 
@@ -119,6 +181,22 @@ Second pass, looking for the ways a snapshot could lie:
    no state; the snapshot index is a Raft index, so they need nothing.
 5. `UnsafeNoFencing` and other switches live in `state`, not in its
    encoding: decoding must restore them from the config, not from disk.
+
+Second pass on part (b):
+
+6. Trimming locally, without a command, would make two replicas answer
+   ListOffsets differently for the same applied index, and the state
+   hashes (S4) would differ. Hence `Trim` is a command.
+7. A follower that installs forgets entries it may have acknowledged.
+   They are below C, so committed, and their terms are kept: an election
+   compares last index and term, and both only grow. Recorded here as an
+   argument, checked by the random schedules.
+8. A stale InstallSnapshot arriving after the follower caught up must not
+   reset its log: hence the "really behind" test.
+9. The leader may cut again while sending a snapshot: the snapshot it
+   sends stays valid (S only grows; C is fixed in the message), but if C
+   moves past what the follower will ask for next, the follower simply
+   needs another install.
 
 ## 6. As built (part a)
 
