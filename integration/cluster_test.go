@@ -29,8 +29,8 @@ func freeAddr(t *testing.T) string {
 }
 
 // startCluster launches n nodes on free local ports, each with its own
-// fresh data directory, all with the default fsync policy.
-func startCluster(t *testing.T, n int) *cluster {
+// fresh data directory, with args added to each node's flags.
+func startCluster(t *testing.T, n int, args ...string) *cluster {
 	t.Helper()
 	c := &cluster{t: t, nodes: map[int32]*broker{}}
 	var peers []string
@@ -39,7 +39,7 @@ func startCluster(t *testing.T, n int) *cluster {
 		peers = append(peers, fmt.Sprintf("%d=%s/%s", id, c.nodes[id].addr, freeAddr(t)))
 	}
 	for id, b := range c.nodes {
-		b.args = []string{"-node-id", fmt.Sprint(id), "-peers", strings.Join(peers, ",")}
+		b.args = append([]string{"-node-id", fmt.Sprint(id), "-peers", strings.Join(peers, ",")}, args...)
 		b.start()
 	}
 	t.Cleanup(func() {
