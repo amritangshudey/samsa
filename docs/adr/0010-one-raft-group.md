@@ -55,4 +55,6 @@ other.
 - A fetch answered by a leader that has been replaced but has not heard
   of it can miss the newest records (it never returns uncommitted ones).
   With this phase's reliable network the window is a few milliseconds;
-  Phase 6 adds partitions and has to deal with it.
+  Phase 6 adds partitions and has to deal with it. *(2026-11-11: it
+  was not a few milliseconds under partitions, and is closed by ADR
+  0013.)*

@@ -128,7 +128,8 @@ the command log), `broker` (the node; `state.go` is the applied state
 machine, `groups.go` the group coordinator's soft state, `leader.go` what
 a non-leader answers), `simsys` (simulated disk), `sim` (the simulator:
 world, clients, the history checker in `history.go` and `groups.go`, and
-the Raft safety monitor in `monitor.go`). `realsys/peer.go` is the TCP
-transport between nodes.
+the Raft safety monitor in `monitor.go`, the peer network and partition
+scenarios in `network.go`; seeds that once failed are in
+`regressions.txt`). `realsys/peer.go` is the TCP transport between nodes.
 `integration/` is a separate Go module so that client libraries never enter
 the broker's `go.mod`.

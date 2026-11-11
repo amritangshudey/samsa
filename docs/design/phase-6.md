@@ -86,6 +86,9 @@ broker's own.
 | 7 | serve clients as soon as elected, before an entry of the term is applied | I1 / I3 |
 | 8 | accept offset commits from any generation | G4 |
 
+*As built (section 8):* 4 was dropped as unreachable and replaced by
+"answer reads without the lease"; 1 is caught at the Raft level only.
+
 A mutation that no seed catches is a finding: a missing fault or a missing
 invariant, fixed before the phase ends.
 
@@ -120,3 +123,28 @@ Second pass, hunting for checks that could pass vacuously:
 4. A mutation suite where every mutation is caught by the same invariant
    would hint at one strong check and several weak ones. Report which
    invariant caught each.
+
+## 8. Changes made while building
+
+- **A leader lease** (ADR 0013), because partitions exposed stale reads
+  (BUGS.md S4, S5). Followers ignore candidates for an election timeout
+  after hearing from a leader; every leader-only request needs the lease.
+- **Mutation 4 dropped.** Committing past what a message confirmed cannot
+  happen with this leader: a message stops short of the leader's commit
+  index only while catching a follower up from the point where their logs
+  match, and the first conflicting entry follows that point, so the same
+  message truncates it. Not even a reordered old message rebuilds the
+  needed state. A switch that no fault can reach proves nothing. Replaced
+  by "answer reads without the lease".
+- **Figure 8 is not caught by the whole-system simulator** in 2000 seeds,
+  although its code path runs about eight times per seed. Doing harm
+  takes five events in a row: two leaders each crashing with an entry
+  nobody else has, the first returning to push its entry to a majority,
+  the message with its own no-op lost, and its death before the next
+  heartbeat. Added in the attempt and kept: one entry per message in a
+  third of the seeds, faults aimed at the leader half the time, faults
+  every 20 ms in a quarter of the seeds, five-node clusters. The Raft
+  level random schedules catch it.
+- **The mutation suite reruns each catching seed without the mutation.**
+  That is how S5 was found.
+- **Partition gaps are up to 0.5 s**, not 2 s, so leaders change more.

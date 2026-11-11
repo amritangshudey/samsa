@@ -64,6 +64,40 @@ before its fix).
   right reordering. A guard that makes a value "safe" (the clamp) can
   hide that the value was wrong.
 
+### S4. An isolated leader answered reads from its old state (Phase 6)
+
+- **Seeds:** 2, 7, 40, 57, 62 of the first 200 once partitions existed.
+- **Invariants:** I3 ("high watermark 393 is below 395, which was
+  acknowledged or seen before the request") and G3 (an offset fetch
+  returned a commit that a later acknowledged one had replaced).
+- **Root cause:** a leader cut off from the others keeps believing it
+  leads until it hears a higher term. Meanwhile the majority elects a new
+  leader, which accepts writes. Clients can reach both. The old one went
+  on serving fetches and offset fetches from its own applied state. ADR
+  0010 had accepted this window as milliseconds; under a partition it
+  lasts as long as the partition.
+- **Fix:** a leader lease (ADR 0013): followers ignore candidates for an
+  election timeout after hearing from a leader, and the leader serves
+  only while a majority answered it within ¾ of that.
+  `TestLeaderReadsNeedTheLease`; mutation `UnsafeNoLease`.
+- **Lesson:** "Raft makes it safe" is true of the log, and only of the
+  log. Anything answered from a node's local state needs its own
+  argument.
+
+### S5. An isolated leader refused valid writes from its old state (Phase 6)
+
+- **Seed:** 937, found while checking that a mutation's catching seed
+  passed without the mutation. It did not.
+- **Invariant:** "OffsetCommit for t2/2 failed with code 3": unknown
+  topic, for a topic whose creation had been acknowledged.
+- **Root cause:** S4's fix covered requests that only read. Produce and
+  OffsetCommit are writes, but they check that the partition exists
+  against applied state *before* proposing, and that refusal is a read.
+- **Fix:** every request that only a leader answers needs the lease.
+- **Lesson:** classify by what the answer depends on, not by what the
+  request is called. The mutation suite now reruns each catching seed
+  without its mutation, so a real bug cannot pass for a caught mutation.
+
 Phase 1's storage engine and the rest of Phase 2's broker passed 5000 seeds
 with no other finding. See "what is untested or weak" in the phase reports
 for how much that is worth.
