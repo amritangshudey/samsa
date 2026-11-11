@@ -41,12 +41,9 @@ records on power loss. Their numbers are not durable throughput.**
 | 3 | always | 100 B | 505083 (496934–753313) | 50.5 | 252542 | 19.94 | 49.64 | 61.76 | 67.50 |
 | 3 | always | 1024 B | 97840 (83206–98595) | 100.2 | 48920 | 22.13 | 53.96 | 66.07 | 72.16 |
 | 3 | always | 10240 B | 9803 (8753–10626) | 100.4 | 4902 | 20.16 | 134.79 | 176.43 | 186.44 |
-| 3 | interval | 100 B | 1066146 (991407–1318464) | 106.6 | 533073 | 8.22 | 49.72 | 60.66 | 65.97 |
-| 3 | interval | 1024 B | 207981 (202976–222092) | 213.0 | 103991 | 7.67 | 39.79 | 45.35 | 49.05 |
-| 3 | interval | 10240 B | 18220 (8661–21142) | 186.6 | 9110 | 7.60 | 50.78 | 59.56 | 63.86 |
-| 3 | never | 100 B | 1529234 (1450809–1637359) | 152.9 | 764617 | 7.17 | 39.41 | 47.10 | 49.78 |
-| 3 | never | 1024 B | 268746 (267797–284078) | 275.2 | 134373 | 8.31 | 42.76 | 47.54 | 50.62 |
-| 3 | never | 10240 B | 24555 (8002–28528) | 251.4 | 12277 | 9.04 | 63.13 | 70.16 | 74.97 |
+
+Rows for three nodes with `interval` and `never` were measured too, and
+removed: a cluster now refuses to start with those policies (ADR 0012).
 
 ## Reading it
 
@@ -63,7 +60,7 @@ records on power loss. Their numbers are not durable throughput.**
 - **The tails vary from run to run.** Some rows have p99 above 100 ms
   (1 node `always` and `never` at 10 KiB) where neighbours do not; with
   one latency run per row that is not yet explained. The throughput spread
-  is wide in places too (3 nodes at 10 KiB: 8 000 to 28 000 records/s).
+  is wide in places too (3 nodes, `always`, 10 KiB: 8 750 to 10 600 records/s; 1 node, `interval`, 100 B: 2.6 M to 3.3 M).
   Differences under about 30 % between rows are not significant here.
 - `never` is not consistently faster than `interval`: at one node and
   100 B it was slower, which is noise of that size.

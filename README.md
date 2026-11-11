@@ -27,7 +27,7 @@ kcat -b localhost:9092 -C -t demo -p 0 -o beginning -e
 
 Topics are never created automatically, hence the `topic` tool. `-sync
 always` (the default) acknowledges a write only after fsync; `interval` and
-`never` trade that for speed.
+`never` trade that for speed, on a single node only: a cluster needs `always`.
 
 A three-node cluster on one machine (each node: id, client address, peer
 address):
@@ -137,7 +137,7 @@ comparison with Kafka has been made.
 | `make race` | tests with the race detector |
 | `make fuzz` | every fuzz target for `FUZZTIME` each |
 | `make integration` | real clients against the binary (needs kcat and a JDK) |
-| `make bench` | throughput and latency, about 20 minutes |
+| `make bench` | throughput and latency, about 15 minutes |
 | `make release VERSION=v0.1.0` | binaries for macOS and Linux, arm64 and amd64, with checksums |
 
 Licence: see [LICENSE](LICENSE).

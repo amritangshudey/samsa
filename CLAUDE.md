@@ -109,7 +109,7 @@ again if the developer withdraws this instruction.
 | `make integration` | Real clients (franz-go, kcat, Java) against the binary; needs kcat and a JDK |
 | `make sim SEEDS=n` | Run n seeds of the simulator (default 1000); failures print their seed |
 | `make sim SEED=x` | Replay one seed with its full event trace |
-| `make bench` | Throughput and latency of the binary (about 20 min); writes `bench.md` |
+| `make bench` | Throughput and latency of the binary (about 15 min); writes `bench.md` |
 | `make release VERSION=vX.Y.Z` | Binaries for macOS and Linux, arm64 and amd64, and checksums, in `dist/` |
 
 Run the broker: `./bin/samsa -listen localhost:9092 -data ./data`
