@@ -123,7 +123,9 @@ The JDK is keg-only and not on PATH: use `/opt/homebrew/opt/openjdk/bin/java`.
 See ADR 0003. `cmd/samsa` wires the real implementations; `internal/sys`
 holds the interfaces; `internal/realsys` is the only impure package under
 `internal/`; everything else there is core: `storage` (the log), `wire`
-(Kafka encoding), `broker` (the node), `simsys` (simulated disk), `sim`
-(the simulator: world, clients, and the history checker in `history.go`).
+(Kafka encoding), `broker` (the node; `state.go` is the applied state
+machine, `groups.go` the group coordinator's soft state), `simsys` (simulated disk), `sim`
+(the simulator: world, clients, and the history checker in `history.go`
+and `groups.go`).
 `integration/` is a separate Go module so that client libraries never enter
 the broker's `go.mod`.

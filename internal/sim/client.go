@@ -59,6 +59,7 @@ type client struct {
 	corr     int32
 	progress uint64
 	cursors  map[TP]int64 // consumers: next offset to read
+	mem      *membership  // group members: their place in the group
 }
 
 // tick is the client's heartbeat: connect, misbehave, or issue a request.

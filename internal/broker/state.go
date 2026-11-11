@@ -4,10 +4,12 @@
 package broker
 
 import (
+	"cmp"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"slices"
 	"sort"
 
 	"github.com/amritangshudey/samsa/internal/wire"
@@ -16,8 +18,11 @@ import (
 // Command types. The first byte of every command names its type, so a log
 // written by an older build stays readable and an unknown type fails loudly.
 const (
-	cmdCreateTopic byte = 1
-	cmdAppend      byte = 2
+	cmdCreateTopic     byte = 1
+	cmdAppend          byte = 2
+	cmdOffsetCommit    byte = 3
+	cmdGroupGeneration byte = 4
+	cmdGroupAssignment byte = 5
 )
 
 // errBadCommand marks a command in the log that cannot be decoded. The log
@@ -65,9 +70,164 @@ type topic struct {
 type state struct {
 	topics map[string]*topic
 	names  []string // sorted, for deterministic listing
+	groups map[string]*group
+	// noFencing is Config.UnsafeNoFencing: a deliberate bug.
+	noFencing bool
 }
 
-func newState() *state { return &state{topics: map[string]*topic{}} }
+func newState() *state { return &state{topics: map[string]*topic{}, groups: map[string]*group{}} }
+
+// member is one consumer in a group generation.
+type member struct {
+	id               string
+	sessionTimeout   int32 // milliseconds
+	rebalanceTimeout int32 // milliseconds
+	// protocols are the assignment strategies the member supports, each
+	// with its metadata. The broker never looks inside the metadata.
+	protocols  []wire.GroupProtocol
+	assignment []byte // what the leader gave this member; opaque
+}
+
+// committedOffset is where a group will resume reading one partition.
+type committedOffset struct {
+	offset      int64
+	leaderEpoch int32
+	metadata    string
+	time        int64 // proposer's clock at commit, ms; for offset expiry, which does not exist yet
+}
+
+// offsetEntry is one partition's offset inside an OffsetCommit command.
+type offsetEntry struct {
+	topic     string
+	partition int32
+	committedOffset
+}
+
+// group is the applied state of a consumer group. It is Empty with no
+// members, CompletingRebalance with members and no assignment, and Stable
+// with both. A rebalance in progress is not applied state: see softGroup.
+type group struct {
+	generation   int32
+	protocolType string
+	protocol     string
+	leader       string
+	members      []*member // in the order of the GroupGeneration command
+	assigned     bool
+	offsets      map[string]map[int32]committedOffset // topic, then partition
+}
+
+// member returns the member with the given id, or nil.
+func (g *group) member(id string) *member {
+	for _, m := range g.members {
+		if m.id == id {
+			return m
+		}
+	}
+	return nil
+}
+
+// group returns the named group for reading. A group that does not exist
+// reads as an empty one at generation 0; the returned value must not be
+// modified.
+func (s *state) group(name string) *group {
+	if g := s.groups[name]; g != nil {
+		return g
+	}
+	return &group{}
+}
+
+// forWrite returns the named group, creating it if needed.
+func (s *state) forWrite(name string) *group {
+	g := s.groups[name]
+	if g == nil {
+		g = &group{offsets: map[string]map[int32]committedOffset{}}
+		s.groups[name] = g
+	}
+	return g
+}
+
+// checkCommit decides whether an offset commit is accepted. It runs in
+// apply, so the generation it compares with is the one current at the
+// commit's position in the log: this is what fences a zombie (G4).
+func (g *group) checkCommit(generation int32, memberID string, noFencing bool) int16 {
+	if generation == -1 && memberID == "" {
+		// A consumer that assigns partitions itself. It may not write
+		// under a group that has members.
+		if len(g.members) > 0 {
+			return wire.ErrUnknownMemberID
+		}
+		return wire.ErrNone
+	}
+	switch {
+	case g.member(memberID) == nil:
+		return wire.ErrUnknownMemberID
+	case generation != g.generation && !noFencing:
+		return wire.ErrIllegalGeneration
+	case !g.assigned:
+		return wire.ErrRebalanceInProgress
+	}
+	return wire.ErrNone
+}
+
+func encodeOffsetCommit(groupID string, generation int32, memberID string, now int64, entries []offsetEntry) []byte {
+	w := wire.Writer{B: []byte{cmdOffsetCommit}}
+	w.String(false, groupID)
+	w.Int32(generation)
+	w.String(false, memberID)
+	w.Int64(now)
+	w.ArrayLen(false, len(entries))
+	for _, e := range entries {
+		w.String(false, e.topic)
+		w.Int32(e.partition)
+		w.Int64(e.offset)
+		w.Int32(e.leaderEpoch)
+		w.String(false, e.metadata)
+	}
+	return w.B
+}
+
+func encodeGroupGeneration(groupID string, g *group) []byte {
+	w := wire.Writer{B: []byte{cmdGroupGeneration}}
+	w.String(false, groupID)
+	w.Int32(g.generation)
+	w.String(false, g.protocolType)
+	w.String(false, g.protocol)
+	w.String(false, g.leader)
+	w.ArrayLen(false, len(g.members))
+	for _, m := range g.members {
+		w.String(false, m.id)
+		w.Int32(m.sessionTimeout)
+		w.Int32(m.rebalanceTimeout)
+		w.ArrayLen(false, len(m.protocols))
+		for _, p := range m.protocols {
+			w.String(false, p.Name)
+			w.Bytes(false, p.Metadata)
+		}
+	}
+	return w.B
+}
+
+func encodeGroupAssignment(groupID string, generation int32, assignments []wire.MemberAssignment) []byte {
+	w := wire.Writer{B: []byte{cmdGroupAssignment}}
+	w.String(false, groupID)
+	w.Int32(generation)
+	w.ArrayLen(false, len(assignments))
+	for _, a := range assignments {
+		w.String(false, a.MemberID)
+		w.Bytes(false, a.Assignment)
+	}
+	return w.B
+}
+
+// sortedKeys returns m's keys in order: the only way the core walks a map.
+func sortedKeys[K cmp.Ordered, V any](m map[K]V) []K {
+	keys := make([]K, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return keys
+}
 
 // partition returns the named partition, or nil.
 func (s *state) partition(name string, index int32) *partition {
@@ -128,6 +288,69 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 		p.batches = append(p.batches, batchRef{base: base, logIndex: index, maxTimestamp: maxTime})
 		p.next += int64(count)
 		return result{baseOffset: base}, nil
+
+	case cmdOffsetCommit:
+		name, generation, memberID, now := r.String(false), r.Int32(), r.String(false), r.Int64()
+		entries := wire.Array(r, false, func() offsetEntry {
+			return offsetEntry{r.String(false), r.Int32(), committedOffset{r.Int64(), r.Int32(), r.String(false), now}}
+		})
+		if r.Err() != nil {
+			return result{}, fmt.Errorf("%w: offset commit at index %d", errBadCommand, index)
+		}
+		if code := s.group(name).checkCommit(generation, memberID, s.noFencing); code != wire.ErrNone {
+			return result{errCode: code}, nil
+		}
+		g := s.forWrite(name)
+		for _, e := range entries {
+			if g.offsets[e.topic] == nil {
+				g.offsets[e.topic] = map[int32]committedOffset{}
+			}
+			g.offsets[e.topic][e.partition] = e.committedOffset
+		}
+		return result{}, nil
+
+	case cmdGroupGeneration:
+		name := r.String(false)
+		next := group{generation: r.Int32(), protocolType: r.String(false), protocol: r.String(false), leader: r.String(false)}
+		next.members = wire.Array(r, false, func() *member {
+			return &member{id: r.String(false), sessionTimeout: r.Int32(), rebalanceTimeout: r.Int32(),
+				protocols: wire.Array(r, false, func() wire.GroupProtocol {
+					// Copied: the command may alias a buffer that is reused.
+					return wire.GroupProtocol{Name: r.String(false), Metadata: slices.Clone(r.Bytes(false))}
+				})}
+		})
+		if r.Err() != nil {
+			return result{}, fmt.Errorf("%w: group generation at index %d", errBadCommand, index)
+		}
+		// One node has one proposer, so this holds today. Under Raft a
+		// deposed leader's proposal can arrive late; this discards it.
+		if next.generation != s.group(name).generation+1 {
+			return result{errCode: wire.ErrIllegalGeneration}, nil
+		}
+		g := s.forWrite(name)
+		next.offsets = g.offsets
+		*g = next
+		return result{}, nil
+
+	case cmdGroupAssignment:
+		name, generation := r.String(false), r.Int32()
+		assignments := wire.Array(r, false, func() wire.MemberAssignment {
+			return wire.MemberAssignment{MemberID: r.String(false), Assignment: slices.Clone(r.Bytes(false))}
+		})
+		if r.Err() != nil {
+			return result{}, fmt.Errorf("%w: group assignment at index %d", errBadCommand, index)
+		}
+		g := s.groups[name]
+		if g == nil || generation != g.generation || g.assigned {
+			return result{errCode: wire.ErrIllegalGeneration}, nil
+		}
+		for _, a := range assignments {
+			if m := g.member(a.MemberID); m != nil {
+				m.assignment = a.Assignment
+			}
+		}
+		g.assigned = true
+		return result{}, nil
 	}
 	return result{}, fmt.Errorf("%w: unknown type %d at index %d", errBadCommand, cmd[0], index)
 }
@@ -167,6 +390,35 @@ func (s *state) hash() uint32 {
 			add(p.next, int64(len(p.batches)))
 			for _, b := range p.batches {
 				add(b.base, b.logIndex, b.maxTimestamp)
+			}
+		}
+	}
+	str := func(vs ...string) {
+		for _, v := range vs {
+			add(int64(len(v)))
+			sum = crc32.Update(sum, table, []byte(v))
+		}
+	}
+	for _, name := range sortedKeys(s.groups) {
+		g := s.groups[name]
+		str(name, g.protocolType, g.protocol, g.leader)
+		add(int64(g.generation), int64(len(g.members)))
+		for _, m := range g.members {
+			str(m.id, string(m.assignment))
+			add(int64(m.sessionTimeout), int64(m.rebalanceTimeout), int64(len(m.protocols)))
+			for _, p := range m.protocols {
+				str(p.Name, string(p.Metadata))
+			}
+		}
+		if g.assigned {
+			add(1)
+		}
+		for _, topic := range sortedKeys(g.offsets) {
+			str(topic)
+			for _, part := range sortedKeys(g.offsets[topic]) {
+				o := g.offsets[topic][part]
+				str(o.metadata)
+				add(int64(part), o.offset, int64(o.leaderEpoch), o.time)
 			}
 		}
 	}

@@ -225,7 +225,7 @@ func TestBrokerOverTCP(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { disk.Close() })
-			return broker.New(broker.Config{NodeID: 1, Host: "127.0.0.1", Port: 1}, l, l, disk)
+			return broker.New(broker.Config{NodeID: 1, Host: "127.0.0.1", Port: 1}, l, l, disk, Random{})
 		})
 	}
 	var corr int32

@@ -56,6 +56,7 @@ type options struct {
 	producers   int
 	consumers   int
 	vandals     int
+	members     int
 }
 
 func (f fault) String() string {
@@ -84,7 +85,9 @@ func Run(cfg Config) Result {
 		SyncInterval:  time.Duration(5+pick.Intn(200)) * time.Millisecond,
 		SegmentBytes:  []int64{4096, 16384, 1 << 20}[pick.Intn(3)],
 		MaxBatchBytes: maxBatchBytes,
-		Logger:        nodeLogger(cfg.Trace),
+		// Short, so that expiries and rebalances happen within a run.
+		MinSessionTimeout: 50 * time.Millisecond,
+		Logger:            nodeLogger(cfg.Trace),
 	}
 	for f := faultPower; f <= faultSync; f++ {
 		if pick.Chance(0.6) {
@@ -95,12 +98,13 @@ func Run(cfg Config) Result {
 	w.opts.disconnects = pick.Chance(0.6)
 	w.opts.faultEvery = []time.Duration{100 * time.Millisecond, 500 * time.Millisecond, 2 * time.Second}[pick.Intn(3)]
 	w.opts.producers, w.opts.consumers, w.opts.vandals = 1+pick.Intn(3), 1+pick.Intn(3), pick.Intn(2)
+	w.opts.members = pick.Intn(5)
 	if cfg.Mutate != nil {
 		cfg.Mutate(&w.bcfg)
 	}
 	w.model = NewModel(w.bcfg.Sync == broker.SyncAlways)
-	res := Result{Seed: cfg.Seed, Setup: fmt.Sprintf("sync=%d segment=%d faults=%v every=%v disconnects=%v producers=%d consumers=%d vandals=%d",
-		w.bcfg.Sync, w.bcfg.SegmentBytes, w.opts.faults, w.opts.faultEvery, w.opts.disconnects, w.opts.producers, w.opts.consumers, w.opts.vandals)}
+	res := Result{Seed: cfg.Seed, Setup: fmt.Sprintf("sync=%d segment=%d faults=%v every=%v disconnects=%v producers=%d consumers=%d vandals=%d members=%d",
+		w.bcfg.Sync, w.bcfg.SegmentBytes, w.opts.faults, w.opts.faultEvery, w.opts.disconnects, w.opts.producers, w.opts.consumers, w.opts.vandals, w.opts.members)}
 	if w.trace != nil {
 		_, _ = fmt.Fprintf(w.trace, "seed %d: %s\n", cfg.Seed, res.Setup)
 	}
@@ -109,10 +113,13 @@ func Run(cfg Config) Result {
 	behaviours := []struct {
 		n    int
 		step func(*client)
-	}{{w.opts.producers, (*client).produce}, {w.opts.consumers, (*client).consume}, {w.opts.vandals, (*client).vandalise}}
+	}{{w.opts.producers, (*client).produce}, {w.opts.consumers, (*client).consume}, {w.opts.vandals, (*client).vandalise}, {w.opts.members, (*client).groupMember}}
 	for _, b := range behaviours {
 		for range b.n {
 			cl := &client{w: w, rng: rng.Fork(), step: b.step, cursors: map[TP]int64{}}
+			// Timeouts well under answerBound: a held JoinGroup or
+			// SyncGroup is answered within the rebalance timeout.
+			cl.mem = &membership{group: groupNames[cl.rng.Intn(len(groupNames))], session: int32(100 + cl.rng.Intn(1900)), rebalance: int32(100 + cl.rng.Intn(2900))}
 			w.clients = append(w.clients, cl)
 			w.after(time.Duration(cl.rng.Intn(int(50*time.Millisecond))), cl.tick)
 		}
@@ -153,7 +160,10 @@ func (w *world) finalChecks() {
 	var read func(i int, offset int64)
 	read = func(i int, offset int64) {
 		if i == len(tps) {
-			done = true
+			// G3 and G6 for the whole history: every committed offset.
+			v.fetchOffsets(groupNames[0], tps, false, func() {
+				v.fetchOffsets(groupNames[1], tps, false, func() { done = true })
+			})
 			return
 		}
 		tp := tps[i]
@@ -196,7 +206,7 @@ func (w *world) finalChecks() {
 			w.disk.Restart()
 		}
 		inc := &incarnation{w: w, timers: map[sys.TimerID]uint64{}}
-		inc.n = broker.New(w.bcfg, inc, inc, w.disk)
+		inc.n = broker.New(w.bcfg, inc, inc, w.disk, w.rng.Fork())
 		if err := inc.n.OnStart(); err != nil {
 			w.fail("I6: restart on a quiet disk failed: %v", err)
 			return

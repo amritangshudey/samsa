@@ -70,6 +70,11 @@ func TestSim(t *testing.T) {
 		total.RecoveriesCut += s.RecoveriesCut
 		total.Starts += s.Starts
 		total.Disconnects += s.Disconnects
+		total.GroupJoins += s.GroupJoins
+		total.GroupSyncs += s.GroupSyncs
+		total.OffsetCommits += s.OffsetCommits
+		total.OffsetFetches += s.OffsetFetches
+		total.ZombiesRefused += s.ZombiesRefused
 	}
 	t.Logf("%d seeds, %d failed; totals %+v", *seeds, failed, total)
 	// A suite that passes because nothing happened proves nothing.
@@ -78,6 +83,8 @@ func TestSim(t *testing.T) {
 			"records acknowledged": total.RecordsAcked, "records read back": total.RecordsRead,
 			"power losses": total.PowerLosses, "kills": total.Kills, "failed syncs": total.SyncFailures,
 			"recoveries interrupted": total.RecoveriesCut, "client disconnects": total.Disconnects,
+			"group joins": total.GroupJoins, "group syncs": total.GroupSyncs, "offset commits": total.OffsetCommits,
+			"offset fetches checked": total.OffsetFetches, "zombie commits refused": total.ZombiesRefused,
 		} {
 			if n < *seeds/10 {
 				t.Errorf("only %d %s in %d seeds: the suite is not exercising what it claims", n, name, *seeds)
