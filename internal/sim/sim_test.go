@@ -118,6 +118,11 @@ func TestDeterminism(t *testing.T) {
 // fault or a missing invariant. If this test fails, a green TestSim means
 // nothing.
 func TestMutationSuite(t *testing.T) {
+	if raceEnabled {
+		// Thousands of single-threaded runs: the race detector finds
+		// nothing here and makes them ten times slower. `make test` runs it.
+		t.Skip("skipped under the race detector")
+	}
 	const maxSeeds = 2000
 	for _, tc := range []struct {
 		name   string
