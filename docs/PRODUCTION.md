@@ -27,7 +27,45 @@ What is **not** promised even at v1.0, and is said so in the README: scale
 beyond what one Raft group gives until sharding (item 14) lands; Kafka
 Streams/Connect guarantees; tiered storage.
 
-## 2. What makes it different
+## 2. The real problem it solves
+
+**Teams cannot test how their own applications behave when Kafka
+misbehaves.** The bugs that lose or duplicate messages in production are
+in application code: a consumer that commits before it finishes
+processing, a producer retry that writes twice, a rebalance in the middle
+of a batch. They show only under faults, and today's tools do not make
+those faults at the protocol level, on demand, and repeatably:
+Testcontainers and Redpanda give a healthy broker; network chaos tools
+(Toxiproxy, Litmus) cut connections but cannot say "commit this write and
+lose its acknowledgement"; Kafka's own fault injector and the
+deterministic simulators at WarpStream and Aiven test the broker, not the
+user's application. (Searched 2026-11-11; no tool found that does this.
+That is a search result, not proof that none exists.)
+
+Samsa already has both halves of the answer inside it: a fault injector
+driven by a seed, and a checker that knows the ground truth of every
+record. The product is to turn them outwards:
+
+- **`samsa -faults seed=N,...`**: a real broker for a test suite or CI job
+  that injects Kafka-level faults from a seed: an acknowledgement lost
+  after the write committed, a leader change mid-request, a rebalance
+  forced mid-batch, a session expiry, slow or empty fetches, offsets cut
+  by retention. The same seed gives the same faults.
+- **A verdict on the application**, from the broker's own knowledge: for
+  a declared pipeline (input topic → the application → output topic), was
+  every input record processed exactly once, at least once, or lost; did a
+  group commit past records it was never sent; did it reprocess after a
+  rebalance. Printed as a report and as an exit code for CI.
+- One static binary that starts in milliseconds, so it runs inside any
+  test without Docker.
+
+So the pitch is one sentence: **the Kafka you run your tests against,
+which breaks on purpose, the same way every time, and tells you whether
+your application lost or duplicated anything.** The production-grade
+broker below is what makes that verdict trustworthy, and is the second
+use: a small, single-binary Kafka for places a JVM cluster does not fit.
+
+## 3. What makes it different
 
 Not features: Kafka has more. The difference is evidence, and it is
 already the project's core:
@@ -44,7 +82,7 @@ already the project's core:
 "Best in the market" stays a goal, never a claim (CLAUDE.md). Where
 Samsa loses to Kafka or Redpanda, G8 makes the repo say so.
 
-## 3. Order and milestones
+## 4. Order and milestones
 
 Each item follows ROADMAP section 8: design doc with a recorded second
 review, tests first, a mutation switch for each safety step, PR on green
@@ -58,12 +96,13 @@ CI, report. Each milestone is a tagged release.
 | 2 | Raft hardening: PreVote, CheckQuorum, leadership transfer, graceful shutdown | B3 | a returning partitioned node does not depose a healthy leader (scenario fails without PreVote); SIGTERM hands over leadership, clients see no error |
 | 3 | Operations: Prometheus metrics, health/readiness, admin APIs (DescribeCluster, DescribeConfigs, DeleteTopics, DeleteRecords, CreatePartitions), `samsa check`, config file | B4 | the standard Kafka CLI tools run against it; `check` finds planted corruption |
 
-### v0.3 — proven on real processes
+### v0.3 — proven on real processes, and the feature nobody else has
 
 | # | Item | Roadmap | Must show |
 |---|---|---|---|
 | 4 | Black-box chaos test of the real binary | A4 | shared checkers pass on real histories; a deliberately broken build is caught |
 | 5 | Simulator tools: seed shrinking, HTML timeline, fault coverage, mutation score in CI | A3 | a seed from BUGS.md shrinks to a readable schedule |
+| 5b | **Application fault testing**: `-faults` mode and the pipeline verdict (section 2) | new | a sample consumer with a commit-before-process bug is reported as losing records, with the seed; the fixed one passes; a guide for JUnit, Go and Python tests |
 | 6 | Soak and resource bounds: 24 h run, memory and disk tracked; start-up re-measured with retention | G5 | flat memory, bounded disk, numbers in the repo |
 
 ### v0.4 — secure
@@ -97,7 +136,7 @@ CI, report. Each milestone is a tagged release.
 | 16 | Compatibility matrix: more clients and versions, table generated from results | B5 | **needs test-only dependencies: ask first** |
 | 17 | Kafka comparison benchmark, packaging (container image, systemd unit), runbook, security review | G4, G8 | published numbers; a stranger can deploy from the docs |
 
-## 4. Known blockers ahead
+## 5. Known blockers ahead
 
 - Item 16, and the standard Kafka CLI tools in item 3, need tools or
   modules not yet installed (rule: ask before adding any dependency).
@@ -108,7 +147,7 @@ CI, report. Each milestone is a tagged release.
 
 Blockers are written to `docs/QUESTIONS.md` as they arrive.
 
-## 5. Status
+## 6. Status
 
 | Item | Status |
 |---|---|
