@@ -83,6 +83,7 @@ func TestSim(t *testing.T) {
 		total.NotLeader += s.NotLeader
 		total.ReplicasCompared += s.ReplicasCompared
 		total.Partitions += s.Partitions
+		total.SnapshotStarts += s.SnapshotStarts
 	}
 	t.Logf("%d seeds, %d failed; totals %+v", *seeds, failed, total)
 	// A suite that passes because nothing happened proves nothing.
@@ -94,6 +95,7 @@ func TestSim(t *testing.T) {
 			"group joins": total.GroupJoins, "group syncs": total.GroupSyncs, "offset commits": total.OffsetCommits,
 			"offset fetches checked": total.OffsetFetches, "zombie commits refused": total.ZombiesRefused,
 			"leaders elected": total.Leaders, "requests refused by a non-leader": total.NotLeader, "replica comparisons": total.ReplicasCompared, "partitions": total.Partitions,
+			"starts from a snapshot": total.SnapshotStarts,
 		} {
 			if n < *seeds/10 {
 				t.Errorf("only %d %s in %d seeds: the suite is not exercising what it claims", n, name, *seeds)
@@ -144,6 +146,7 @@ func TestMutationSuite(t *testing.T) {
 		{"serve as soon as elected", func(c *broker.Config) { c.UnsafeServeEarly = true }},
 		{"answer reads without the lease", func(c *broker.Config) { c.UnsafeNoLease = true }},
 		{"accept offset commits from any generation", func(c *broker.Config) { c.UnsafeNoFencing = true }},
+		{"snapshot before the log is synced", func(c *broker.Config) { c.UnsafeRaft, c.SnapshotEvery = raft.MutSnapshotUnsynced, 1 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for first := uint64(1); first <= maxSeeds; first += 100 {

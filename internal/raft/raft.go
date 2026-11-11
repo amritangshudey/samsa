@@ -99,6 +99,9 @@ const (
 	// MutTruncateOnStale makes a follower drop every entry beyond the
 	// ones a message carries, even when there is no conflict.
 	MutTruncateOnStale
+	// MutSnapshotUnsynced writes a snapshot without first syncing the log
+	// up to its index.
+	MutSnapshotUnsynced
 )
 
 func (r *Raft) mut(m Mutation) bool { return r.cfg.Unsafe&m != 0 }
@@ -144,6 +147,9 @@ type Raft struct {
 	// or started. Until ElectionTimeout after it, it ignores candidates.
 	contact sys.Instant
 
+	loaded    snapshot // what Start found on disk, for the caller
+	snapIndex int64    // index of the newest snapshot on disk, or -1
+
 	err error
 }
 
@@ -163,7 +169,7 @@ func New(cfg Config, env Env, disk sys.Disk) *Raft {
 	}
 	cfg.Log.SyncBytes = -1
 	return &Raft{cfg: cfg, env: env, disk: disk, hsf: hardStateFile{disk: disk, dir: cfg.Dir},
-		leader: noVote, commit: -1, ackTo: noVote}
+		leader: noVote, commit: -1, ackTo: noVote, snapIndex: -1}
 }
 
 // Start recovers the log and the hard state from disk and begins as a
@@ -179,7 +185,19 @@ func (r *Raft) Start() error {
 	}
 	r.log = log
 	r.contact = r.env.Now() // it may have answered a leader just before it stopped
-	for off := log.StartOffset(); off < log.EndOffset(); {
+	if r.loaded, err = loadSnapshot(r.disk, r.cfg.Dir); err != nil {
+		return err
+	}
+	r.snapIndex = r.loaded.index
+	from := log.StartOffset()
+	if s := r.loaded; s.index >= 0 {
+		if err := r.checkSnapshot(s); err != nil {
+			return err
+		}
+		r.terms, from = s.expand(), s.index+1
+		r.commit = s.index // the caller applied it, so it was committed
+	}
+	for off := from; off < log.EndOffset(); {
 		batches, err := log.Read(off, 4<<20)
 		if err != nil {
 			return fmt.Errorf("scan raft log at %d: %w", off, err)
@@ -205,6 +223,25 @@ func (r *Raft) Start() error {
 		r.armElection()
 	}
 	return r.err
+}
+
+// checkSnapshot refuses a snapshot that the log cannot back: one that
+// reaches past the log's end, or whose last entry has another term.
+func (r *Raft) checkSnapshot(s snapshot) error {
+	if r.log.StartOffset() != 0 || s.index >= r.log.EndOffset() {
+		return fmt.Errorf("%w: snapshot at %d, log holds %d to %d", errBadSnapshot, s.index, r.log.StartOffset(), r.log.EndOffset())
+	}
+	batches, err := r.log.Read(s.index, 0)
+	if err != nil {
+		return fmt.Errorf("read raft log at snapshot %d: %w", s.index, err)
+	}
+	if len(batches) == 0 || len(batches[0].Payload) < entryHeader {
+		return fmt.Errorf("%w: raft log entry %d has no header", storage.ErrCorrupt, s.index)
+	}
+	if term := int64(binary.BigEndian.Uint64(batches[0].Payload)); term != s.runs[len(s.runs)-1].term {
+		return fmt.Errorf("%w: entry %d has term %d, snapshot says %d", errBadSnapshot, s.index, term, s.runs[len(s.runs)-1].term)
+	}
+	return nil
 }
 
 // Err returns the error after which the instance stopped, if any: a failed

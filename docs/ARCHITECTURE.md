@@ -41,8 +41,15 @@ a lone node elects itself, and an entry commits when it is synced
 
 What this shape costs: every node stores every partition and one leader
 takes all writes, so adding nodes adds no capacity; partitions interleave in
-the log, so fetches have poor locality; a start replays the whole log (no
-snapshots); `acks=0` and `acks=1` behave as `acks=all`.
+the log, so fetches have poor locality; nothing is ever deleted (no
+retention yet); `acks=0` and `acks=1` behave as `acks=all`.
+
+**Snapshots** ([design](design/a1-snapshots.md)). Every `SnapshotEvery`
+applied entries (default 10 000), the node syncs its log and writes a
+snapshot: the terms of the entries so far, as runs, and the encoded state
+machine (`broker/snapshot.go`; record data stays in the log). A start loads
+it, reads only the entries after it, and applies from there. A snapshot
+that the log cannot back stops the node.
 
 The rules that keep it correct (roadmap R1–R7): apply reads no clock, no
 randomness and no unordered map, and anything time- or chance-dependent is

@@ -645,7 +645,13 @@ func TestBadInputClosesConnection(t *testing.T) {
 }
 
 func TestRestartKeepsCommittedData(t *testing.T) {
-	h := newHarness(t, Config{SegmentBytes: 2048, MaxBatchBytes: 1000})
+	for _, every := range []int64{-1, 1, 7} { // without snapshots, after every entry, every few
+		t.Run(fmt.Sprint("snapshot every ", every), func(t *testing.T) { restartKeepsCommittedData(t, every) })
+	}
+}
+
+func restartKeepsCommittedData(t *testing.T, every int64) {
+	h := newHarness(t, Config{SegmentBytes: 2048, MaxBatchBytes: 1000, SnapshotEvery: every})
 	h.open(1)
 	h.createTopic(1, "a", 2)
 	h.createTopic(1, "b", 1)
@@ -659,8 +665,15 @@ func TestRestartKeepsCommittedData(t *testing.T) {
 		key := fmt.Sprint(topic, part)
 		want[key] = append(want[key], v)
 	}
+	hash := h.node.st.hash()
 	for range 2 { // twice: replay must be repeatable
 		h.start()
+		if i := h.node.raft.SnapshotIndex(); (i >= 0) != (every > 0) {
+			t.Fatalf("snapshot index %d with SnapshotEvery %d", i, every)
+		}
+		if h.node.st.hash() != hash {
+			t.Fatal("state after restart differs from before")
+		}
 		h.open(1)
 		for i, key := range []string{"a0", "a1", "b0"} {
 			topic, part := []string{"a", "a", "b"}[i], int32([]int{0, 1, 0}[i])

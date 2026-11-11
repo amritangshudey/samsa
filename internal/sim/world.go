@@ -51,6 +51,8 @@ type Stats struct {
 	// that was not serving, and replica comparisons made (S4).
 	Leaders, NotLeader, ReplicasCompared int
 	Partitions                           int
+	// Starts that began from a snapshot instead of the whole log.
+	SnapshotStarts int
 }
 
 // simNode is one machine of the cluster: a disk that outlives the
@@ -362,6 +364,9 @@ func (w *world) start(nd *simNode) {
 	}
 	nd.inc = inc
 	w.stats.Starts++
+	if inc.n.Raft().SnapshotIndex() >= 0 {
+		w.stats.SnapshotStarts++
+	}
 	w.monitor(inc)
 }
 

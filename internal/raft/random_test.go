@@ -107,6 +107,9 @@ func randomRun(seed uint64, mutate func(*Config)) error {
 		if err := c.open(id); err != nil {
 			return fmt.Errorf("restart node %d: %w", id, err)
 		}
+		if i, state := c.r(id).Snapshot(); i >= 0 && string(state) != fmt.Sprintf("s%d", i) {
+			return fmt.Errorf("node %d: snapshot at %d holds %q", id, i, state)
+		}
 		return check(id)
 	}
 	for _, id := range c.ids {
@@ -143,8 +146,12 @@ func randomRun(seed uint64, mutate func(*Config)) error {
 					return fmt.Errorf("propose on leader %d: %w", n.id, err)
 				}
 			}
-		case r < 450:
+		case r < 440:
 			n.r.Flush()
+		case r < 450: // a snapshot of everything committed; restarts then start from it
+			if i := n.r.Committed() - 1; i >= 0 {
+				n.r.SaveSnapshot(i, fmt.Appendf(nil, "s%d", i))
+			}
 		case len(c.queue) > 0:
 			i := rng.Intn(len(c.queue))
 			m := c.queue[i]
@@ -234,6 +241,7 @@ func TestRandomSchedulesCatchBrokenRaft(t *testing.T) {
 		"entries acknowledged before sync":        func(c *Config) { c.AckBeforeSync = true },
 		"vote by log length only":                 func(c *Config) { c.Unsafe = MutVoteByLength },
 		"follower truncates on a stale message":   func(c *Config) { c.Unsafe = MutTruncateOnStale },
+		"snapshot before the log is synced":       func(c *Config) { c.Unsafe = MutSnapshotUnsynced },
 	} {
 		caught := false
 		for seed := range uint64(3000) {
