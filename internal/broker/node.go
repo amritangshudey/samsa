@@ -60,6 +60,10 @@ type Config struct {
 	SyncInterval time.Duration
 	// SegmentBytes is the command log's segment size (storage default if 0).
 	SegmentBytes int64
+	// SnapshotEvery is how many applied entries pass between snapshots of
+	// the state machine (docs/design/a1-snapshots.md). Default 10 000;
+	// negative disables them.
+	SnapshotEvery int64
 	// MaxRequestBytes bounds one request frame. Default 32 MiB.
 	MaxRequestBytes int
 	// MaxBatchBytes bounds one record batch. Default 1 MiB.
@@ -105,6 +109,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.SyncInterval <= 0 {
 		c.SyncInterval = time.Second
+	}
+	if c.SnapshotEvery == 0 {
+		c.SnapshotEvery = 10_000
 	}
 	if c.MaxRequestBytes <= 0 {
 		c.MaxRequestBytes = 32 << 20
@@ -262,6 +269,14 @@ func (n *Node) OnStart() error {
 	}, raftEnv{n}, n.disk)
 	if err := n.raft.Start(); err != nil {
 		return err
+	}
+	if i, b := n.raft.Snapshot(); i >= 0 {
+		st, err := decodeState(b)
+		if err != nil {
+			return fmt.Errorf("snapshot at %d: %w", i, err)
+		}
+		st.noFencing = n.cfg.UnsafeNoFencing // a switch, not state
+		n.st, n.applied = st, i+1
 	}
 	// A single node has elected itself; one sync makes its whole log
 	// committed, so it serves from the first request on.
@@ -489,6 +504,9 @@ func (n *Node) advance() {
 	}
 	if len(n.waiters) == 0 {
 		n.waiters = nil // release the backing array
+	}
+	if every := n.cfg.SnapshotEvery; every > 0 && n.fatal == nil && n.applied-1-n.raft.SnapshotIndex() >= every {
+		n.raft.SaveSnapshot(n.applied-1, n.st.encode())
 	}
 	if appended {
 		n.wakeFetches()
