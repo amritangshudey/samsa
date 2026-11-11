@@ -129,7 +129,7 @@ func decodeState(b []byte) (*state, error) {
 		return struct{}{}
 	})
 	if r.Err() != nil || r.Len() != 0 || bad {
-		return nil, fmt.Errorf("%w: snapshot state: %v, %d bytes left, malformed %v", errBadCommand, r.Err(), r.Len(), bad)
+		return nil, fmt.Errorf("%w: snapshot state: %w, %d bytes left, malformed %v", errBadCommand, r.Err(), r.Len(), bad)
 	}
 	return s, nil
 }
