@@ -125,8 +125,11 @@ back. It becomes `max(start, …)`. The simulator checks it (section 6).
 
 ### 4.1 DescribeConfigs
 
-Answered by the leader, from the applied state (the topic must exist);
-other nodes answer as for any request they cannot serve (ADR 0011). Resource types: topic (2) and broker (4); others →
+Answered by every node, from its own configuration and applied state, as
+Metadata is (changed while building: the admin client sends a broker's
+configs request to that broker itself, so a leader-only answer could never
+describe a follower; nothing in the answer is changed by a client, and a
+follower is at most a little behind on which topics exist). Resource types: topic (2) and broker (4); others →
 `INVALID_REQUEST` for that resource. Keys null means all.
 
 Only what Samsa really has, every entry `ReadOnly` (there is no
@@ -202,12 +205,19 @@ only.
   the same name finds no records, no committed offset, no producer state.
 - **Simulator**: the workload gains DeleteTopics, CreatePartitions and
   DeleteRecords. The model learns them: after a delete, no read returns
-  the old topic's records, a recreated topic starts at 0 (I-rules on a
-  fresh partition); after DeleteRecords at `o`, no read returns a record
+  the old topic's records (new invariant **D1**: a fetch sent after the
+  delete was acknowledged finds no topic); after DeleteRecords at `o`, no read returns a record
   below `o` and ListOffsets earliest is at least `o`, across trims and
   snapshots; new partitions start empty. A mutation for each: delete
   without the offsets (`UnsafeKeepOffsetsOnDelete`), trim resetting the
-  start (`UnsafeTrimResetsStart`).
+  start (`UnsafeTrimResetsStart`). As built, the simulator does **not**
+  recreate a deleted topic: once the name is reused, a late answer about
+  the old topic and an answer about the new one cannot be told apart by
+  name (ADR 0016), so the model could only judge them by guessing which
+  command was applied first. Recreation is covered by the broker test and
+  `TestKafkaCLI`. `UnsafeKeepOffsetsOnDelete` is caught by the broker test
+  only, for the same reason: without a recreate a kept offset is never
+  read.
 - **Integration**: every command in the table of section 1 run with the
   real Kafka CLI tools against a three-node cluster, output checked
   (`TestKafkaCLI`, skipped when the distribution is absent, as the Java
@@ -261,3 +271,12 @@ Second pass, looking for what breaks:
    if they are few and flat: a fixed array per API key, not maps.
 8. **`check` on a live directory** could report a half-written segment as
    corrupt. The lock file stops it; `-force` is not offered.
+
+**Found while building** (after the review):
+
+9. *DescribeConfigs for a broker goes to that broker*, so it is answered by
+   every node (section 4.1 changed).
+10. *The checker judged DeleteRecords answers against state at answer
+    time.* An answer reflects the log when the command was applied, which
+    may be before a later trim or delete moved the floor. Fixed by
+    capturing the floor and start when the request is sent (BUGS.md M9).

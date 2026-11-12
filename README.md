@@ -69,24 +69,25 @@ unmodified client library or tool, against the built binary, over TCP.
 | Idempotent producer: Java, franz-go and kcat with idempotence on; retries across leader kills write nothing twice | [`TestClusterSurvivesLeaderKill`](integration/cluster_test.go), the simulator (I8, I9), [`TestSequenceRules`](internal/broker/idempotence_test.go) |
 | Graceful stop: SIGTERM to the leader hands over; a producer writing meanwhile sees no error, nothing lost or doubled | [`TestClusterGracefulStop`](integration/cluster_test.go), [`TestGracefulStopHandsOver`](internal/broker/cluster_test.go) |
 | A node returning from a partition does not depose the leader (PreVote); a leader cut off from its majority steps down (CheckQuorum) | [`TestReturningNodeDoesNotDepose`](internal/raft/hardening_test.go), [`TestCheckQuorumLetsTheMajorityElect`](internal/raft/hardening_test.go) |
+| Admin with the standard Kafka 4.4 CLI tools: `kafka-topics` (create, list, describe, alter partitions, delete), `kafka-configs --describe` (read-only), `kafka-delete-records`, `kafka-consumer-groups` (list, describe, state), `kafka-get-offsets`, `kafka-cluster cluster-id`, on a three-node cluster | [`TestKafkaCLI`](integration/cli_test.go), [`admin_test.go`](internal/broker/admin_test.go), the simulator (R1, D1) |
 | Replication with Raft; a three-process cluster survives two leader kills with no record lost | [`TestClusterSurvivesLeaderKill`](integration/cluster_test.go) |
 | Acknowledged writes survive power loss (fsync before ack, torn writes, failed fsyncs) | [`TestCrashRecoveryProperty`](internal/storage/crash_test.go), the simulator |
 | Every produce and fetch answer checked against an exact model of each partition, under crashes and partitions, 1–5 nodes ([ADR 0007](docs/adr/0007-history-checking.md)) | [`TestSim`](internal/sim/sim_test.go), [`TestRegressions`](internal/sim/sim_test.go) |
-| The checks can tell: deliberate bugs, each caught (ten in the simulator, one more in the Raft test) | [`TestMutationSuite`](internal/sim/sim_test.go), [`TestRandomSchedulesCatchBrokenRaft`](internal/raft/random_test.go) |
+| The checks can tell: deliberate bugs, each caught (thirteen in the simulator, one more in the Raft test) | [`TestMutationSuite`](internal/sim/sim_test.go), [`TestRandomSchedulesCatchBrokenRaft`](internal/raft/random_test.go) |
 | Malformed network input is rejected, never a panic | fuzz targets in [`internal/wire`](internal/wire), [`internal/raft`](internal/raft); [`TestBadInputClosesConnection`](internal/broker/node_test.go) |
 | The core does no I/O and reads no clock (so the simulator can drive it) | [`TestCoreIsPure`](internal/purity_test.go) |
 
 APIs and versions: [ADR 0006](docs/adr/0006-api-versions.md) (produce,
 fetch, metadata, offsets, topics) and [ADR 0008](docs/adr/0008-group-api-versions.md)
-(groups), each with the versions the three clients were seen to use.
+(groups) and [ADR 0016](docs/adr/0016-admin-api-versions.md) (admin), each with the versions the three clients were seen to use.
 
 ## What is not supported
 
 Transactions (a transactional producer is refused with `INVALID_REQUEST`),
 log compaction, retention by time or per topic (only `-retention-bytes`, one
-bound for the whole log), deleting records, ACLs, SASL, TLS, tiered storage,
+bound for the whole log), changing configs (AlterConfigs), topic ids, ACLs, SASL, TLS, tiered storage,
 cluster membership changes, the KIP-848 group protocol, static membership,
-deleting topics or adding partitions, fetch sessions, more than one Raft
+fetch sessions, more than one Raft
 group (all partitions share one log, [ADR 0010](docs/adr/0010-one-raft-group.md)),
 authentication between nodes. Limits of each phase are listed in
 [`docs/reports/`](docs/reports).
