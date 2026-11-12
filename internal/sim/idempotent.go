@@ -44,6 +44,28 @@ type idemPart struct {
 	epoch int16
 	next  int32
 	queue []*idemBatch
+	// left is set once a batch has left the queue, acknowledged or
+	// abandoned; lastBorn is when the newest of those was first sent.
+	left     bool
+	lastBorn sys.Instant
+}
+
+// leave records that the batches bs, oldest first, left p's queue.
+func (p *idemPart) leave(bs ...*idemBatch) {
+	if len(bs) > 0 {
+		p.left, p.lastBorn = true, bs[len(bs)-1].born
+	}
+}
+
+// restart moves p to a new epoch and renumbers its queue from 0, as the
+// Java client does after the broker has forgotten the producer.
+func (p *idemPart) restart(id int64) {
+	p.epoch, p.next = p.epoch+1, 0
+	for _, b := range p.queue {
+		b.seq = p.next
+		wire.SetBatchProducer(b.bytes, id, p.epoch, b.seq)
+		p.next = wire.AddSequence(p.next, int32(b.n))
+	}
 }
 
 // idemProducer is one producer session.
@@ -88,6 +110,7 @@ func (cl *client) produceIdempotent() {
 			// applied, before the new epoch's first batch or refused
 			// after it; either way no record is written twice.
 			w.stats.EpochBumps++
+			p.leave(p.queue...)
 			p.queue, p.epoch, p.next = nil, p.epoch+1, 0
 		default:
 			cl.sendIdempotent(p, p.queue[i])
@@ -170,11 +193,22 @@ func (cl *client) sendIdempotent(p *idemPart, b *idemBatch) {
 				w.fail("%v: batch with sequence %d acknowledged before the batches ahead of it", p.tp, b.seq)
 				return
 			}
+			p.leave(b)
 			p.queue = p.queue[1:]
 			cl.check(m.Acked(b.first, b.n, resp.Topics[0].Partitions[0].BaseOffset, epoch))
 			w.stats.RecordsAcked += b.n
 			w.stats.IdempotentAcked += b.n
 		case wire.ErrOutOfOrderSequenceNumber, wire.ErrInvalidProducerEpoch:
+			// Every copy the partition accepted was sent no later than
+			// lastBorn. Expiry needs ProducerExpiry of silence after that
+			// (the simulated clocks do not drift), so a refusal sooner is
+			// a broker bug.
+			if code == wire.ErrOutOfOrderSequenceNumber && w.opts.expiry > 0 && p.left && w.now-p.lastBorn >= sys.Instant(w.opts.expiry) {
+				w.stats.ExpiredRefusals++
+				p.restart(cl.idem.id)
+				cl.hangUp() // the batches behind it fail too, and go again renumbered
+				return
+			}
 			w.fail("I8: %v refused producer %d epoch %d sequence %d (attempt %d) with code %d", p.tp, cl.idem.id, p.epoch, b.seq, b.sends, code)
 		default:
 			w.fail("the broker rejected a valid idempotent write to %v with code %d", p.tp, code)
