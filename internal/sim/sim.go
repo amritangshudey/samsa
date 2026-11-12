@@ -59,7 +59,8 @@ type options struct {
 	consumers   int
 	vandals     int
 	members     int
-	idempotent  int // idempotent producers (idempotent.go)
+	idempotent  int           // idempotent producers (idempotent.go)
+	expiry      time.Duration // producer expiry as chosen, before any mutation
 	nodes       int
 	// Between nodes (network.go): drop and duplicate probabilities per
 	// message, and whether partition scenarios run.
@@ -122,6 +123,12 @@ func Run(cfg Config) Result {
 	w.bcfg.SnapshotEvery = []int64{-1, 1, 7, 100}[pick.Intn(4)]
 	w.bcfg.RetentionBytes = []int64{0, 0, 64 << 10, 8 << 10}[pick.Intn(4)]
 	w.opts.idempotent = pick.Intn(3)
+	// Longer than any copy of a batch can linger: a request is answered
+	// within answerBound on a live connection, and a producer retries for
+	// giveUp. Kafka's default day plays the same role against its
+	// two-minute delivery timeout.
+	w.opts.expiry = []time.Duration{-1, 15 * time.Second}[pick.Intn(2)]
+	w.bcfg.ProducerExpiry = w.opts.expiry
 	if cfg.Mutate != nil {
 		cfg.Mutate(&w.bcfg)
 	}
@@ -145,8 +152,8 @@ func Run(cfg Config) Result {
 	if w.bcfg.RetentionBytes > 0 {
 		w.model.Trimming()
 	}
-	res := Result{Seed: cfg.Seed, Setup: fmt.Sprintf("nodes=%d sync=%d segment=%d election=%v faults=%v every=%v drop=%v dup=%v partitions=%v append=%d snapshot=%d retention=%d disconnects=%v producers=%d consumers=%d vandals=%d members=%d idempotent=%d",
-		w.opts.nodes, w.bcfg.Sync, w.bcfg.SegmentBytes, w.bcfg.ElectionTimeout, w.opts.faults, w.opts.faultEvery, w.opts.drop, w.opts.dup, w.opts.partitions, w.bcfg.MaxAppendBytes, w.bcfg.SnapshotEvery, w.bcfg.RetentionBytes, w.opts.disconnects, w.opts.producers, w.opts.consumers, w.opts.vandals, w.opts.members, w.opts.idempotent)}
+	res := Result{Seed: cfg.Seed, Setup: fmt.Sprintf("nodes=%d sync=%d segment=%d election=%v faults=%v every=%v drop=%v dup=%v partitions=%v append=%d snapshot=%d retention=%d disconnects=%v producers=%d consumers=%d vandals=%d members=%d idempotent=%d expiry=%v",
+		w.opts.nodes, w.bcfg.Sync, w.bcfg.SegmentBytes, w.bcfg.ElectionTimeout, w.opts.faults, w.opts.faultEvery, w.opts.drop, w.opts.dup, w.opts.partitions, w.bcfg.MaxAppendBytes, w.bcfg.SnapshotEvery, w.bcfg.RetentionBytes, w.opts.disconnects, w.opts.producers, w.opts.consumers, w.opts.vandals, w.opts.members, w.opts.idempotent, w.opts.expiry)}
 	if w.trace != nil {
 		_, _ = fmt.Fprintf(w.trace, "seed %d: %s\n", cfg.Seed, res.Setup)
 	}
@@ -262,6 +269,7 @@ func (w *world) finalChecks() {
 	// everything applied was synced first. Every node is restarted at
 	// once; the cluster must come back to the state it had.
 	_, hash := leader.inc.n.StateHash()
+	w.stats.ProducersExpired += leader.inc.n.ExpiredProducers()
 	// A restarted leader may legitimately trim again; I6 is about replay.
 	for _, nd := range w.nodes {
 		nd.cfg.RetentionBytes = 0

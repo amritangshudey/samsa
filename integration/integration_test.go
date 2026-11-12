@@ -363,12 +363,23 @@ func javaAndJars(t *testing.T) (java, classPath string) {
 // The official Java client: admin creates the topic, producer writes,
 // consumer reads back. See java/RoundTrip.java.
 func TestJavaClientRoundTrip(t *testing.T) {
-	java, cp := javaAndJars(t)
 	b := startBroker(t)
 	const n = 300
+	javaRoundTrip(t, b, n)
+	// What Java wrote, franz-go must read identically.
+	if got := consume(t, b, "java", map[int32]int{0: n}); got[0][n-1] != fmt.Sprintf("java-%d", n-1) {
+		t.Fatalf("franz-go reading Java's records: last is %q", got[0][n-1])
+	}
+}
+
+// javaRoundTrip runs java/RoundTrip.java against b and checks that it read
+// back its n records once each, in order.
+func javaRoundTrip(t *testing.T, b *broker, n int, extra ...string) {
+	t.Helper()
+	java, cp := javaAndJars(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, java, "-cp", cp, "java/RoundTrip.java", b.addr, "java", fmt.Sprint(n))
+	cmd := exec.CommandContext(ctx, java, append([]string{"-cp", cp, "java/RoundTrip.java", b.addr, "java", fmt.Sprint(n)}, extra...)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -384,8 +395,20 @@ func TestJavaClientRoundTrip(t *testing.T) {
 			t.Fatalf("record %d: got %q, want %q", i, line, want)
 		}
 	}
-	// What Java wrote, franz-go must read identically.
-	if got := consume(t, b, "java", map[int32]int{0: n}); got[0][n-1] != fmt.Sprintf("java-%d", n-1) {
-		t.Fatalf("franz-go reading Java's records: last is %q", got[0][n-1])
+}
+
+// A Java producer that stays silent past the producer expiry is forgotten,
+// is refused when it comes back, starts a new epoch by itself, and writes
+// nothing twice (docs/design/a2-idempotent-producer.md, section 7.1).
+func TestJavaProducerAfterExpiry(t *testing.T) {
+	b := startBroker(t, "-producer-expiry", "1s")
+	javaRoundTrip(t, b, 20, "4000")
+	if !strings.Contains(b.log(), "expired idempotent producers") {
+		t.Fatalf("the broker never expired the producer during the pause")
+	}
+	for _, line := range strings.Split(b.log(), "\n") {
+		if strings.Contains(line, "expired") {
+			t.Log(line)
+		}
 	}
 }

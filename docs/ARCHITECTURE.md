@@ -167,7 +167,11 @@ and in the snapshot. A batch is checked at apply, not before proposing,
 because what is in sequence depends on the entries ahead of it. A retry is
 answered with the first copy's offset and appends nothing. A gap or an old
 epoch is refused. A producer unknown to the partition must start at
-sequence 0 (BUGS.md S6). The state is never dropped yet: expiry is part (b).
+sequence 0 (BUGS.md S6). The leader samples `(time, applied index)` while
+it serves. Once a sample is `-producer-expiry` old (default 24 h), it
+proposes `ExpireProducers` with that index. Every replica then drops the
+producers whose last batch is older, so the replicas agree without
+comparing clocks.
 
 ## 5. The simulator
 
@@ -185,7 +189,7 @@ virtual time, all randomness from one seed ([ADR 0007](adr/0007-history-checking
   runs only) re-send unanswered batches unchanged and give up after two
   seconds with a new epoch. They check I8 (a producer that follows the
   protocol is never refused a sequence) and I9 (no producer id is handed
-  out twice). A retry written twice puts one record at two offsets, which
+  out twice). Each seed sets producer expiry to never or 15 s. A retry written twice puts one record at two offsets, which
   the history model reports.
 - **Checkers.** `history.go` holds an exact model of each partition and
   checks every answer: nothing acknowledged lost (under `always`), offsets
@@ -204,7 +208,7 @@ virtual time, all randomness from one seed ([ADR 0007](adr/0007-history-checking
   (vote before persisting, vote by log length, truncate on a stale message,
   acknowledge before sync, serve before applying the term's entry, read
   without the lease, no fencing, snapshot before sync, delete segments
-  early, no sequence check) and requires each to be caught, then
+  early, no sequence check, expire producers at once) and requires each to be caught, then
   replays the catching seed without the bug to confirm the system is clean.
   The Figure 8 bug is caught by the Raft-level random schedules instead
   (`internal/raft/random_test.go`).

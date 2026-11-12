@@ -14,12 +14,17 @@ import org.apache.kafka.common.TopicPartition;
  * Creates a topic, produces N records and reads them back with the official
  * Java client, printing each value read on its own line.
  *
- * Usage: java -cp <kafka-clients jars> RoundTrip.java <bootstrap> <topic> <n>
+ * Usage: java -cp <kafka-clients jars> RoundTrip.java <bootstrap> <topic> <n> [pauseMs]
+ *
+ * With pauseMs, the producer stops for that long after half the records,
+ * while a second producer without idempotence writes to <topic>-tick, so
+ * that the broker has requests to time its producer expiry by.
  */
 public class RoundTrip {
     public static void main(String[] args) throws Exception {
         String bootstrap = args[0], topic = args[1];
         int n = Integer.parseInt(args[2]);
+        long pauseMs = args.length > 3 ? Long.parseLong(args[3]) : 0;
 
         Properties common = new Properties();
         common.put("bootstrap.servers", bootstrap);
@@ -27,7 +32,7 @@ public class RoundTrip {
         common.put("default.api.timeout.ms", "20000");
 
         try (Admin admin = Admin.create(common)) {
-            admin.createTopics(List.of(new NewTopic(topic, 1, (short) 1))).all().get();
+            admin.createTopics(List.of(new NewTopic(topic, 1, (short) 1), new NewTopic(topic + "-tick", 1, (short) 1))).all().get();
         }
 
         Properties pp = new Properties();
@@ -39,6 +44,12 @@ public class RoundTrip {
         try (KafkaProducer<String, String> producer = new KafkaProducer<>(pp)) {
             List<java.util.concurrent.Future<?>> sent = new ArrayList<>();
             for (int i = 0; i < n; i++) {
+                if (pauseMs > 0 && i == n / 2) {
+                    for (var f : sent) {
+                        f.get();
+                    }
+                    tick(pp, topic + "-tick", pauseMs);
+                }
                 sent.add(producer.send(new ProducerRecord<>(topic, 0, "key-" + i, "java-" + i)));
             }
             for (var f : sent) {
@@ -66,6 +77,19 @@ public class RoundTrip {
             if (read != n) {
                 System.err.println("read " + read + " of " + n);
                 System.exit(1);
+            }
+        }
+    }
+
+    /** Writes a record every 100 ms for ms, from a producer without idempotence. */
+    static void tick(Properties pp, String topic, long ms) throws Exception {
+        Properties tp = new Properties();
+        tp.putAll(pp);
+        tp.put("enable.idempotence", "false");
+        try (KafkaProducer<String, String> p = new KafkaProducer<>(tp)) {
+            for (long end = System.currentTimeMillis() + ms; System.currentTimeMillis() < end; ) {
+                p.send(new ProducerRecord<>(topic, 0, "tick", "tick")).get();
+                Thread.sleep(100);
             }
         }
     }

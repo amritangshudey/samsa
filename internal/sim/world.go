@@ -59,6 +59,9 @@ type Stats struct {
 	// Idempotent producers: records acknowledged, batches sent again,
 	// ids handed out, and partitions moved to a new epoch.
 	IdempotentAcked, Retries, ProducerIDs, EpochBumps int
+	// Producers the leader had forgotten by the end, and refusals of a
+	// producer that had legitimately expired.
+	ProducersExpired, ExpiredRefusals int
 }
 
 // simNode is one machine of the cluster: a disk that outlives the
