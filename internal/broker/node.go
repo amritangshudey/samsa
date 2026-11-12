@@ -68,6 +68,13 @@ type Config struct {
 	// the oldest segments (docs/design/a1-snapshots.md, section 3). Zero
 	// keeps everything.
 	RetentionBytes int64
+	// ProducerExpiry is how long an idempotent producer may write nothing
+	// before every partition forgets it (docs/design/a2-idempotent-producer.md,
+	// section 7). Default 24 h; negative never expires.
+	ProducerExpiry time.Duration
+	// UnsafeExpireEarly expires producers as soon as the leader samples
+	// the log, without waiting for ProducerExpiry.
+	UnsafeExpireEarly bool
 	// MaxRequestBytes bounds one request frame. Default 32 MiB.
 	MaxRequestBytes int
 	// MaxBatchBytes bounds one record batch. Default 1 MiB.
@@ -119,6 +126,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.SyncInterval <= 0 {
 		c.SyncInterval = time.Second
+	}
+	if c.ProducerExpiry == 0 {
+		c.ProducerExpiry = 24 * time.Hour
 	}
 	if c.SnapshotEvery == 0 {
 		c.SnapshotEvery = 10_000
@@ -210,6 +220,10 @@ type Node struct {
 	// trimmedAt is the index of the last Trim applied (-1: none since the
 	// last restore); trimProposed the highest cut this node proposed.
 	trimmedAt, trimProposed int64
+	// expirySamples are (time, applied index) pairs the serving leader
+	// wrote down, oldest first: soft state, so a new leader starts empty
+	// and expiry is only ever late.
+	expirySamples []expirySample
 
 	waiters    []waiter // ascending by index; non-empty only while serving
 	flushArmed bool
@@ -443,6 +457,7 @@ func (n *Node) lead() {
 	if !n.serving && leader && (n.cfg.UnsafeServeEarly || n.applied > 0 && n.raft.EntryTerm(n.applied-1) == term) {
 		n.serving, n.servingTerm = true, term
 		n.trimProposed = n.st.logStart // a Trim proposed in an earlier term may have been lost
+		n.expirySamples = nil
 		n.startGroups()
 		n.log.Info("serving as leader", "term", term, "applied", n.applied)
 	}
@@ -543,10 +558,14 @@ func (n *Node) advance() {
 			n.applied++
 			continue
 		}
+		expired := n.st.expired
 		res, err := n.st.apply(n.applied, cmd)
 		if err != nil {
 			n.fatal = err
 			return
+		}
+		if n.st.expired > expired {
+			n.log.Info("expired idempotent producers", "count", n.st.expired-expired, "index", n.applied)
 		}
 		if cmd[0] == cmdTrim {
 			n.trimmedAt = n.applied
@@ -573,8 +592,53 @@ func (n *Node) advance() {
 			n.propose(encodeTrim(cut), func(result) {})
 		}
 	}
+	if n.serving && n.fatal == nil {
+		n.expireProducers()
+	}
 	if appended {
 		n.wakeFetches()
+	}
+}
+
+// ExpiredProducers returns how many producers this node has forgotten
+// since it started, for the simulator's coverage counts.
+func (n *Node) ExpiredProducers() int { return n.st.expired }
+
+// expirySample is the leader's note that every entry below index had been
+// applied at time at.
+type expirySample struct {
+	at    sys.Instant
+	index int64
+}
+
+// expireProducers samples the applied index every eighth of the expiry
+// time and, once a sample is that old, proposes to forget the producers
+// that wrote nothing since it (docs/design/a2-idempotent-producer.md,
+// section 7.1).
+func (n *Node) expireProducers() {
+	every := n.cfg.ProducerExpiry
+	if every < 0 {
+		return
+	}
+	now := n.clock.Now()
+	if k := len(n.expirySamples); k == 0 || now-n.expirySamples[k-1].at >= sys.Instant(every/8) {
+		s := expirySample{now, n.applied}
+		if n.cfg.UnsafeExpireEarly { // a fresh sample, used at once
+			n.expirySamples = []expirySample{s}
+			n.proposeExpiry(s.index)
+			return
+		}
+		n.expirySamples = append(n.expirySamples, s)
+	}
+	if s := n.expirySamples[0]; now-s.at >= sys.Instant(every) && !n.cfg.UnsafeExpireEarly {
+		n.expirySamples = n.expirySamples[1:]
+		n.proposeExpiry(s.index)
+	}
+}
+
+func (n *Node) proposeExpiry(before int64) {
+	if before > 0 {
+		n.propose(encodeExpireProducers(before), func(result) {})
 	}
 }
 

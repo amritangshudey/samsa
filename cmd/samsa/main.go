@@ -52,6 +52,7 @@ func run() error {
 	nodeID := flag.Int("node-id", 1, "this node's id")
 	peersText := flag.String("peers", "", "every node of the cluster, this one included, as id=clientHost:port/peerHost:port,... (default: a cluster of this node alone)")
 	retention := flag.Int64("retention-bytes", 0, "keep about this many bytes of log, deleting the oldest segments (0: keep everything)")
+	producerExpiry := flag.Duration("producer-expiry", 24*time.Hour, "forget an idempotent producer after it writes nothing for this long (negative: never)")
 	logLevel := flag.String("log-level", "info", "debug, info, warn or error")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
@@ -118,7 +119,7 @@ func run() error {
 	}
 	node := broker.New(broker.Config{
 		NodeID: int32(*nodeID), Host: host, Port: int32(port), Peers: peers,
-		Sync: policy, SyncInterval: *syncInterval, Logger: logger, RetentionBytes: *retention,
+		Sync: policy, SyncInterval: *syncInterval, Logger: logger, RetentionBytes: *retention, ProducerExpiry: *producerExpiry,
 	}, loop, loop, disk, realsys.Random{})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

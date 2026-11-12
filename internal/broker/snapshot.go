@@ -10,8 +10,9 @@ import (
 // snapshotVersion leads every encoded state, so that a newer build can tell
 // an older snapshot apart.
 // Version 2 adds the log start and each partition's start offset; version 3
-// each partition's idempotent producers.
-const snapshotVersion = 3
+// each partition's idempotent producers; version 4 each producer's last
+// log index.
+const snapshotVersion = 4
 
 // encode returns the whole state machine as bytes, for a Raft snapshot
 // (docs/design/a1-snapshots.md). Maps are walked in sorted order, so equal
@@ -40,6 +41,7 @@ func (s *state) encode() []byte {
 				ps := p.producers[id]
 				w.Int64(id)
 				w.Int16(ps.epoch)
+				w.Int64(ps.index)
 				w.ArrayLen(false, len(ps.batches))
 				for _, b := range ps.batches {
 					w.Int32(b.first)
@@ -121,6 +123,18 @@ func decodeState(b []byte) (*state, error) {
 				last := int64(-1) // ids ascend, as the encoder writes them
 				wire.Array(r, false, func() struct{} {
 					id, ps := r.Int64(), &producer{epoch: r.Int16()}
+					if v >= 4 {
+						ps.index = r.Int64()
+						bad = bad || ps.index < 0
+					} else {
+						// Version 3 did not keep it. The newest batch's index,
+						// or the log start, is at or after the real one, so
+						// expiry is late, never early.
+						ps.index = s.logStart
+						if len(p.batches) > 0 {
+							ps.index = p.batches[len(p.batches)-1].logIndex
+						}
+					}
 					ps.batches = wire.Array(r, false, func() sentBatch { return sentBatch{r.Int32(), r.Int32(), r.Int64()} })
 					if id <= last || len(ps.batches) == 0 || len(ps.batches) > maxProducerBatches {
 						bad = true

@@ -1,9 +1,12 @@
 package broker
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/amritangshudey/samsa/internal/simsys"
 	"github.com/amritangshudey/samsa/internal/sys"
@@ -275,7 +278,7 @@ func TestSequenceWrap(t *testing.T) {
 					got = -int64(code)
 				case dup < 0:
 					got = p.next
-					p.remember(b, p.next)
+					p.remember(b, p.next, 0)
 					p.next += int64(b.Count)
 				}
 				if got != tt.want[i] {
@@ -283,5 +286,93 @@ func TestSequenceWrap(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Expiry (design section 7): a producer silent for ProducerExpiry is
+// forgotten on every partition, one that keeps writing is not, and the
+// forgotten one comes back by starting a new epoch at sequence 0.
+func TestProducerExpiry(t *testing.T) {
+	const expiry = time.Hour
+	h := newHarness(t, Config{ProducerExpiry: expiry})
+	h.open(1)
+	h.createTopic(1, "t", 2)
+	h.produceAs(1, "t", 0, 7, 0, 0, "a")
+	h.produceAs(1, "t", 1, 7, 0, 0, "b")
+	known := func(part int32, id int64) bool { return h.node.st.topics["t"].parts[part].producers[id] != nil }
+	// Producer 8 writes every eighth of the expiry, which also gives the
+	// leader the events it samples on.
+	seq := int32(0)
+	for step := time.Duration(0); step <= expiry*3/2; step += expiry / 8 {
+		if got := h.produceAs(1, "t", 0, 8, 0, seq, "x"); got.ErrorCode != 0 {
+			t.Fatalf("at %v the active producer was refused: %+v", step, got)
+		}
+		seq++
+		if step < expiry && (!known(0, 7) || !known(1, 7)) {
+			t.Fatalf("producer 7 was forgotten after %v, before the expiry of %v", step, expiry)
+		}
+		h.advance(expiry / 8)
+	}
+	if known(0, 7) || known(1, 7) {
+		t.Fatal("producer 7 is still remembered after one and a half expiry times")
+	}
+	if !known(0, 8) {
+		t.Fatal("the active producer was forgotten")
+	}
+	if got := h.produceAs(1, "t", 0, 7, 0, 1, "c"); got.ErrorCode != wire.ErrOutOfOrderSequenceNumber {
+		t.Fatalf("an expired producer continuing its sequence: %+v, want OUT_OF_ORDER_SEQUENCE_NUMBER", got)
+	}
+	if got := h.produceAs(1, "t", 0, 7, 1, 0, "c"); got.ErrorCode != 0 {
+		t.Fatalf("an expired producer starting a new epoch at 0: %+v", got)
+	}
+}
+
+// Negative expiry never forgets; the deliberate bug forgets at once.
+func TestProducerExpirySwitches(t *testing.T) {
+	for _, tt := range []struct {
+		cfg    Config
+		forgot bool
+	}{{Config{ProducerExpiry: -1}, false}, {Config{ProducerExpiry: time.Hour, UnsafeExpireEarly: true}, true}} {
+		h := newHarness(t, tt.cfg)
+		h.open(1)
+		h.createTopic(1, "t", 1)
+		h.produceAs(1, "t", 0, 7, 0, 0, "a")
+		for i := range 3 {
+			h.advance(time.Hour / 4)
+			h.produceAs(1, "t", 0, 8, 0, int32(i), "x")
+		}
+		if forgot := h.node.st.topics["t"].parts[0].producers[7] == nil; forgot != tt.forgot {
+			t.Errorf("%+v: producer forgotten: %v, want %v", tt.cfg, forgot, tt.forgot)
+		}
+	}
+}
+
+// A version 3 snapshot has no producer index; decoding takes the newest
+// batch's, which is never earlier than the real one.
+func TestSnapshotV3ProducerIndex(t *testing.T) {
+	const id = 0x0102030405060708
+	s := newState()
+	for i, cmd := range [][]byte{
+		encodeCreateTopic("t", 1),
+		encodeAppend("t", 0, batchAs(id, 0x0a0b, 0, "a")),
+		encodeAppend("t", 0, batch("b")),
+	} {
+		if _, err := s.apply(int64(i), cmd); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b := s.encode()
+	field := binary.BigEndian.AppendUint16(binary.BigEndian.AppendUint64(nil, id), 0x0a0b)
+	at := bytes.Index(b, field)
+	if at < 0 || binary.BigEndian.Uint64(b[at+len(field):]) != 1 {
+		t.Fatalf("producer entry not found in the encoding")
+	}
+	v3 := append(append([]byte{3}, b[1:at+len(field)]...), b[at+len(field)+8:]...)
+	got, err := decodeState(v3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ps := got.topics["t"].parts[0].producers[id]; ps == nil || ps.index != 2 {
+		t.Fatalf("decoded producer %+v, want index 2 (the newest batch)", ps)
 	}
 }
