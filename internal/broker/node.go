@@ -237,6 +237,8 @@ type Node struct {
 	// failed write or sync, or an undecodable command. Every handler
 	// returns it, and the driver stops the node.
 	fatal error
+	// stopping is set by OnStop: the node is handing over and will exit.
+	stopping bool
 }
 
 // New returns a node that will use the given clock, network, disk and
@@ -414,6 +416,26 @@ func (n *Node) OnTimer(id sys.TimerID) error {
 	return n.settle()
 }
 
+// OnStop begins a graceful stop (docs/design/b3-raft-hardening.md, 2.4):
+// a leader of more than one node hands leadership to its most up-to-date
+// follower; any other node is stopped at once.
+func (n *Node) OnStop() error {
+	n.stopping = true
+	if n.fatal == nil && n.raft.Role() == raft.Leader && len(n.cfg.Peers) > 1 {
+		if err := n.raft.TransferLeadership(0); err != nil {
+			n.log.Warn("leadership transfer not started", "err", err)
+		}
+	}
+	n.log.Info("stopping", "handing over", n.raft.Transferring())
+	return n.settle()
+}
+
+// Stopped reports whether a node told to stop may exit now: it no longer
+// leads, or its transfer was abandoned, or it has failed.
+func (n *Node) Stopped() bool {
+	return n.stopping && (n.fatal != nil || n.raft.Role() != raft.Leader || !n.raft.Transferring())
+}
+
 // settle ends every handler: it notices a change of leadership, applies
 // whatever has become committed, which may complete requests, which may
 // start further requests, until nothing moves. It returns the node's
@@ -448,13 +470,16 @@ func (n *Node) settle() error {
 // lead starts or stops serving clients as leadership comes and goes.
 func (n *Node) lead() {
 	leader, term := n.raft.Role() == raft.Leader, n.raft.Term()
-	if n.serving && (!leader || term != n.servingTerm) {
+	// A leader handing over serves nothing: its lease is void and new
+	// proposals would keep the successor's log from catching up.
+	handing := n.raft.Transferring()
+	if n.serving && (!leader || term != n.servingTerm || handing) {
 		n.serving = false
 		n.stopServing()
 	}
 	// The leader's first entry of its term is a no-op; once that is
 	// applied, so is everything before it.
-	if !n.serving && leader && (n.cfg.UnsafeServeEarly || n.applied > 0 && n.raft.EntryTerm(n.applied-1) == term) {
+	if !n.serving && leader && !handing && (n.cfg.UnsafeServeEarly || n.applied > 0 && n.raft.EntryTerm(n.applied-1) == term) {
 		n.serving, n.servingTerm = true, term
 		n.trimProposed = n.st.logStart // a Trim proposed in an earlier term may have been lost
 		n.expirySamples = nil

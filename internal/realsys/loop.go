@@ -96,8 +96,14 @@ func NewLoop(ln net.Listener, maxOutBytes int) *Loop {
 	}
 }
 
-// Run starts h and delivers events to it until ctx is cancelled (returning
-// nil) or a handler method fails (returning its error). It closes the
+// stopLimit bounds a graceful stop: a handler that has not stopped by then
+// is abandoned.
+const stopLimit = 10 * time.Second
+
+// Run starts h and delivers events to it until ctx is cancelled or a
+// handler method fails (returning its error). When ctx is cancelled, a
+// handler that is a sys.Stopper is told so and served until it reports
+// Stopped, for at most stopLimit; then Run returns nil. It closes the
 // listener and every connection before returning.
 func (l *Loop) Run(ctx context.Context, h sys.Handler) error {
 	defer l.shutdown()
@@ -108,7 +114,22 @@ func (l *Loop) Run(ctx context.Context, h sys.Handler) error {
 	go l.accept()
 	l.startPeers()
 
-	for ctx.Err() == nil {
+	cancelled := ctx.Done()
+	var stopper sys.Stopper
+	var limit <-chan time.Time
+	stop := func() (bool, error) { // reports whether Run should return now
+		cancelled = nil
+		s, ok := h.(sys.Stopper)
+		if !ok {
+			return true, nil
+		}
+		if err := s.OnStop(); err != nil {
+			return true, err
+		}
+		stopper, limit = s, time.After(stopLimit)
+		return s.Stopped(), nil
+	}
+	for {
 		var ev event
 		if len(l.local) > 0 {
 			// A zero-delay timer runs after the events already queued,
@@ -121,15 +142,27 @@ func (l *Loop) Run(ctx context.Context, h sys.Handler) error {
 		} else {
 			select {
 			case ev = <-l.events:
-			case <-ctx.Done():
+			case <-cancelled:
+				if done, err := stop(); done || err != nil {
+					return err
+				}
+				continue
+			case <-limit:
 				return nil
 			}
 		}
 		if err := l.deliver(h, ev); err != nil {
 			return err
 		}
+		if stopper != nil && stopper.Stopped() {
+			return nil
+		}
+		if cancelled != nil && ctx.Err() != nil {
+			if done, err := stop(); done || err != nil {
+				return err
+			}
+		}
 	}
-	return nil
 }
 
 func (l *Loop) deliver(h sys.Handler, ev event) error {

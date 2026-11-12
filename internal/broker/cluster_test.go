@@ -329,3 +329,57 @@ func TestLeaderReadsNeedTheLease(t *testing.T) {
 		t.Fatal("UnsafeNoLease did not switch the lease off")
 	}
 }
+
+// A leader told to stop hands leadership to a follower with everything it
+// committed, serves nothing meanwhile, and reports Stopped once it is no
+// longer leader; a follower is stopped at once.
+func TestGracefulStopHandsOver(t *testing.T) {
+	tr := newTrio(t)
+	tr.elect(1, 1, 2, 3)
+	h := tr.h[1]
+	h.open(1)
+	commit := func(h *harness, key, version int16, req, resp wire.Message) {
+		t.Helper()
+		corr := h.send(1, key, version, req)
+		tr.deliver(1, 2, 3)
+		if !h.recv(1, key, version, corr, resp) {
+			t.Fatalf("no answer to key %d", key)
+		}
+	}
+	var ct wire.CreateTopicsResponse
+	commit(h, wire.KeyCreateTopics, 4, &wire.CreateTopicsRequest{Topics: []wire.CreateTopic{{Name: "t", NumPartitions: 1, ReplicationFactor: 3}}}, &ct)
+	var pr wire.ProduceResponse
+	commit(h, wire.KeyProduce, 8, produceReq("t", 0, batch("a")), &pr)
+	if ct.Topics[0].ErrorCode != 0 || pr.Topics[0].Partitions[0].ErrorCode != 0 {
+		t.Fatalf("setup: %+v %+v", ct, pr)
+	}
+
+	f := tr.h[2]
+	f.must(f.node.OnStop())
+	if !f.node.Stopped() {
+		t.Fatal("a follower told to stop is not stopped at once")
+	}
+	h.must(h.node.OnStop())
+	if h.node.Serving() || h.node.Stopped() {
+		t.Fatalf("right after OnStop: serving %v, stopped %v", h.node.Serving(), h.node.Stopped())
+	}
+	tr.deliver(1, 2, 3)
+	if !h.node.Stopped() {
+		t.Fatal("the leader is not stopped after the handover")
+	}
+	var next *harness
+	for _, id := range []sys.NodeID{2, 3} {
+		if tr.h[id].node.Serving() {
+			next = tr.h[id]
+		}
+	}
+	if next == nil {
+		t.Fatal("nobody serves after the handover")
+	}
+	next.open(1)
+	pr = wire.ProduceResponse{}
+	commit(next, wire.KeyProduce, 8, produceReq("t", 0, batch("b")), &pr)
+	if p := pr.Topics[0].Partitions[0]; p.ErrorCode != 0 || p.BaseOffset != 1 {
+		t.Fatalf("produce on the new leader: %+v", p)
+	}
+}

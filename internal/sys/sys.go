@@ -67,6 +67,15 @@ type Handler interface {
 	OnPeerMessage(from NodeID, msg []byte) error
 }
 
+// Stopper is what a Handler may also offer: a way to hand its work over
+// before the process exits. The driver calls OnStop once, keeps delivering
+// events until Stopped reports true (or its own limit passes), and then
+// exits.
+type Stopper interface {
+	OnStop() error
+	Stopped() bool
+}
+
 // Clock is the node's only source of time.
 type Clock interface {
 	// Now returns the current time. Within one process lifetime it never
