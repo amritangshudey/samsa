@@ -36,6 +36,11 @@ func randomRun(seed uint64, mutate func(*Config)) (installs int, err error) {
 			if seed/6%2 == 1 {
 				cfg.MaxAppendBytes = 1 // one entry per message
 			}
+			if seed/12%2 == 1 {
+				// The paper's Raft: PreVote makes contested elections rare,
+				// and some bugs need them (docs/design/b3-raft-hardening.md).
+				cfg.Unsafe |= MutNoPreVote | MutNoCheckQuorum
+			}
 			if mutate != nil {
 				mutate(cfg)
 			}
@@ -152,7 +157,7 @@ func randomRun(seed uint64, mutate func(*Config)) (installs int, err error) {
 				n.armed[TimerHeartbeat] = false
 				n.r.OnTimer(TimerHeartbeat)
 			case r < 250:
-				if n.r.Role() == Leader {
+				if n.r.Role() == Leader && !n.r.Transferring() {
 					proposals++
 					if _, err := n.r.Propose(fmt.Appendf(nil, "c%d", proposals)); err != nil {
 						return fmt.Errorf("propose on leader %d: %w", n.id, err)
@@ -166,6 +171,12 @@ func randomRun(seed uint64, mutate func(*Config)) (installs int, err error) {
 				}
 			case r < 460: // drop what the snapshot covers; a lagging follower then needs it
 				n.r.Compact(n.r.Committed())
+			case r < 464: // hand leadership over
+				if n.r.Role() == Leader {
+					if err := n.r.TransferLeadership(0); err != nil {
+						return fmt.Errorf("transfer from leader %d: %w", n.id, err)
+					}
+				}
 			case len(c.queue) > 0:
 				i := rng.Intn(len(c.queue))
 				m := c.queue[i]
@@ -260,13 +271,13 @@ func TestRandomSchedules(t *testing.T) {
 // TestRandomSchedules mean nothing.
 func TestRandomSchedulesCatchBrokenRaft(t *testing.T) {
 	for name, mutate := range map[string]func(*Config){
-		"commit by counting replicas of any term": func(c *Config) { c.Unsafe = MutCommitAnyTerm },
-		"vote granted before it is on disk":       func(c *Config) { c.Unsafe = MutVoteWithoutPersist },
+		"commit by counting replicas of any term": func(c *Config) { c.Unsafe |= MutCommitAnyTerm },
+		"vote granted before it is on disk":       func(c *Config) { c.Unsafe |= MutVoteWithoutPersist },
 		"entries acknowledged before sync":        func(c *Config) { c.AckBeforeSync = true },
-		"vote by log length only":                 func(c *Config) { c.Unsafe = MutVoteByLength },
-		"follower truncates on a stale message":   func(c *Config) { c.Unsafe = MutTruncateOnStale },
-		"snapshot before the log is synced":       func(c *Config) { c.Unsafe = MutSnapshotUnsynced },
-		"compact past the snapshot":               func(c *Config) { c.Unsafe = MutTrimPastSnapshot },
+		"vote by log length only":                 func(c *Config) { c.Unsafe |= MutVoteByLength },
+		"follower truncates on a stale message":   func(c *Config) { c.Unsafe |= MutTruncateOnStale },
+		"snapshot before the log is synced":       func(c *Config) { c.Unsafe |= MutSnapshotUnsynced },
+		"compact past the snapshot":               func(c *Config) { c.Unsafe |= MutTrimPastSnapshot },
 	} {
 		caught := false
 		for seed := range uint64(3000) {
@@ -290,6 +301,10 @@ func FuzzDecodeMessage(f *testing.F) {
 		{typ: msgAppendResponse, term: 3, ok: true, echo: 1, index: 3},
 		{typ: msgInstallSnapshot, term: 3, stamp: 9, cut: 5, prevTerm: 2, snapIndex: 6, total: 10, offset: 4, data: []byte("chunk")},
 		{typ: msgInstallResponse, term: 3, stamp: 9, offset: -1, index: 4},
+		{typ: msgPreVote, term: 4, lastIndex: 7, lastTerm: 2},
+		{typ: msgPreVoteResponse, term: 4, ok: true},
+		{typ: msgTimeoutNow, term: 3},
+		{typ: msgTransferVote, term: 4, lastIndex: 7, lastTerm: 3},
 	} {
 		f.Add(m.encode())
 	}
@@ -313,6 +328,10 @@ func FuzzStep(f *testing.F) {
 	f.Add((&message{typ: msgAppendResponse, term: 1, echo: -1, index: -1}).encode())
 	f.Add((&message{typ: msgAppendResponse, term: 1, echo: 1, index: 7}).encode())
 	f.Add((&message{typ: msgRequestVote, term: 1 << 50, lastIndex: 1 << 50, lastTerm: 1 << 50}).encode())
+	f.Add((&message{typ: msgPreVote, term: 1 << 50, lastIndex: 1 << 50, lastTerm: 1 << 50}).encode())
+	f.Add((&message{typ: msgPreVoteResponse, term: 1 << 50}).encode())
+	f.Add((&message{typ: msgTimeoutNow, term: 1}).encode())
+	f.Add((&message{typ: msgTransferVote, term: 2, lastIndex: 1 << 50, lastTerm: 2}).encode())
 	f.Fuzz(func(t *testing.T, b []byte) {
 		c := newCluster(t, 3, nil)
 		c.startAll()

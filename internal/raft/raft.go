@@ -106,7 +106,19 @@ const (
 	// MutTrimPastSnapshot lets Compact remove entries that no snapshot
 	// on disk covers yet.
 	MutTrimPastSnapshot
+	// MutNoPreVote starts a real election, with a new term, whenever the
+	// election timer fires.
+	MutNoPreVote
+	// MutNoCheckQuorum keeps a leader leading after it has lost touch with
+	// its majority.
+	MutNoCheckQuorum
+	// MutTransferKeepsLease keeps the lease, and proposals, during a
+	// leadership transfer.
+	MutTransferKeepsLease
 )
+
+// ErrTransferring is returned by TransferLeadership when it cannot start.
+var ErrTransferring = errors.New("raft: no follower to transfer leadership to")
 
 func (r *Raft) mut(m Mutation) bool { return r.cfg.Unsafe&m != 0 }
 
@@ -143,6 +155,15 @@ type Raft struct {
 	commit int64      // highest index known committed; -1 if none
 	votes  map[sys.NodeID]bool
 	peers  map[sys.NodeID]*progress // leader only: every node but this one
+	// preVotes is set while the node asks for PreVotes (for term+1).
+	preVotes map[sys.NodeID]bool
+	// leaderSince is when this node became leader of its term.
+	leaderSince sys.Instant
+	// A leadership transfer in progress: the target (noVote if none), when
+	// it is abandoned, and whether TimeoutNow has been sent.
+	transferee    sys.NodeID
+	transferUntil sys.Instant
+	timeoutSent   bool
 
 	dirty bool // entries appended since the last Flush
 	// A follower answers AppendEntries only once the entries are durable.
@@ -181,7 +202,7 @@ func New(cfg Config, env Env, disk sys.Disk) *Raft {
 	}
 	cfg.Log.SyncBytes = -1
 	return &Raft{cfg: cfg, env: env, disk: disk, hsf: hardStateFile{disk: disk, dir: cfg.Dir},
-		leader: noVote, commit: -1, ackTo: noVote, latest: snapshot{index: -1}}
+		leader: noVote, commit: -1, ackTo: noVote, transferee: noVote, latest: snapshot{index: -1}}
 }
 
 // Start recovers the log and the hard state from disk and begins as a
@@ -253,7 +274,7 @@ func (r *Raft) Start() error {
 	}
 	r.maybePromote()
 	if len(r.cfg.Peers) == 1 {
-		r.campaign()
+		r.campaign(false)
 	} else {
 		r.armElection()
 	}
@@ -308,7 +329,7 @@ func (r *Raft) Committed() int64 { return r.commit + 1 }
 // other leader can exist yet. The quarter is margin for clocks that run at
 // slightly different rates; the clocks need not agree on the time.
 func (r *Raft) Lease() bool {
-	if r.role != Leader || r.err != nil {
+	if r.role != Leader || r.err != nil || r.Transferring() {
 		return false
 	}
 	now := r.env.Now()
@@ -377,9 +398,13 @@ func (r *Raft) armElection() {
 	r.env.SetTimer(TimerElection, t+time.Duration(r.env.Rand()%uint64(t)))
 }
 
-func (r *Raft) send(to sys.NodeID, m message) {
+func (r *Raft) send(to sys.NodeID, m message) { r.sendAs(to, m, r.hard.term) }
+
+// sendAs sends m carrying term, which only PreVote messages set to
+// anything but the node's own.
+func (r *Raft) sendAs(to sys.NodeID, m message, term int64) {
 	if r.err == nil { // a node that cannot vouch for its state says nothing
-		m.term = r.hard.term
+		m.term = term
 		r.env.Send(to, m.encode())
 	}
 }
@@ -390,23 +415,116 @@ func (r *Raft) follow(term int64) {
 		r.setHard(term, noVote, true)
 		r.leader, r.ackTo = noVote, noVote // an answer owed to an old leader is void
 	}
+	r.preVotes = nil
 	if r.role != Follower {
 		r.role = Follower
-		r.votes, r.peers = nil, nil
+		r.votes, r.peers, r.transferee = nil, nil, noVote
 		r.env.CancelTimer(TimerHeartbeat)
 		r.armElection()
 	}
 }
 
-// campaign starts an election in a new term.
-func (r *Raft) campaign() {
-	r.setHard(r.hard.term+1, r.cfg.ID, true)
-	r.role, r.leader, r.peers, r.ackTo = Candidate, noVote, nil, noVote
-	r.votes = map[sys.NodeID]bool{r.cfg.ID: true}
+// preCampaign asks every peer whether it would vote for this node in the
+// next term, without starting that term (thesis 9.6).
+func (r *Raft) preCampaign() {
+	r.preVotes = map[sys.NodeID]bool{r.cfg.ID: true}
 	r.armElection()
 	for _, p := range r.cfg.Peers {
 		if p != r.cfg.ID {
-			r.send(p, message{typ: msgRequestVote, lastIndex: r.LastIndex(), lastTerm: r.lastTerm()})
+			r.sendAs(p, message{typ: msgPreVote, lastIndex: r.LastIndex(), lastTerm: r.lastTerm()}, r.hard.term+1)
+		}
+	}
+}
+
+// heardFromLeader reports whether a leader was heard within an election
+// timeout. Such a node refuses PreVotes and ignores RequestVotes: one check
+// for both, or a node could pass PreVote and then lose every election.
+func (r *Raft) heardFromLeader() bool {
+	return r.role == Leader || r.env.Now() < r.contact+sys.Instant(r.cfg.ElectionTimeout)
+}
+
+// upToDate reports whether a candidate's last entry is at least as up to
+// date as ours: a later last term wins, and only between equal terms does
+// length decide.
+func (r *Raft) upToDate(m message) bool {
+	if r.mut(MutVoteByLength) {
+		return m.lastIndex >= r.LastIndex()
+	}
+	return m.lastTerm > r.lastTerm() || (m.lastTerm == r.lastTerm() && m.lastIndex >= r.LastIndex())
+}
+
+// Transferring reports whether this leader is handing leadership over; it
+// then holds no lease and takes no proposals.
+func (r *Raft) Transferring() bool {
+	return r.role == Leader && r.transferee != noVote && !r.mut(MutTransferKeepsLease)
+}
+
+// TransferLeadership starts handing leadership to the follower to, or with
+// to = 0 to the most up-to-date one. The lease is void from now on. The
+// caller learns of the outcome through Role: if this node still leads an
+// election timeout later, the transfer was abandoned and it may serve again.
+func (r *Raft) TransferLeadership(to sys.NodeID) error {
+	switch {
+	case r.err != nil:
+		return r.err
+	case r.role != Leader:
+		return ErrNotLeader
+	}
+	if to == 0 {
+		best := int64(-2)
+		for _, id := range r.cfg.Peers { // configured order: ties go to the first
+			if p := r.peers[id]; p != nil && p.match > best {
+				to, best = id, p.match
+			}
+		}
+	}
+	if r.peers[to] == nil {
+		return ErrTransferring
+	}
+	r.transferee, r.transferUntil, r.timeoutSent = to, r.env.Now()+sys.Instant(r.cfg.ElectionTimeout), false
+	r.maybeTimeoutNow()
+	return nil
+}
+
+// maybeTimeoutNow sends TimeoutNow once the target holds the whole log.
+func (r *Raft) maybeTimeoutNow() {
+	if r.role != Leader || r.transferee == noVote || r.timeoutSent {
+		return
+	}
+	if p := r.peers[r.transferee]; p.match >= r.LastIndex() {
+		r.timeoutSent = true
+		r.send(r.transferee, message{typ: msgTimeoutNow})
+	} else if !p.inflight {
+		r.replicate(r.transferee, p)
+	}
+}
+
+// quorumActive reports whether a majority, this node included, answered
+// within an election timeout; a follower's clock starts at the election.
+func (r *Raft) quorumActive() bool {
+	now, n := r.env.Now(), 1
+	for _, id := range r.cfg.Peers {
+		if p := r.peers[id]; p != nil && now < max(p.acked, r.leaderSince)+sys.Instant(r.cfg.ElectionTimeout) {
+			n++
+		}
+	}
+	return n > len(r.cfg.Peers)/2
+}
+
+// campaign starts an election in a new term; transfer marks one that a
+// leader asked for with TimeoutNow.
+func (r *Raft) campaign(transfer bool) {
+	r.setHard(r.hard.term+1, r.cfg.ID, true)
+	r.role, r.leader, r.peers, r.ackTo, r.preVotes = Candidate, noVote, nil, noVote, nil
+	r.votes = map[sys.NodeID]bool{r.cfg.ID: true}
+	r.armElection()
+	typ := msgRequestVote
+	if transfer {
+		typ = msgTransferVote
+	}
+	for _, p := range r.cfg.Peers {
+		if p != r.cfg.ID {
+			r.send(p, message{typ: typ, lastIndex: r.LastIndex(), lastTerm: r.lastTerm()})
 		}
 	}
 	r.maybeLead()
@@ -417,6 +535,7 @@ func (r *Raft) maybeLead() {
 		return
 	}
 	r.role, r.leader, r.votes = Leader, r.cfg.ID, nil
+	r.leaderSince, r.transferee = r.env.Now(), noVote
 	r.peers = map[sys.NodeID]*progress{}
 	for _, p := range r.cfg.Peers {
 		if p != r.cfg.ID {
@@ -462,7 +581,7 @@ func (r *Raft) Propose(cmd []byte) (int64, error) {
 	switch {
 	case r.err != nil:
 		return 0, r.err
-	case r.role != Leader:
+	case r.role != Leader, r.Transferring():
 		return 0, ErrNotLeader
 	}
 	index, err := r.append(entry{term: r.hard.term, cmd: cmd})
@@ -589,9 +708,24 @@ func (r *Raft) OnTimer(t Timer) {
 	switch {
 	case r.err != nil:
 	case t == TimerElection && r.role != Leader:
-		r.campaign()
+		if len(r.cfg.Peers) == 1 || r.mut(MutNoPreVote) {
+			r.campaign(false)
+		} else {
+			r.preCampaign()
+		}
 	case t == TimerHeartbeat && r.role == Leader:
+		if !r.mut(MutNoCheckQuorum) && !r.quorumActive() {
+			// Lost touch with the majority (thesis 6.2): stop leading, so
+			// that the nodes it still reaches stop ignoring candidates.
+			r.follow(r.hard.term)
+			r.leader = noVote
+			return
+		}
+		if r.transferee != noVote && r.env.Now() >= r.transferUntil {
+			r.transferee = noVote // abandoned: serve again
+		}
 		r.broadcast(true) // also repairs a lost request or response
+		r.maybeTimeoutNow()
 		r.env.SetTimer(TimerHeartbeat, r.cfg.HeartbeatInterval)
 	}
 }
@@ -606,11 +740,38 @@ func (r *Raft) Step(from sys.NodeID, raw []byte) {
 	if err != nil {
 		return
 	}
+	// PreVotes change no term, theirs or ours.
+	switch m.typ {
+	case msgPreVote:
+		if !r.heardFromLeader() {
+			grant := m.term > r.hard.term && r.upToDate(m)
+			term := r.hard.term // a refusal tells the asker our term
+			if grant {
+				term = m.term
+			}
+			r.sendAs(from, message{typ: msgPreVoteResponse, ok: grant}, term)
+		}
+		return
+	case msgPreVoteResponse:
+		switch {
+		case r.preVotes == nil || r.role == Leader:
+		case m.ok && m.term == r.hard.term+1:
+			r.preVotes[from] = true
+			if len(r.preVotes) > len(r.cfg.Peers)/2 {
+				r.campaign(false)
+			}
+		case !m.ok && m.term > r.hard.term:
+			r.follow(m.term) // a later term exists: join it
+		}
+		return
+	}
 	// A node that has a live leader ignores candidates altogether, even
 	// their term: that is what makes the leader's read lease sound, and it
 	// keeps a node returning from a partition from deposing a working
-	// leader (the Raft thesis, section 4.2.3).
-	if m.typ == msgRequestVote && (r.role == Leader || r.env.Now() < r.contact+sys.Instant(r.cfg.ElectionTimeout)) {
+	// leader (the Raft thesis, section 4.2.3). A transfer vote is the
+	// exception: the only leader it could depose asked for it, and gave
+	// up its lease first (docs/design/b3-raft-hardening.md, 2.3).
+	if m.typ == msgRequestVote && r.heardFromLeader() {
 		return
 	}
 	// A higher term always wins: whatever this node was, it is a follower
@@ -623,8 +784,12 @@ func (r *Raft) Step(from sys.NodeID, raw []byte) {
 	}
 	stale := m.term < r.hard.term
 	switch m.typ {
-	case msgRequestVote:
+	case msgRequestVote, msgTransferVote:
 		r.onRequestVote(from, m, stale)
+	case msgTimeoutNow:
+		if !stale && r.role == Follower && from == r.leader {
+			r.campaign(true)
+		}
 	case msgVoteResponse:
 		if !stale && r.role == Candidate && m.ok {
 			r.votes[from] = true
@@ -657,13 +822,7 @@ func (r *Raft) Step(from sys.NodeID, raw []byte) {
 }
 
 func (r *Raft) onRequestVote(from sys.NodeID, m message, stale bool) {
-	// The candidate's log must be at least as up to date as ours: a later
-	// last term wins, and only between equal terms does length decide.
-	upToDate := m.lastTerm > r.lastTerm() || (m.lastTerm == r.lastTerm() && m.lastIndex >= r.LastIndex())
-	if r.mut(MutVoteByLength) {
-		upToDate = m.lastIndex >= r.LastIndex()
-	}
-	grant := !stale && upToDate && (r.hard.votedFor == noVote || r.hard.votedFor == from)
+	grant := !stale && r.upToDate(m) && (r.hard.votedFor == noVote || r.hard.votedFor == from)
 	if grant {
 		// On disk before the answer leaves: a node that forgot its vote
 		// could give a second one in the same term.
@@ -747,6 +906,9 @@ func (r *Raft) onAppendResponse(from sys.NodeID, m message) {
 		r.advanceCommit()
 		if p.next <= r.LastIndex() {
 			r.replicate(from, p)
+		}
+		if from == r.transferee {
+			r.maybeTimeoutNow()
 		}
 	// A refusal of the request we are waiting on. A real one names an
 	// index before the one it refused; anything else is noise.

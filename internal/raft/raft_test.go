@@ -28,6 +28,9 @@ type tnode struct {
 	armed map[Timer]bool
 	arms  int // times the election timer was armed
 	down  bool
+	// armedAt is when each timer was last armed, for tests that move the
+	// clock themselves (hardening_test.go).
+	armedAt map[Timer]sys.Instant
 }
 
 func (n *tnode) Send(to sys.NodeID, msg []byte) {
@@ -35,6 +38,10 @@ func (n *tnode) Send(to sys.NodeID, msg []byte) {
 }
 func (n *tnode) SetTimer(t Timer, _ time.Duration) {
 	n.armed[t] = true
+	if n.armedAt == nil {
+		n.armedAt = map[Timer]sys.Instant{}
+	}
+	n.armedAt[t] = n.c.now
 	if t == TimerElection {
 		n.arms++
 	}
@@ -194,7 +201,14 @@ func only(ids ...sys.NodeID) func(tmsg) bool {
 }
 
 // votes keeps only the messages of an election.
-func votes(m tmsg) bool { return m.raw[1] == msgRequestVote || m.raw[1] == msgVoteResponse }
+func votes(m tmsg) bool {
+	return slices.Contains([]byte{msgRequestVote, msgVoteResponse, msgPreVote, msgPreVoteResponse, msgTransferVote}, m.raw[1])
+}
+
+// classic is Raft as in the paper, without PreVote and CheckQuorum, for
+// tests of the vote rules themselves: they count terms that PreVote would
+// never start, and keep leaders that CheckQuorum would retire.
+func classic(cfg *Config) { cfg.Unsafe |= MutNoPreVote | MutNoCheckQuorum }
 
 // both keeps the messages that both filters keep.
 func both(a, b func(tmsg) bool) func(tmsg) bool { return func(m tmsg) bool { return a(m) && b(m) } }
@@ -285,7 +299,12 @@ func TestReplicationAndCommit(t *testing.T) {
 // power votes twice in one term.
 func TestVoteSurvivesPowerLoss(t *testing.T) {
 	votesTwice := func(mutate func(*Config)) bool {
-		c := newCluster(t, 3, mutate)
+		c := newCluster(t, 3, func(cfg *Config) {
+			classic(cfg)
+			if mutate != nil {
+				mutate(cfg)
+			}
+		})
 		c.startAll()
 		c.fire(1, TimerElection)
 		c.run(both(only(1, 2), votes)) // node 2 votes for 1 in term 1; node 3 hears nothing
@@ -301,7 +320,7 @@ func TestVoteSurvivesPowerLoss(t *testing.T) {
 	if votesTwice(nil) {
 		t.Error("a node voted twice in one term after a power loss")
 	}
-	if !votesTwice(func(c *Config) { c.Unsafe = MutVoteWithoutPersist }) {
+	if !votesTwice(func(c *Config) { c.Unsafe |= MutVoteWithoutPersist }) {
 		t.Error("the vote was not lost even without persisting it: this test proves nothing")
 	}
 }
@@ -457,7 +476,7 @@ func TestElectionTimerIsNotResetByNoise(t *testing.T) {
 // Bugs 7 and 8. A higher term clears the vote, durably; and the vote goes
 // to the log with the later last term, not the longer one.
 func TestTermAndVoteRules(t *testing.T) {
-	c := newCluster(t, 3, nil)
+	c := newCluster(t, 3, classic)
 	c.startAll()
 	c.elect(1) // term 1
 	c.propose(1, "a")
