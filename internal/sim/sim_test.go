@@ -92,6 +92,7 @@ func TestSim(t *testing.T) {
 		total.EpochBumps += s.EpochBumps
 		total.ProducersExpired += s.ProducersExpired
 		total.ExpiredRefusals += s.ExpiredRefusals
+		total.Handovers += s.Handovers
 	}
 	t.Logf("%d seeds, %d failed; totals %+v", *seeds, failed, total)
 	// A suite that passes because nothing happened proves nothing.
@@ -104,7 +105,7 @@ func TestSim(t *testing.T) {
 			"offset fetches checked": total.OffsetFetches, "zombie commits refused": total.ZombiesRefused,
 			"leaders elected": total.Leaders, "requests refused by a non-leader": total.NotLeader, "replica comparisons": total.ReplicasCompared, "partitions": total.Partitions,
 			"starts from a snapshot": total.SnapshotStarts, "log trims": total.Trims, "snapshots installed": total.Installs,
-			"idempotent records acknowledged": total.IdempotentAcked, "idempotent retries": total.Retries, "producer ids": total.ProducerIDs, "producers expired": total.ProducersExpired,
+			"idempotent records acknowledged": total.IdempotentAcked, "idempotent retries": total.Retries, "producer ids": total.ProducerIDs, "producers expired": total.ProducersExpired, "leadership handovers": total.Handovers,
 		} {
 			if n < *seeds/10 {
 				t.Errorf("only %d %s in %d seeds: the suite is not exercising what it claims", n, name, *seeds)
@@ -148,15 +149,16 @@ func TestMutationSuite(t *testing.T) {
 		// seed in 2000 lined them up, with 3 and 5 nodes, 20 ms faults,
 		// partitions and one entry per message. TestRandomSchedulesCatch-
 		// BrokenRaft in internal/raft, which faults far harder, catches it.
-		{"grant a vote before it is on disk", func(c *broker.Config) { c.UnsafeRaft = raft.MutVoteWithoutPersist }},
-		{"grant a vote comparing log length only", func(c *broker.Config) { c.UnsafeRaft = raft.MutVoteByLength }},
-		{"truncate on a message that merely carries fewer entries", func(c *broker.Config) { c.UnsafeRaft = raft.MutTruncateOnStale }},
+		{"grant a vote before it is on disk", func(c *broker.Config) { c.UnsafeRaft |= raft.MutVoteWithoutPersist }},
+		{"grant a vote comparing log length only", func(c *broker.Config) { c.UnsafeRaft |= raft.MutVoteByLength }},
+		{"truncate on a message that merely carries fewer entries", func(c *broker.Config) { c.UnsafeRaft |= raft.MutTruncateOnStale }},
 		{"acknowledge entries before they are synced", func(c *broker.Config) { c.Sync, c.UnsafeAckBeforeSync = broker.SyncAlways, true }},
 		{"serve as soon as elected", func(c *broker.Config) { c.UnsafeServeEarly = true }},
 		{"answer reads without the lease", func(c *broker.Config) { c.UnsafeNoLease = true }},
 		{"accept offset commits from any generation", func(c *broker.Config) { c.UnsafeNoFencing = true }},
-		{"snapshot before the log is synced", func(c *broker.Config) { c.UnsafeRaft, c.SnapshotEvery = raft.MutSnapshotUnsynced, 1 }},
+		{"snapshot before the log is synced", func(c *broker.Config) { c.UnsafeRaft, c.SnapshotEvery = c.UnsafeRaft|raft.MutSnapshotUnsynced, 1 }},
 		{"append an idempotent producer's retries again", func(c *broker.Config) { c.UnsafeNoSequenceCheck = true }},
+		{"keep serving during a leadership transfer", func(c *broker.Config) { c.UnsafeRaft |= raft.MutTransferKeepsLease }},
 		{"expire producers without waiting", func(c *broker.Config) { c.UnsafeExpireEarly = true }},
 		{"delete segments before a snapshot covers them", func(c *broker.Config) { c.UnsafeTrimEarly, c.RetentionBytes = true, 8<<10 }},
 	} {

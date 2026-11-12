@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/amritangshudey/samsa/internal/broker"
+	"github.com/amritangshudey/samsa/internal/raft"
 	"github.com/amritangshudey/samsa/internal/simsys"
 	"github.com/amritangshudey/samsa/internal/sys"
 	"github.com/amritangshudey/samsa/internal/wire"
@@ -47,6 +48,7 @@ const (
 	faultDiskCrash              // power loss at the n-th disk operation from now
 	faultKill                   // the process dies; the disk keeps unsynced data
 	faultSync                   // the next sync fails
+	faultStop                   // a graceful stop (SIGTERM): hand over, then exit
 )
 
 // options is the swarm configuration: what kind of run the seed selected.
@@ -61,6 +63,7 @@ type options struct {
 	members     int
 	idempotent  int           // idempotent producers (idempotent.go)
 	expiry      time.Duration // producer expiry as chosen, before any mutation
+	classic     bool          // Raft without PreVote and CheckQuorum
 	nodes       int
 	// Between nodes (network.go): drop and duplicate probabilities per
 	// message, and whether partition scenarios run.
@@ -69,7 +72,7 @@ type options struct {
 }
 
 func (f fault) String() string {
-	return [...]string{"power", "diskcrash", "kill", "syncfail"}[f]
+	return [...]string{"power", "diskcrash", "kill", "syncfail", "stop"}[f]
 }
 
 // Run executes one simulation and returns what happened. It is a pure
@@ -129,6 +132,14 @@ func Run(cfg Config) Result {
 	// two-minute delivery timeout.
 	w.opts.expiry = []time.Duration{-1, 15 * time.Second}[pick.Intn(2)]
 	w.bcfg.ProducerExpiry = w.opts.expiry
+	if w.opts.nodes > 1 && pick.Chance(0.6) { // drawn last, so older seeds keep their other choices
+		w.opts.faults = append(w.opts.faults, faultStop)
+	}
+	if w.opts.classic = pick.Chance(0.5); w.opts.classic {
+		// The paper's Raft: PreVote makes contested elections rare, and
+		// the vote bugs need them to do harm (docs/design/b3-raft-hardening.md).
+		w.bcfg.UnsafeRaft |= raft.MutNoPreVote | raft.MutNoCheckQuorum
+	}
 	if cfg.Mutate != nil {
 		cfg.Mutate(&w.bcfg)
 	}
@@ -139,7 +150,7 @@ func Run(cfg Config) Result {
 		// breaks what Raft is built on (ADR 0012). That combination is
 		// not simulated; only process kills, which lose nothing.
 		w.opts.diskCrash = false
-		w.opts.faults = slices.DeleteFunc(w.opts.faults, func(f fault) bool { return f != faultKill })
+		w.opts.faults = slices.DeleteFunc(w.opts.faults, func(f fault) bool { return f != faultKill && f != faultStop })
 	}
 	if !strict {
 		// shortcut: a retry re-sends records a power loss may have taken
@@ -152,8 +163,8 @@ func Run(cfg Config) Result {
 	if w.bcfg.RetentionBytes > 0 {
 		w.model.Trimming()
 	}
-	res := Result{Seed: cfg.Seed, Setup: fmt.Sprintf("nodes=%d sync=%d segment=%d election=%v faults=%v every=%v drop=%v dup=%v partitions=%v append=%d snapshot=%d retention=%d disconnects=%v producers=%d consumers=%d vandals=%d members=%d idempotent=%d expiry=%v",
-		w.opts.nodes, w.bcfg.Sync, w.bcfg.SegmentBytes, w.bcfg.ElectionTimeout, w.opts.faults, w.opts.faultEvery, w.opts.drop, w.opts.dup, w.opts.partitions, w.bcfg.MaxAppendBytes, w.bcfg.SnapshotEvery, w.bcfg.RetentionBytes, w.opts.disconnects, w.opts.producers, w.opts.consumers, w.opts.vandals, w.opts.members, w.opts.idempotent, w.opts.expiry)}
+	res := Result{Seed: cfg.Seed, Setup: fmt.Sprintf("nodes=%d sync=%d segment=%d election=%v faults=%v every=%v drop=%v dup=%v partitions=%v append=%d snapshot=%d retention=%d disconnects=%v producers=%d consumers=%d vandals=%d members=%d idempotent=%d expiry=%v classic=%v",
+		w.opts.nodes, w.bcfg.Sync, w.bcfg.SegmentBytes, w.bcfg.ElectionTimeout, w.opts.faults, w.opts.faultEvery, w.opts.drop, w.opts.dup, w.opts.partitions, w.bcfg.MaxAppendBytes, w.bcfg.SnapshotEvery, w.bcfg.RetentionBytes, w.opts.disconnects, w.opts.producers, w.opts.consumers, w.opts.vandals, w.opts.members, w.opts.idempotent, w.opts.expiry, w.opts.classic)}
 	if w.trace != nil {
 		_, _ = fmt.Fprintf(w.trace, "seed %d: %s\n", cfg.Seed, res.Setup)
 	}
