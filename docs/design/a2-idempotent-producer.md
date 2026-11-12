@@ -231,3 +231,87 @@ Second pass, against the Kafka source instead of the outline:
    batch got in without the one before it. Without expiry rule 4 has no
    reason to exist, so it is gone, and rule 3 holds everywhere. Part (b)
    must keep it for producers that have not expired.
+
+## 7. Part (b): expiry
+
+Status: reviewed, 2026-11-12. Section 3.4 gave the outline; this is the
+design as built.
+
+### 7.1 Design
+
+- **Each producer remembers the log index of its last accepted batch**
+  (`producer.index`). It is set at apply, so it is replicated, hashed and
+  in the snapshot (version 4). A version 3 snapshot does not have it, so
+  decoding takes the index of the partition's newest batch, or the log
+  start if the partition has none. That index is at or after the real
+  one, so expiry can only be late.
+- **The leader decides when, and the command says what** (R1, as with
+  retention). While it serves, the leader writes down `(now, applied)`
+  every `ProducerExpiry / 8`. When a sample is `ProducerExpiry` old, it
+  proposes `ExpireProducers(L)` with that sample's index, and drops the
+  sample. Every replica then removes, from every partition, the producers
+  whose last batch is at an index below L. Every entry below L was applied
+  by the time of the sample, so those producers wrote nothing for at
+  least `ProducerExpiry`. A leader that starts serving begins with no
+  samples, so a change of leader only delays expiry.
+- **`-producer-expiry`**, default 24 h, as Kafka's
+  `producer.id.expiration.ms` default. Zero means the default; a negative
+  value never expires.
+- **The rule from S6 stays.** A producer with no state must start at
+  sequence 0 on every partition. An expired producer that comes back with
+  a later sequence gets OUT_OF_ORDER_SEQUENCE_NUMBER. The Java client then
+  bumps its epoch and sends again from 0 (section 2), which costs one
+  round trip after a day of silence. Kafka accepts any sequence instead,
+  and S6 shows what that lets in.
+- **Mutation `UnsafeExpireEarly`**: the leader proposes the expiry at its
+  current applied index at once, without waiting.
+
+### 7.2 What checks it
+
+- **Simulator.** Each seed picks an expiry of never or 15 s (point 6 of
+  the review says why not shorter). Producers that start a new session leave
+  their old id behind, and that id expires. When a producer is refused
+  OUT_OF_ORDER, it bumps the partition's epoch and re-sends its queue
+  from sequence 0, as the Java client does.
+- **I8 under expiry.** OUT_OF_ORDER is allowed only when the state could
+  really have expired. Every batch the partition accepted was sent no
+  later than the newest batch that left the producer's queue (acknowledged
+  or abandoned). If that batch was born less than `ProducerExpiry` ago,
+  expiry cannot have removed the producer, and the refusal is a bug. The
+  simulated clocks do not drift, so the bound is exact.
+- The mutation must be caught. Unit tests cover the command, the leader's
+  timing, the snapshot of version 3 and 4, and a producer coming back
+  after expiry.
+
+### 7.3 Review
+
+1. *Could expiry drop a producer that is still active?* Only if it sent
+   nothing that was applied for `ProducerExpiry`. The one dangerous case
+   is a retry that waited longer than that: a retry with sequence 0 would
+   then be appended twice. Kafka has the same assumption. Clients give up
+   after `delivery.timeout.ms` (two minutes by default), so a day's
+   margin is wide.
+2. *Why not expire at apply, from timestamps in the batches?* Client
+   clocks are not trusted, and a timestamp in the log does not say when
+   the entry was applied. The leader's own clock, carried as an index in
+   a command, gives the same result on every replica.
+3. *Why samples, and not a time per producer?* A time per producer would
+   be soft state on the leader, and it would be lost at every leader
+   change. A handful of `(time, index)` samples is all the leader needs,
+   and losing them only delays expiry.
+4. *The cost of the rule from S6 after expiry*: one refused batch and one
+   epoch bump for a producer that was silent for a day. Accepting any
+   sequence would reopen S6 for every producer, active or not.
+5. *Expiry and snapshots*: a snapshot taken after an expiry no longer has
+   the expired producers, and a restart from it agrees with the replicas
+   that applied the command. This is checked by S4 and I6 as for any
+   command.
+6. *The simulator's expiry* was going to be 3 or 6 s, and that would have
+   broken the timing assumption inside the simulator. A request may wait
+   up to 10 s on a live connection (I7), and a producer retries for 2 s.
+   So an old copy could be applied after its producer had expired, and
+   the client would rightly send it again. The checker would then report
+   a duplicate caused by the test, not the broker. 15 s is above both
+   bounds. The cost: no active producer stays silent that long, so the
+   simulator never sees an expired producer come back (it does see 6 480
+   ids expire in 1000 seeds). `TestProducerExpiry` covers the return.
