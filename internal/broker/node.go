@@ -472,7 +472,7 @@ func (n *Node) lead() {
 	leader, term := n.raft.Role() == raft.Leader, n.raft.Term()
 	// A leader handing over serves nothing: its lease is void and new
 	// proposals would keep the successor's log from catching up.
-	handing := n.raft.Transferring()
+	handing := n.raft.Transferring() && n.cfg.UnsafeRaft&raft.MutTransferKeepsLease == 0
 	if n.serving && (!leader || term != n.servingTerm || handing) {
 		n.serving = false
 		n.stopServing()

@@ -420,6 +420,21 @@ func (w *world) stop(nd *simNode) {
 	leading := inc.n.Serving()
 	w.call(inc, inc.n.OnStop())
 	deadline := w.now + sys.Instant(10*time.Second)
+	// Now and then it stops hearing from the others mid-handover: its
+	// TimeoutNow still goes out, but nothing of the successor comes back,
+	// which is when serving on would hurt.
+	isolated := false
+	if leading && w.opts.partitions && w.rng.Chance(0.5) {
+		w.after(time.Duration(w.rng.Intn(2*int(w.bcfg.HeartbeatInterval))), func() {
+			if nd.inc == inc {
+				isolated = true
+				w.note(fmt.Sprintf("partition: nothing reaches %d while it hands over", nd.id), 0, nil)
+				for _, o := range w.nodes {
+					w.cut[[2]int32{o.id, nd.id}] = true
+				}
+			}
+		})
+	}
 	var wait func()
 	wait = func() {
 		switch {
@@ -429,6 +444,11 @@ func (w *world) stop(nd *simNode) {
 				w.stats.Handovers++
 			}
 			w.down(nd, false, "graceful stop")
+			if isolated {
+				for _, o := range w.nodes {
+					delete(w.cut, [2]int32{o.id, nd.id})
+				}
+			}
 		default:
 			w.after(5*time.Millisecond, wait)
 		}

@@ -113,7 +113,7 @@ const (
 	// its majority.
 	MutNoCheckQuorum
 	// MutTransferKeepsLease keeps the lease, and proposals, during a
-	// leadership transfer.
+	// leadership transfer; the broker also keeps serving.
 	MutTransferKeepsLease
 )
 
@@ -329,7 +329,7 @@ func (r *Raft) Committed() int64 { return r.commit + 1 }
 // other leader can exist yet. The quarter is margin for clocks that run at
 // slightly different rates; the clocks need not agree on the time.
 func (r *Raft) Lease() bool {
-	if r.role != Leader || r.err != nil || r.Transferring() {
+	if r.role != Leader || r.err != nil || r.handingOver() {
 		return false
 	}
 	now := r.env.Now()
@@ -455,9 +455,10 @@ func (r *Raft) upToDate(m message) bool {
 
 // Transferring reports whether this leader is handing leadership over; it
 // then holds no lease and takes no proposals.
-func (r *Raft) Transferring() bool {
-	return r.role == Leader && r.transferee != noVote && !r.mut(MutTransferKeepsLease)
-}
+func (r *Raft) Transferring() bool { return r.role == Leader && r.transferee != noVote }
+
+// handingOver is Transferring, unless the mutation keeps serving.
+func (r *Raft) handingOver() bool { return r.Transferring() && !r.mut(MutTransferKeepsLease) }
 
 // TransferLeadership starts handing leadership to the follower to, or with
 // to = 0 to the most up-to-date one. The lease is void from now on. The
@@ -581,7 +582,7 @@ func (r *Raft) Propose(cmd []byte) (int64, error) {
 	switch {
 	case r.err != nil:
 		return 0, r.err
-	case r.role != Leader, r.Transferring():
+	case r.role != Leader, r.handingOver():
 		return 0, ErrNotLeader
 	}
 	index, err := r.append(entry{term: r.hard.term, cmd: cmd})
