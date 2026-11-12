@@ -30,6 +30,10 @@ always` (the default) acknowledges a write only after fsync; `interval` and
 `never` trade that for speed, on a single node only: a cluster needs `always`.
 `-retention-bytes N` keeps about N bytes of log, deleting the oldest
 segments; consumers below the new start get `OFFSET_OUT_OF_RANGE`.
+`-producer-expiry` (default 24h) is how long an idempotent producer may
+write nothing before it is forgotten. If it comes back, its next batch
+is refused with `OUT_OF_ORDER_SEQUENCE_NUMBER`, and the Java client starts
+a new epoch by itself and writes nothing twice (`TestJavaProducerAfterExpiry`).
 
 A three-node cluster on one machine (each node: id, client address, peer
 address):
@@ -74,8 +78,7 @@ fetch, metadata, offsets, topics) and [ADR 0008](docs/adr/0008-group-api-version
 ## What is not supported
 
 Transactions (a transactional producer is refused with `INVALID_REQUEST`),
-expiry of idempotent producer state (it is kept for ever, about a hundred
-bytes per producer session and partition), log compaction, retention by time or per topic (only `-retention-bytes`, one
+log compaction, retention by time or per topic (only `-retention-bytes`, one
 bound for the whole log), deleting records, ACLs, SASL, TLS, tiered storage,
 cluster membership changes, the KIP-848 group protocol, static membership,
 deleting topics or adding partitions, fetch sessions, more than one Raft
