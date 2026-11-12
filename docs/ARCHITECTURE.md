@@ -120,7 +120,22 @@ sent. A follower acknowledges entries only after syncing them; a leader
 counts itself only for synced entries. A leader commits only entries of its
 own term (Raft's Figure 8 rule). Messages are length-checked and fuzzed; a
 peer that contradicts committed entries stops the node, because that proves
-a broken peer.
+a broken peer. Three additions from [B3](design/b3-raft-hardening.md):
+
+- **PreVote.** A node asks whether others would vote for it before it
+  starts a new term, so a node that comes back from a partition no longer
+  arrives with a higher term that deposes the leader.
+- **CheckQuorum.** A leader that has not heard from a majority within an
+  election timeout steps down.
+- **Leadership transfer.** The leader stops serving, brings the chosen
+  follower up to date, and tells it to stand at once. Its vote request is
+  exempt from the lease rule, because the only lease involved has just
+  been given up.
+
+On SIGTERM the real loop calls `OnStop` and runs until the node no longer
+leads, for at most 10 s. The simulator's `stop` fault does the same, and
+half the time cuts off everything sent to the stopping leader just after
+it starts handing over.
 
 **When a node serves** (`internal/broker/leader.go`,
 [ADR 0011](adr/0011-not-leader-answers.md), [ADR 0013](adr/0013-leader-lease.md)).
@@ -200,7 +215,7 @@ virtual time, all randomness from one seed ([ADR 0007](adr/0007-history-checking
   acknowledged commits are what an offset fetch returns, across crashes). `monitor.go` checks Raft: one leader per term, a term that never goes
   back and a vote that is never forgotten across restarts, committed entries
   never replaced, replicas that applied the same prefix having equal state
-  hashes. A failure prints the seed and the command that replays it.
+  hashes, and no node elected while another holds a lease. A failure prints the seed and the command that replays it.
 - **Quiet period.** Faults stop and everything heals; then a leader must
   appear, every node catch up, and a new write be acknowledged in time; then
   every node is restarted and must rebuild the same state.
@@ -208,7 +223,8 @@ virtual time, all randomness from one seed ([ADR 0007](adr/0007-history-checking
   (vote before persisting, vote by log length, truncate on a stale message,
   acknowledge before sync, serve before applying the term's entry, read
   without the lease, no fencing, snapshot before sync, delete segments
-  early, no sequence check, expire producers at once) and requires each to be caught, then
+  early, no sequence check, expire producers at once, keep the lease
+  during a leadership transfer) and requires each to be caught, then
   replays the catching seed without the bug to confirm the system is clean.
   The Figure 8 bug is caught by the Raft-level random schedules instead
   (`internal/raft/random_test.go`).

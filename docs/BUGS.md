@@ -125,6 +125,27 @@ for how much that is worth.
   pipelined batches stay in order, and it missed the node that refuses one
   request and accepts the next. I8 exists to check that argument.
 
+### S7. Snapshot chunks multiplied until the run stalled (B3)
+
+- **Seed:** 875 of the mutation suite, on branch `b3-raft-hardening`, with
+  no mutation. Not an invariant failure: the run made no progress. Peer
+  messages grew to hundreds of thousands in seconds of virtual time.
+- **Root cause:** every InstallSnapshot answer made the leader send the
+  next chunk. The heartbeat also resends the current chunk (to repair a
+  lost one), and the network duplicates messages. Each resend and each
+  copy therefore started a chain of chunks of its own, and chains never
+  merged. A long install under duplication grew without bound. The bug
+  dates from snapshot install (Phase 5); B3's new draws only moved seed
+  875 onto a schedule that hit it.
+- **Fix:** only an answer that shows new progress (an offset beyond the
+  one recorded) sends the next chunk. A copy, a stale answer or a restart
+  only records the offset, and the next heartbeat resends from there
+  (`onInstallResponse`). `TestSnapshotChunksDoNotMultiply` duplicates
+  every answer and fails without the fix.
+- **Lesson:** no invariant covers liveness or cost, so the suite found this
+  only as a hang. AppendEntries has the same shape (each answer may send
+  more) but stops when the follower catches up.
+
 ## Bugs found by real clients
 
 ### C1. Null record set in a fetch response broke librdkafka (Phase 2)

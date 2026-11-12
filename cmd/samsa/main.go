@@ -122,8 +122,11 @@ func run() error {
 		Sync: policy, SyncInterval: *syncInterval, Logger: logger, RetentionBytes: *retention, ProducerExpiry: *producerExpiry,
 	}, loop, loop, disk, realsys.Random{})
 
+	// The first signal starts a graceful stop (the node hands leadership
+	// over); a second one, once the handler is unregistered, kills at once.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	context.AfterFunc(ctx, stop)
 	logger.Info("listening", "address", ln.Addr().String(), "advertised", *advertise, "data", *dataDir, "sync", *syncMode)
 	return loop.Run(ctx, node)
 }

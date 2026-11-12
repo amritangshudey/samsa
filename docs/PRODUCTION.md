@@ -152,4 +152,5 @@ Blockers are written to `docs/QUESTIONS.md` as they arrive.
 | Item | Status |
 |---|---|
 | 1 Idempotent producer | part (a) done (`docs/reports/a2-idempotent-part-a.md`). Part (b), expiry: done (`docs/reports/a2-idempotent-part-b.md`) |
-| 2–17 | not started |
+| 2 Raft hardening | done (`docs/reports/b3-raft-hardening.md`) |
+| 3–17 | not started |

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -202,4 +203,62 @@ func TestClusterSurvivesLeaderKill(t *testing.T) {
 	if err := c.produce(c.client(), "events", "d", 10, 3*time.Second); err == nil {
 		t.Fatal("a write was acknowledged with one node of three running")
 	}
+}
+
+// SIGTERM to the leader while a producer writes: the leader hands over and
+// exits cleanly, no produce fails, and nothing is lost or written twice
+// (docs/design/b3-raft-hardening.md, 2.4).
+func TestClusterGracefulStop(t *testing.T) {
+	c := startCluster(t, 3)
+	cl := c.client()
+	first := c.leader(cl)
+	req := kmsg.NewPtrCreateTopicsRequest()
+	rt := kmsg.NewCreateTopicsRequestTopic()
+	rt.Topic, rt.NumPartitions, rt.ReplicationFactor = "events", 3, -1
+	req.Topics = append(req.Topics, rt)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if resp, err := req.RequestWith(ctx, cl); err != nil || resp.Topics[0].ErrorCode != 0 {
+		t.Fatalf("create topic: %v %+v", err, resp)
+	}
+
+	// Batches of ten, one after another, for three seconds; the leader is
+	// told to stop after one.
+	var prefixes []string
+	done := make(chan error, 1)
+	go func() {
+		for end := time.Now().Add(3 * time.Second); time.Now().Before(end); {
+			p := fmt.Sprintf("g%d", len(prefixes))
+			if err := c.produce(cl, "events", p, 10, 20*time.Second); err != nil {
+				done <- fmt.Errorf("batch %s: %w", p, err)
+				return
+			}
+			prefixes = append(prefixes, p)
+		}
+		done <- nil
+	}()
+	time.Sleep(time.Second)
+	b := c.nodes[first]
+	start := time.Now()
+	if err := b.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.cmd.Wait(); err != nil {
+		t.Fatalf("the leader did not exit cleanly on SIGTERM: %v", err)
+	}
+	b.cmd = nil
+	t.Logf("leader %d exited %v after SIGTERM", first, time.Since(start).Round(time.Millisecond))
+	if !strings.Contains(b.log(), `"handing over"=true`) {
+		t.Fatalf("the leader did not hand over:\n%s", last(b.log(), 2000))
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("a produce failed across the graceful stop: %v", err)
+	}
+	if next := c.leader(c.client()); next == first {
+		t.Fatalf("the stopped node %d is still named leader", first)
+	}
+	if dups := c.readAll("events", 10, prefixes...); dups > 0 {
+		t.Fatalf("%d records written twice", dups)
+	}
+	t.Logf("%d batches of 10 acknowledged and read back once each", len(prefixes))
 }

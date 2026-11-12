@@ -16,6 +16,16 @@ const (
 	msgAppendResponse
 	msgInstallSnapshot
 	msgInstallResponse
+	// PreVote asks "would you vote for me in term?" and changes nothing at
+	// the receiver; its fields are RequestVote's (docs/design/b3-raft-hardening.md).
+	msgPreVote
+	msgPreVoteResponse
+	// TimeoutNow tells a follower to stand for election at once: the leader
+	// is handing over.
+	msgTimeoutNow
+	// TransferVote is a RequestVote sent because of a TimeoutNow; receivers
+	// do not apply the lease rule to it.
+	msgTransferVote
 )
 
 // Entry kinds.
@@ -85,10 +95,10 @@ func (m *message) encode() []byte {
 	}
 	i64(m.term)
 	switch m.typ {
-	case msgRequestVote:
+	case msgRequestVote, msgPreVote, msgTransferVote:
 		i64(m.lastIndex)
 		i64(m.lastTerm)
-	case msgVoteResponse:
+	case msgVoteResponse, msgPreVoteResponse:
 		flag(m.ok)
 	case msgAppendEntries:
 		i64(m.prevIndex)
@@ -151,11 +161,12 @@ func decodeMessage(b []byte, maxCmd int) (message, error) {
 	m.typ = take(1)[0]
 	m.term = i64()
 	switch m.typ {
-	case msgRequestVote:
+	case msgRequestVote, msgPreVote, msgTransferVote:
 		m.lastIndex, m.lastTerm = i64(), i64()
 		bad = bad || m.lastIndex < -1 || m.lastTerm < 0
-	case msgVoteResponse:
+	case msgVoteResponse, msgPreVoteResponse:
 		m.ok = flag()
+	case msgTimeoutNow:
 	case msgAppendEntries:
 		m.prevIndex, m.prevTerm, m.commit, m.stamp = i64(), i64(), i64(), i64()
 		n := int(binary.BigEndian.Uint32(take(4)))

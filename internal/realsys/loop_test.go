@@ -337,3 +337,39 @@ func TestBrokerOverTCP(t *testing.T) {
 		t.Fatalf("after restart: high watermark %d, was %d", hw2, hw)
 	}
 }
+
+// stopper is a script that, told to stop, needs one more timer before it
+// reports Stopped.
+type stopper struct {
+	script
+	stopping, stopped bool
+}
+
+func (s *stopper) OnStop() error {
+	s.note("stop")
+	s.stopping = true
+	s.loop.SetTimer(7, 20*time.Millisecond)
+	return nil
+}
+
+func (s *stopper) OnTimer(id sys.TimerID) error {
+	s.stopped = s.stopping
+	return s.script.OnTimer(id)
+}
+
+func (s *stopper) Stopped() bool { return s.stopped }
+
+// Cancelled, a Stopper keeps getting events until it reports Stopped.
+func TestLoopGracefulStop(t *testing.T) {
+	var s *stopper
+	_, stop := startLoop(t, 0, func(l *Loop) sys.Handler {
+		s = &stopper{script: script{loop: l}}
+		return s
+	})
+	if err := stop(); err != nil {
+		t.Fatalf("Run returned %v", err)
+	}
+	if ev := s.events(); !contains(ev, "stop") || !contains(ev, "timer7") {
+		t.Fatalf("events %v: the loop returned before the handler had stopped", ev)
+	}
+}

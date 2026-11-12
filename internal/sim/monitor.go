@@ -21,6 +21,8 @@ import (
 //	S5  a node's term never decreases and a vote it gave in a term never
 //	    changes, not even across restarts; its commit index never
 //	    decreases while it runs.
+//	S6  no node becomes leader while another holds a lease (ADR 0013):
+//	    the guarantee that lets a leader answer reads on its own.
 
 // monitor runs after every handler call that leaves inc alive.
 func (w *world) monitor(inc *incarnation) {
@@ -53,6 +55,12 @@ func (w *world) monitor(inc *incarnation) {
 		if _, ok := w.leaders[term]; !ok {
 			w.leaders[term] = nd.id
 			w.stats.Leaders++
+			for _, o := range w.nodes {
+				if o != nd && o.inc != nil && !o.inc.dead && o.inc.n.Raft() != nil && o.inc.n.Raft().Lease() {
+					w.fail("S6: node %d became leader of term %d while node %d held a lease in term %d", nd.id, term, o.id, o.inc.n.Raft().Term())
+					return
+				}
+			}
 		}
 	}
 	commit := r.Committed()

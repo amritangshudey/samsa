@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/amritangshudey/samsa/internal/broker"
+	"github.com/amritangshudey/samsa/internal/raft"
 	"github.com/amritangshudey/samsa/internal/simsys"
 	"github.com/amritangshudey/samsa/internal/sys"
 )
@@ -62,6 +63,8 @@ type Stats struct {
 	// Producers the leader had forgotten by the end, and refusals of a
 	// producer that had legitimately expired.
 	ProducersExpired, ExpiredRefusals int
+	// Graceful stops of a leader that ended with another node leading.
+	Handovers int
 }
 
 // simNode is one machine of the cluster: a disk that outlives the
@@ -401,9 +404,56 @@ func (w *world) chaos() {
 			w.down(nd, false, "process killed")
 		case faultSync:
 			nd.disk.SetSyncErrorRate(1) // the next sync fails
+		case faultStop:
+			w.stop(nd)
 		}
 	}
 	w.after(time.Duration(1+w.rng.Intn(2*int(w.opts.faultEvery))), w.chaos)
+}
+
+// stop is a graceful stop, as the real loop does it on SIGTERM: OnStop,
+// events until Stopped (or the real loop's limit of ten seconds), then the
+// process ends. Ending loses nothing, so it is a kill.
+func (w *world) stop(nd *simNode) {
+	inc := nd.inc
+	w.note(nd.tag("stop"), 0, nil)
+	leading := inc.n.Serving()
+	w.call(inc, inc.n.OnStop())
+	deadline := w.now + sys.Instant(10*time.Second)
+	// Now and then it stops hearing from the others mid-handover: its
+	// TimeoutNow still goes out, but nothing of the successor comes back,
+	// which is when serving on would hurt.
+	isolated := false
+	if leading && w.opts.partitions && w.rng.Chance(0.5) {
+		w.after(time.Duration(w.rng.Intn(2*int(w.bcfg.HeartbeatInterval))), func() {
+			if nd.inc == inc {
+				isolated = true
+				w.note(fmt.Sprintf("partition: nothing reaches %d while it hands over", nd.id), 0, nil)
+				for _, o := range w.nodes {
+					w.cut[[2]int32{o.id, nd.id}] = true
+				}
+			}
+		})
+	}
+	var wait func()
+	wait = func() {
+		switch {
+		case nd.inc != inc: // it died some other way meanwhile
+		case inc.n.Stopped() || w.now >= deadline:
+			if leading && !inc.n.Raft().Transferring() && inc.n.Raft().Role() != raft.Leader {
+				w.stats.Handovers++
+			}
+			w.down(nd, false, "graceful stop")
+			if isolated {
+				for _, o := range w.nodes {
+					delete(w.cut, [2]int32{o.id, nd.id})
+				}
+			}
+		default:
+			w.after(5*time.Millisecond, wait)
+		}
+	}
+	wait()
 }
 
 // --- the clients' side -----------------------------------------------------
