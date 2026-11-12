@@ -64,6 +64,7 @@ type options struct {
 	idempotent  int           // idempotent producers (idempotent.go)
 	expiry      time.Duration // producer expiry as chosen, before any mutation
 	classic     bool          // Raft without PreVote and CheckQuorum
+	admins      int           // admin clients (admin.go)
 	nodes       int
 	// Between nodes (network.go): drop and duplicate probabilities per
 	// message, and whether partition scenarios run.
@@ -140,6 +141,7 @@ func Run(cfg Config) Result {
 		// the vote bugs need them to do harm (docs/design/b3-raft-hardening.md).
 		w.bcfg.UnsafeRaft |= raft.MutNoPreVote | raft.MutNoCheckQuorum
 	}
+	w.opts.admins = pick.Intn(2)
 	if cfg.Mutate != nil {
 		cfg.Mutate(&w.bcfg)
 	}
@@ -160,11 +162,11 @@ func Run(cfg Config) Result {
 		w.opts.idempotent = 0
 	}
 	w.model = NewModel(strict)
-	if w.bcfg.RetentionBytes > 0 {
+	if w.bcfg.RetentionBytes > 0 || w.opts.admins > 0 { // DeleteRecords moves the start as retention does
 		w.model.Trimming()
 	}
-	res := Result{Seed: cfg.Seed, Setup: fmt.Sprintf("nodes=%d sync=%d segment=%d election=%v faults=%v every=%v drop=%v dup=%v partitions=%v append=%d snapshot=%d retention=%d disconnects=%v producers=%d consumers=%d vandals=%d members=%d idempotent=%d expiry=%v classic=%v",
-		w.opts.nodes, w.bcfg.Sync, w.bcfg.SegmentBytes, w.bcfg.ElectionTimeout, w.opts.faults, w.opts.faultEvery, w.opts.drop, w.opts.dup, w.opts.partitions, w.bcfg.MaxAppendBytes, w.bcfg.SnapshotEvery, w.bcfg.RetentionBytes, w.opts.disconnects, w.opts.producers, w.opts.consumers, w.opts.vandals, w.opts.members, w.opts.idempotent, w.opts.expiry, w.opts.classic)}
+	res := Result{Seed: cfg.Seed, Setup: fmt.Sprintf("nodes=%d sync=%d segment=%d election=%v faults=%v every=%v drop=%v dup=%v partitions=%v append=%d snapshot=%d retention=%d disconnects=%v producers=%d consumers=%d vandals=%d members=%d idempotent=%d expiry=%v classic=%v admins=%d",
+		w.opts.nodes, w.bcfg.Sync, w.bcfg.SegmentBytes, w.bcfg.ElectionTimeout, w.opts.faults, w.opts.faultEvery, w.opts.drop, w.opts.dup, w.opts.partitions, w.bcfg.MaxAppendBytes, w.bcfg.SnapshotEvery, w.bcfg.RetentionBytes, w.opts.disconnects, w.opts.producers, w.opts.consumers, w.opts.vandals, w.opts.members, w.opts.idempotent, w.opts.expiry, w.opts.classic, w.opts.admins)}
 	if w.trace != nil {
 		_, _ = fmt.Fprintf(w.trace, "seed %d: %s\n", cfg.Seed, res.Setup)
 	}
@@ -185,7 +187,7 @@ func Run(cfg Config) Result {
 	behaviours := []struct {
 		n    int
 		step func(*client)
-	}{{w.opts.producers, (*client).produce}, {w.opts.consumers, (*client).consume}, {w.opts.vandals, (*client).vandalise}, {w.opts.members, (*client).groupMember}, {w.opts.idempotent, (*client).produceIdempotent}}
+	}{{w.opts.producers, (*client).produce}, {w.opts.consumers, (*client).consume}, {w.opts.vandals, (*client).vandalise}, {w.opts.members, (*client).groupMember}, {w.opts.idempotent, (*client).produceIdempotent}, {w.opts.admins, (*client).admin}}
 	for _, b := range behaviours {
 		for range b.n {
 			cl := &client{w: w, rng: rng.Fork(), step: b.step, cursors: map[TP]int64{}, idem: &idemProducer{id: -1}}
@@ -228,10 +230,11 @@ func (w *world) finalChecks() {
 	}
 	var tps []TP
 	for _, t := range catalogue {
-		for p := range t.parts {
+		for p := range t.max {
 			tps = append(tps, TP{t.name, p})
 		}
 	}
+	tps = append(tps, TP{doomedTopic, 0})
 	w.model.BeginFinal()
 	v := &client{w: w, rng: w.rng.Fork(), pin: leader, fetchMin: 5} // v5+ tells where the log starts
 	v.c = w.connect(v)
@@ -246,7 +249,7 @@ func (w *world) finalChecks() {
 			return
 		}
 		tp := tps[i]
-		f := Fetch{TP: tp, Offset: offset, Floor: w.model.Floor(tp), Epoch: w.model.Epoch(), Known: w.model.Known(tp), Start: w.model.Start(tp)}
+		f := Fetch{TP: tp, Offset: offset, Floor: w.model.Floor(tp), Epoch: w.model.Epoch(), Known: w.model.Known(tp), Start: w.model.Start(tp), Deleted: w.model.Deleted(tp.Topic)}
 		req := &wire.FetchRequest{MaxBytes: 1 << 20, Topics: []wire.FetchTopic{{Name: tp.Topic, Partitions: []wire.FetchPartition{
 			{Index: tp.Part, Offset: offset, MaxBytes: 1 << 20},
 		}}}}

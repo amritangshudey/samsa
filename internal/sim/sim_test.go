@@ -93,6 +93,9 @@ func TestSim(t *testing.T) {
 		total.ProducersExpired += s.ProducersExpired
 		total.ExpiredRefusals += s.ExpiredRefusals
 		total.Handovers += s.Handovers
+		total.RecordDeletes += s.RecordDeletes
+		total.PartitionsAdded += s.PartitionsAdded
+		total.TopicsDeleted += s.TopicsDeleted
 	}
 	t.Logf("%d seeds, %d failed; totals %+v", *seeds, failed, total)
 	// A suite that passes because nothing happened proves nothing.
@@ -106,6 +109,7 @@ func TestSim(t *testing.T) {
 			"leaders elected": total.Leaders, "requests refused by a non-leader": total.NotLeader, "replica comparisons": total.ReplicasCompared, "partitions": total.Partitions,
 			"starts from a snapshot": total.SnapshotStarts, "log trims": total.Trims, "snapshots installed": total.Installs,
 			"idempotent records acknowledged": total.IdempotentAcked, "idempotent retries": total.Retries, "producer ids": total.ProducerIDs, "producers expired": total.ProducersExpired, "leadership handovers": total.Handovers,
+			"records deleted": total.RecordDeletes, "partitions added": total.PartitionsAdded, "topics deleted": total.TopicsDeleted,
 		} {
 			if n < *seeds/10 {
 				t.Errorf("only %d %s in %d seeds: the suite is not exercising what it claims", n, name, *seeds)
@@ -149,6 +153,10 @@ func TestMutationSuite(t *testing.T) {
 		// seed in 2000 lined them up, with 3 and 5 nodes, 20 ms faults,
 		// partitions and one entry per message. TestRandomSchedulesCatch-
 		// BrokenRaft in internal/raft, which faults far harder, catches it.
+		// Not here either: keeping a deleted topic's offsets
+		// (UnsafeKeepOffsetsOnDelete). The simulator never creates a topic
+		// again under a deleted one's name; TestDeleteTopicForgetsEverything
+		// in internal/broker catches it.
 		{"grant a vote before it is on disk", func(c *broker.Config) { c.UnsafeRaft |= raft.MutVoteWithoutPersist }},
 		{"grant a vote comparing log length only", func(c *broker.Config) { c.UnsafeRaft |= raft.MutVoteByLength }},
 		{"truncate on a message that merely carries fewer entries", func(c *broker.Config) { c.UnsafeRaft |= raft.MutTruncateOnStale }},
@@ -161,6 +169,7 @@ func TestMutationSuite(t *testing.T) {
 		{"keep serving during a leadership transfer", func(c *broker.Config) { c.UnsafeRaft |= raft.MutTransferKeepsLease }},
 		{"expire producers without waiting", func(c *broker.Config) { c.UnsafeExpireEarly = true }},
 		{"delete segments before a snapshot covers them", func(c *broker.Config) { c.UnsafeTrimEarly, c.RetentionBytes = true, 8<<10 }},
+		{"let retention move a partition's start back", func(c *broker.Config) { c.UnsafeTrimResetsStart, c.RetentionBytes = true, 8<<10 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for first := uint64(1); first <= maxSeeds; first += 100 {

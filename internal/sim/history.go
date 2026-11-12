@@ -62,7 +62,13 @@ const (
 
 type topicModel struct {
 	state topicState
-	parts int32
+	// initial is the count it is created with; parts is the most it can
+	// have, raised by every CreatePartitions sent; known is how many a
+	// request sent now must find once it is created.
+	initial, parts, known int32
+	// deleting is set once a DeleteTopics was sent, deleted once one was
+	// acknowledged: from then on no request sent may find it (D1).
+	deleting, deleted bool
 }
 
 // Model is the checker. Clients report what they sent and what they were
@@ -122,13 +128,14 @@ func (m *Model) PowerLoss() {
 		if t.state == topicCreated {
 			t.state = topicAttempted
 		}
+		t.known, t.deleted = t.initial, false // a growth or a delete may be lost too
 	}
 }
 
 // TopicAttempted records that a client asked for a topic to be created.
 func (m *Model) TopicAttempted(name string, parts int32) {
 	if m.topics[name] == nil {
-		m.topics[name] = &topicModel{state: topicAttempted, parts: parts}
+		m.topics[name] = &topicModel{state: topicAttempted, initial: parts, parts: parts}
 	}
 }
 
@@ -137,13 +144,14 @@ func (m *Model) TopicAttempted(name string, parts int32) {
 func (m *Model) TopicCreated(name string, epoch int) {
 	if t := m.topics[name]; t != nil && !m.stale(epoch) {
 		t.state = topicCreated
+		t.known = max(t.known, t.initial)
 	}
 }
 
 // Known reports whether a request sent now must find tp.
 func (m *Model) Known(tp TP) bool {
 	t := m.topics[tp.Topic]
-	return t != nil && t.state == topicCreated && tp.Part >= 0 && tp.Part < t.parts
+	return t != nil && t.state == topicCreated && !t.deleting && tp.Part >= 0 && tp.Part < t.known
 }
 
 // possible reports whether tp can exist at all.
@@ -263,7 +271,9 @@ type Fetch struct {
 	Floor  int64 // Model.Floor(TP) when the request was sent
 	Epoch  int   // Model.Epoch() when the request was sent
 	Known  bool  // Model.Known(TP) when the request was sent
-	Start  int64 // Model.Start(TP) when the request was sent
+	// Deleted is Model.Deleted(TP.Topic) when the request was sent.
+	Deleted bool
+	Start   int64 // Model.Start(TP) when the request was sent
 	// MustProgress is set when no earlier partition of the same response
 	// carried records: then the broker must return at least one batch if
 	// there is one, whatever the byte limits.
@@ -289,6 +299,9 @@ func (m *Model) Trimming() { m.trimming = true }
 func (m *Model) Fetched(f Fetch) (next int64, err error) {
 	if m.stale(f.Epoch) {
 		return -1, nil
+	}
+	if f.Deleted && f.Err != wire.ErrUnknownTopicOrPartition {
+		return -1, fmt.Errorf("D1: %v was deleted, but a fetch sent afterwards was answered with code %d", f.TP, f.Err)
 	}
 	switch f.Err {
 	case wire.ErrNone:
@@ -407,10 +420,78 @@ func (m *Model) BeginFinal() { m.finalPass++ }
 func (m *Model) CheckFinal() error {
 	for id := 1; id < len(m.recs); id++ {
 		r := &m.recs[id]
-		// Retention may drop what lies below the log start, nothing else.
+		// Retention may drop what lies below the log start, nothing else;
+		// a deleted topic takes everything with it.
+		if t := m.topics[r.tp.Topic]; t != nil && t.deleting {
+			continue
+		}
 		if r.state == recAcked && (m.strict || r.ackEpoch == m.epoch) && r.final != m.finalPass && r.offset >= m.part(r.tp).start {
 			return fmt.Errorf("I1: record %d was acknowledged at %v offset %d and is gone", id, r.tp, r.offset)
 		}
 	}
 	return nil
+}
+
+// PartitionsAttempted records that a client asked for a topic to grow to
+// count partitions.
+func (m *Model) PartitionsAttempted(name string, count int32) {
+	if t := m.topics[name]; t != nil {
+		t.parts = max(t.parts, count)
+	}
+}
+
+// PartitionsCreated records that the broker confirmed the topic has at
+// least count partitions, in answer to a request sent in the given epoch.
+func (m *Model) PartitionsCreated(name string, count int32, epoch int) {
+	if t := m.topics[name]; t != nil && !m.stale(epoch) {
+		t.known = max(t.known, count)
+	}
+}
+
+// PartitionRange returns the fewest and most partitions name can have.
+func (m *Model) PartitionRange(name string) (least, most int32) {
+	if t := m.topics[name]; t != nil {
+		return t.initial, t.parts
+	}
+	return 0, 0
+}
+
+// RecordsDeleted records that DeleteRecords at offset (-1: the high
+// watermark) of tp, sent in the given epoch when Floor(tp) was floor and
+// Start(tp) was start, was answered with low watermark lw. The log start
+// may never go back below it (R1).
+func (m *Model) RecordsDeleted(tp TP, offset, lw, floor, start int64, epoch int) error {
+	if m.stale(epoch) {
+		return nil
+	}
+	p := m.part(tp)
+	switch {
+	case lw < offset || lw < start:
+		return fmt.Errorf("R1: DeleteRecords of %v at %d answered low watermark %d; the start was already %d", tp, offset, lw, start)
+	case offset == -1 && lw < floor:
+		return fmt.Errorf("I1: DeleteRecords of %v at the high watermark answered %d, below %d, which was acknowledged or seen before the request", tp, lw, floor)
+	}
+	p.start, p.floor = max(p.start, lw), max(p.floor, lw)
+	return nil
+}
+
+// TopicDeleteAttempted records that a client asked for a topic's deletion.
+func (m *Model) TopicDeleteAttempted(name string) {
+	if t := m.topics[name]; t != nil {
+		t.deleting = true
+	}
+}
+
+// TopicDeleted records that the broker confirmed the deletion, in answer to
+// a request sent in the given epoch.
+func (m *Model) TopicDeleted(name string, epoch int) {
+	if t := m.topics[name]; t != nil && !m.stale(epoch) {
+		t.deleted = true
+	}
+}
+
+// Deleted reports whether a request sent now must not find the topic.
+func (m *Model) Deleted(name string) bool {
+	t := m.topics[name]
+	return t != nil && t.deleted
 }

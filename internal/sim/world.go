@@ -65,6 +65,9 @@ type Stats struct {
 	ProducersExpired, ExpiredRefusals int
 	// Graceful stops of a leader that ended with another node leading.
 	Handovers int
+	// Admin operations acknowledged: DeleteRecords, partitions added,
+	// topics deleted.
+	RecordDeletes, PartitionsAdded, TopicsDeleted int
 }
 
 // simNode is one machine of the cluster: a disk that outlives the
