@@ -48,7 +48,10 @@ printf 'one\ntwo\n' | kcat -b 127.0.0.1:9093 -P -t replicated -p 1
 kcat -b 127.0.0.1:9094 -C -t replicated -p 1 -o beginning -e
 ```
 
-Any node can be named: clients are told which one leads.
+Any node can be named: clients are told which one leads. Stop a node with
+SIGTERM (Ctrl-C): a leader first hands leadership to a follower, so
+clients retry once instead of waiting for an election; a second signal
+kills at once.
 
 ## What is supported
 
@@ -64,6 +67,8 @@ unmodified client library or tool, against the built binary, over TCP.
 | Consumer groups: join, sync, heartbeat, leave, offset commit and fetch, rebalance when a member dies | [`TestFranzGoConsumerGroup`](integration/groups_test.go), [`TestJavaConsumerGroup`](integration/groups_test.go), [`TestKcatConsumerGroup`](integration/groups_test.go) |
 | Zombie members fenced: a commit from an old generation is refused | [`TestSimCatchesMissingFencing`](internal/sim/groups_test.go), [`TestGroupLifecycle`](internal/broker/groups_test.go) |
 | Idempotent producer: Java, franz-go and kcat with idempotence on; retries across leader kills write nothing twice | [`TestClusterSurvivesLeaderKill`](integration/cluster_test.go), the simulator (I8, I9), [`TestSequenceRules`](internal/broker/idempotence_test.go) |
+| Graceful stop: SIGTERM to the leader hands over; a producer writing meanwhile sees no error, nothing lost or doubled | [`TestClusterGracefulStop`](integration/cluster_test.go), [`TestGracefulStopHandsOver`](internal/broker/cluster_test.go) |
+| A node returning from a partition does not depose the leader (PreVote); a leader cut off from its majority steps down (CheckQuorum) | [`TestReturningNodeDoesNotDepose`](internal/raft/hardening_test.go), [`TestCheckQuorumLetsTheMajorityElect`](internal/raft/hardening_test.go) |
 | Replication with Raft; a three-process cluster survives two leader kills with no record lost | [`TestClusterSurvivesLeaderKill`](integration/cluster_test.go) |
 | Acknowledged writes survive power loss (fsync before ack, torn writes, failed fsyncs) | [`TestCrashRecoveryProperty`](internal/storage/crash_test.go), the simulator |
 | Every produce and fetch answer checked against an exact model of each partition, under crashes and partitions, 1–5 nodes ([ADR 0007](docs/adr/0007-history-checking.md)) | [`TestSim`](internal/sim/sim_test.go), [`TestRegressions`](internal/sim/sim_test.go) |
