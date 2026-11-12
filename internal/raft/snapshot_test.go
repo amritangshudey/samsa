@@ -3,8 +3,13 @@ package raft
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"reflect"
+	"slices"
 	"testing"
+	"time"
+
+	"github.com/amritangshudey/samsa/internal/sys"
 )
 
 func TestSnapshotEncoding(t *testing.T) {
@@ -98,4 +103,52 @@ func FuzzDecodeSnapshot(f *testing.F) {
 			t.Fatalf("expand gave %d terms for index %d", len(s.expand()), s.index)
 		}
 	})
+}
+
+// Every heartbeat resends the current chunk, and the network may duplicate
+// answers. Only an answer that shows progress may send the next chunk, or
+// each resend and each copy starts a chain of its own (BUGS.md S7).
+func TestSnapshotChunksDoNotMultiply(t *testing.T) {
+	c := newCluster(t, 3, nil)
+	c.startAll()
+	c.elect(1)
+	for i := range 60 { // several 512-byte segments, so whole ones can go
+		c.propose(1, fmt.Sprintf("command %d", i))
+		c.run(cutOff(3))
+	}
+	l := c.r(1)
+	l.SaveSnapshot(l.Committed()-1, bytes.Repeat([]byte("s"), 3000))
+	c.settle(c.nodes[1])
+	l.Compact(l.Committed())
+	if l.LogStart() == 0 {
+		t.Fatal("nothing compacted")
+	}
+	for range 5 { // resends while node 3 is away; each would start a chain
+		c.now += sys.Instant(50 * time.Millisecond)
+		l.OnTimer(TimerHeartbeat)
+	}
+	chunks, copies := 0, map[*byte]bool{}
+	for limit := 0; len(c.queue) > 0; limit++ {
+		if limit == 5000 {
+			t.Fatalf("still sending after %d chunks", chunks)
+		}
+		m := c.queue[0]
+		switch m.raw[1] {
+		case msgInstallSnapshot:
+			chunks++
+		case msgInstallResponse:
+			if !copies[&m.raw[0]] { // every answer arrives twice, the copy last
+				dup := slices.Clone(m.raw)
+				copies[&dup[0]] = true
+				c.queue = append(c.queue, tmsg{m.from, m.to, dup})
+			}
+		}
+		c.step(0)
+	}
+	if c.r(3).LastIndex() != l.LastIndex() {
+		t.Fatalf("node 3 holds %d, leader %d", c.r(3).LastIndex(), l.LastIndex())
+	}
+	if chunks > 3000/100+10 {
+		t.Fatalf("%d chunks sent for a snapshot of about 30", chunks)
+	}
 }

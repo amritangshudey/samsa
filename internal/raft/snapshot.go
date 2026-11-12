@@ -356,10 +356,17 @@ func (r *Raft) onInstallResponse(from sys.NodeID, m message) {
 		return // no install under way: a late copy
 	}
 	p.inflight = false
-	if m.offset < 0 {
+	switch {
+	case m.offset < 0:
 		p.next = max(p.next, m.index+1) // it can continue from its own log
-	} else {
+	case m.offset > p.snapOff:
 		p.snapOff = m.offset
+	default:
+		// A copy, an answer to a resent chunk, or a restart. Sending on
+		// each would start a chain per heartbeat and per duplicate, never
+		// merging (BUGS.md S7); the next heartbeat resends from here.
+		p.snapOff = m.offset
+		return
 	}
 	r.replicate(from, p)
 }
