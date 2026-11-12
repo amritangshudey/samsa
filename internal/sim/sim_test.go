@@ -86,6 +86,10 @@ func TestSim(t *testing.T) {
 		total.SnapshotStarts += s.SnapshotStarts
 		total.Trims += s.Trims
 		total.Installs += s.Installs
+		total.IdempotentAcked += s.IdempotentAcked
+		total.Retries += s.Retries
+		total.ProducerIDs += s.ProducerIDs
+		total.EpochBumps += s.EpochBumps
 	}
 	t.Logf("%d seeds, %d failed; totals %+v", *seeds, failed, total)
 	// A suite that passes because nothing happened proves nothing.
@@ -98,6 +102,7 @@ func TestSim(t *testing.T) {
 			"offset fetches checked": total.OffsetFetches, "zombie commits refused": total.ZombiesRefused,
 			"leaders elected": total.Leaders, "requests refused by a non-leader": total.NotLeader, "replica comparisons": total.ReplicasCompared, "partitions": total.Partitions,
 			"starts from a snapshot": total.SnapshotStarts, "log trims": total.Trims, "snapshots installed": total.Installs,
+			"idempotent records acknowledged": total.IdempotentAcked, "idempotent retries": total.Retries, "producer ids": total.ProducerIDs,
 		} {
 			if n < *seeds/10 {
 				t.Errorf("only %d %s in %d seeds: the suite is not exercising what it claims", n, name, *seeds)
@@ -149,6 +154,7 @@ func TestMutationSuite(t *testing.T) {
 		{"answer reads without the lease", func(c *broker.Config) { c.UnsafeNoLease = true }},
 		{"accept offset commits from any generation", func(c *broker.Config) { c.UnsafeNoFencing = true }},
 		{"snapshot before the log is synced", func(c *broker.Config) { c.UnsafeRaft, c.SnapshotEvery = raft.MutSnapshotUnsynced, 1 }},
+		{"append an idempotent producer's retries again", func(c *broker.Config) { c.UnsafeNoSequenceCheck = true }},
 		{"delete segments before a snapshot covers them", func(c *broker.Config) { c.UnsafeTrimEarly, c.RetentionBytes = true, 8<<10 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

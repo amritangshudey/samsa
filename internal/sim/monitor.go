@@ -1,6 +1,7 @@
 package sim
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/amritangshudey/samsa/internal/raft"
@@ -17,8 +18,9 @@ import (
 //	    a term name one entry;
 //	S4  nodes that have applied the same number of entries have the same
 //	    state hash: sampled while running, required when settled;
-//	S5  a node's term never decreases, not even across restarts, and its
-//	    commit index never decreases while it runs.
+//	S5  a node's term never decreases and a vote it gave in a term never
+//	    changes, not even across restarts; its commit index never
+//	    decreases while it runs.
 
 // monitor runs after every handler call that leaves inc alive.
 func (w *world) monitor(inc *incarnation) {
@@ -31,7 +33,18 @@ func (w *world) monitor(inc *incarnation) {
 		w.fail("S5: node %d went from term %d back to term %d", nd.id, nd.term, term)
 		return
 	}
-	nd.term = term
+	// Two leaders of one term (S1) need this and three more accidents; a
+	// forgotten vote is the fault itself, so it is checked directly.
+	vote, voted := r.Vote()
+	if term == nd.term && nd.voted && vote != nd.vote {
+		now := "has no vote"
+		if voted {
+			now = fmt.Sprintf("votes for node %d", vote)
+		}
+		w.fail("S5: node %d voted for node %d in term %d and now %s", nd.id, nd.vote, term, now)
+		return
+	}
+	nd.term, nd.vote, nd.voted = term, vote, voted
 	if r.Role() == raft.Leader {
 		if other, ok := w.leaders[term]; ok && other != nd.id {
 			w.fail("S1: nodes %d and %d both led term %d", other, nd.id, term)

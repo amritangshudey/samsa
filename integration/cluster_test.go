@@ -100,9 +100,9 @@ func (c *cluster) produce(cl *kgo.Client, topic, prefix string, n int, timeout t
 // readAll reads the three partitions of topic from the start until every
 // value "<prefix>-<i>" for i < n has been seen, and checks that offsets are
 // dense and that, within a partition, the wanted values first appear in the
-// order they were sent. It returns how many records were read twice: a
-// producer that retries across a leader change may write a batch again
-// (there is no idempotent producer), and that is counted, not hidden.
+// order they were sent. It returns how many records were read twice: the
+// producer is idempotent, so a retry across a leader change must not
+// write a batch again, and the test fails on any.
 func (c *cluster) readAll(topic string, n int, prefixes ...string) (duplicates int) {
 	c.t.Helper()
 	cl := c.client(kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{topic: {
@@ -193,6 +193,9 @@ func TestClusterSurvivesLeaderKill(t *testing.T) {
 	third := c.leader(cl)
 	dups += c.readAll("events", n, "a", "b", "c")
 	t.Logf("leader %d killed; leader is now %d; %d duplicate records read in total", second, third, dups)
+	if dups > 0 {
+		t.Fatalf("%d records were written twice by an idempotent producer", dups)
+	}
 
 	// One node of three is no majority: nothing may be acknowledged.
 	c.nodes[third].kill()

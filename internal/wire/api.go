@@ -15,6 +15,8 @@ const (
 	KeySyncGroup    int16 = 14
 	KeyAPIVersions  int16 = 18
 	KeyCreateTopics int16 = 19
+	// KeyInitProducerID is how an idempotent producer gets its id.
+	KeyInitProducerID int16 = 22
 )
 
 // Kafka error codes used by the broker, from Errors.java.
@@ -45,6 +47,8 @@ const (
 	ErrNotController               int16 = 41
 	ErrInvalidRequest              int16 = 42
 	ErrUnsupportedForMessageFormat int16 = 43
+	ErrOutOfOrderSequenceNumber    int16 = 45
+	ErrInvalidProducerEpoch        int16 = 47
 	ErrMemberIDRequired            int16 = 79
 	ErrGroupMaxSizeReached         int16 = 81
 	ErrInvalidRecord               int16 = 87
@@ -80,6 +84,7 @@ var APIs = []API{
 	{Key: KeySyncGroup, Min: 0, Max: 3, AdvertisedMin: 0, FlexFrom: 4},
 	{Key: KeyAPIVersions, Min: 0, Max: 4, AdvertisedMin: 0, FlexFrom: 3},
 	{Key: KeyCreateTopics, Min: 2, Max: 4, AdvertisedMin: 2, FlexFrom: 5},
+	{Key: KeyInitProducerID, Min: 0, Max: 4, AdvertisedMin: 0, FlexFrom: 2},
 }
 
 // LookupAPI returns the entry for key.

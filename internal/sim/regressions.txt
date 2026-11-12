@@ -15,3 +15,5 @@
 57   # S4, Phase 6
 62   # S4, Phase 6
 937  # S5, Phase 6: an isolated leader refused a valid write from stale state
+683  # S6, A2: a batch admitted ahead of the one a node refused before leading
+2706 # S6, A2

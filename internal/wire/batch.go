@@ -54,6 +54,11 @@ type BatchInfo struct {
 	Size         int   // bytes the whole batch occupies
 	Count        int32 // number of records, and of offsets it consumes
 	MaxTimestamp int64
+	// The idempotent producer that sent the batch: its id (negative: none),
+	// its epoch, and the sequence number of the batch's first record.
+	ProducerID    int64
+	ProducerEpoch int16
+	BaseSequence  int32
 }
 
 // ParseBatch validates the record batch at the start of b without looking
@@ -94,13 +99,43 @@ func parseBatch(b []byte, maxSize int) (BatchInfo, int16) {
 	info.Count = int32(binary.BigEndian.Uint32(b[batchCountAt:]))
 	lastDelta := int32(binary.BigEndian.Uint32(b[batchLastDeltaAt:]))
 	info.MaxTimestamp = int64(binary.BigEndian.Uint64(b[batchMaxTimeAt:]))
+	info.producer(b)
 	switch {
 	case info.Count < 1 || lastDelta != info.Count-1:
 		return info, ErrInvalidRecord
 	case attributes&(attrControl|attrTransactional) != 0:
 		return info, ErrInvalidRecord // transactions are not supported
+	case info.ProducerID >= 0 && info.BaseSequence < 0:
+		return info, ErrInvalidRecord // LogValidator.java: a producer id needs a sequence
 	}
 	return info, ErrNone
+}
+
+// producer reads the producer fields of the header in b.
+func (info *BatchInfo) producer(b []byte) {
+	info.ProducerID = int64(binary.BigEndian.Uint64(b[batchProducerIDAt:]))
+	info.ProducerEpoch = int16(binary.BigEndian.Uint16(b[batchProducerEpoch:]))
+	info.BaseSequence = int32(binary.BigEndian.Uint32(b[batchBaseSeqAt:]))
+}
+
+// SetBatchProducer stamps a producer id, epoch and base sequence into a
+// batch and recomputes its checksum, which covers them. Clients do this;
+// the broker never changes those fields.
+func SetBatchProducer(b []byte, id int64, epoch int16, sequence int32) {
+	binary.BigEndian.PutUint64(b[batchProducerIDAt:], uint64(id))
+	binary.BigEndian.PutUint16(b[batchProducerEpoch:], uint16(epoch))
+	binary.BigEndian.PutUint32(b[batchBaseSeqAt:], uint32(sequence))
+	binary.BigEndian.PutUint32(b[batchCRCAt:], crc32.Checksum(b[batchAttributesAt:], castagnoli))
+}
+
+// AddSequence returns the sequence number n after seq. Sequences run from 0
+// to 2^31-1 and then start again at 0 (DefaultRecordBatch.incrementSequence).
+func AddSequence(seq, n int32) int32 {
+	const top = 1<<31 - 1
+	if seq > top-n {
+		return n - (top - seq) - 1
+	}
+	return seq + n
 }
 
 // SetBatchBaseOffset stamps the offset of a batch's first record into it.
@@ -202,13 +237,16 @@ func DecodeBatch(b []byte) (base int64, records []Record, err error) {
 	return base, records, r.Err()
 }
 
-// PeekBatch returns the record count and max timestamp of a batch from its
-// header alone, checking only that the header is present and the count
-// positive. It is for batches that were validated before being stored.
-func PeekBatch(b []byte) (count int32, maxTimestamp int64, ok bool) {
+// PeekBatch returns what the header of a batch says, checking only that the
+// header is present and the count positive. It is for batches that were
+// validated before being stored.
+func PeekBatch(b []byte) (info BatchInfo, ok bool) {
 	if len(b) < BatchOverhead {
-		return 0, 0, false
+		return info, false
 	}
-	count = int32(binary.BigEndian.Uint32(b[batchCountAt:]))
-	return count, int64(binary.BigEndian.Uint64(b[batchMaxTimeAt:])), count > 0
+	info.Size = len(b)
+	info.Count = int32(binary.BigEndian.Uint32(b[batchCountAt:]))
+	info.MaxTimestamp = int64(binary.BigEndian.Uint64(b[batchMaxTimeAt:]))
+	info.producer(b)
+	return info, info.Count > 0
 }

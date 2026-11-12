@@ -59,6 +59,7 @@ type options struct {
 	consumers   int
 	vandals     int
 	members     int
+	idempotent  int // idempotent producers (idempotent.go)
 	nodes       int
 	// Between nodes (network.go): drop and duplicate probabilities per
 	// message, and whether partition scenarios run.
@@ -79,7 +80,7 @@ func Run(cfg Config) Result {
 	rng := simsys.NewRand(cfg.Seed)
 	w := &world{
 		rng: rng.Fork(), now: epochStart, trace: cfg.Trace,
-		conns: map[sys.ConnID]*conn{}, leaders: map[int64]int32{}, cut: map[[2]int32]bool{},
+		conns: map[sys.ConnID]*conn{}, producerIDs: map[int64]bool{}, leaders: map[int64]int32{}, cut: map[[2]int32]bool{},
 	}
 	diskRng := rng.Fork()
 
@@ -120,6 +121,7 @@ func Run(cfg Config) Result {
 	}
 	w.bcfg.SnapshotEvery = []int64{-1, 1, 7, 100}[pick.Intn(4)]
 	w.bcfg.RetentionBytes = []int64{0, 0, 64 << 10, 8 << 10}[pick.Intn(4)]
+	w.opts.idempotent = pick.Intn(3)
 	if cfg.Mutate != nil {
 		cfg.Mutate(&w.bcfg)
 	}
@@ -132,12 +134,19 @@ func Run(cfg Config) Result {
 		w.opts.diskCrash = false
 		w.opts.faults = slices.DeleteFunc(w.opts.faults, func(f fault) bool { return f != faultKill })
 	}
+	if !strict {
+		// shortcut: a retry re-sends records a power loss may have taken
+		// after they were seen, which the model reports as I3; idempotent
+		// producers run only where nothing seen can be lost, until the
+		// model learns that a lost record may legitimately come back.
+		w.opts.idempotent = 0
+	}
 	w.model = NewModel(strict)
 	if w.bcfg.RetentionBytes > 0 {
 		w.model.Trimming()
 	}
-	res := Result{Seed: cfg.Seed, Setup: fmt.Sprintf("nodes=%d sync=%d segment=%d election=%v faults=%v every=%v drop=%v dup=%v partitions=%v append=%d snapshot=%d retention=%d disconnects=%v producers=%d consumers=%d vandals=%d members=%d",
-		w.opts.nodes, w.bcfg.Sync, w.bcfg.SegmentBytes, w.bcfg.ElectionTimeout, w.opts.faults, w.opts.faultEvery, w.opts.drop, w.opts.dup, w.opts.partitions, w.bcfg.MaxAppendBytes, w.bcfg.SnapshotEvery, w.bcfg.RetentionBytes, w.opts.disconnects, w.opts.producers, w.opts.consumers, w.opts.vandals, w.opts.members)}
+	res := Result{Seed: cfg.Seed, Setup: fmt.Sprintf("nodes=%d sync=%d segment=%d election=%v faults=%v every=%v drop=%v dup=%v partitions=%v append=%d snapshot=%d retention=%d disconnects=%v producers=%d consumers=%d vandals=%d members=%d idempotent=%d",
+		w.opts.nodes, w.bcfg.Sync, w.bcfg.SegmentBytes, w.bcfg.ElectionTimeout, w.opts.faults, w.opts.faultEvery, w.opts.drop, w.opts.dup, w.opts.partitions, w.bcfg.MaxAppendBytes, w.bcfg.SnapshotEvery, w.bcfg.RetentionBytes, w.opts.disconnects, w.opts.producers, w.opts.consumers, w.opts.vandals, w.opts.members, w.opts.idempotent)}
 	if w.trace != nil {
 		_, _ = fmt.Fprintf(w.trace, "seed %d: %s\n", cfg.Seed, res.Setup)
 	}
@@ -158,10 +167,10 @@ func Run(cfg Config) Result {
 	behaviours := []struct {
 		n    int
 		step func(*client)
-	}{{w.opts.producers, (*client).produce}, {w.opts.consumers, (*client).consume}, {w.opts.vandals, (*client).vandalise}, {w.opts.members, (*client).groupMember}}
+	}{{w.opts.producers, (*client).produce}, {w.opts.consumers, (*client).consume}, {w.opts.vandals, (*client).vandalise}, {w.opts.members, (*client).groupMember}, {w.opts.idempotent, (*client).produceIdempotent}}
 	for _, b := range behaviours {
 		for range b.n {
-			cl := &client{w: w, rng: rng.Fork(), step: b.step, cursors: map[TP]int64{}}
+			cl := &client{w: w, rng: rng.Fork(), step: b.step, cursors: map[TP]int64{}, idem: &idemProducer{id: -1}}
 			// Timeouts well under answerBound: a held JoinGroup or
 			// SyncGroup is answered within the rebalance timeout.
 			cl.mem = &membership{group: groupNames[cl.rng.Intn(len(groupNames))], session: int32(100 + cl.rng.Intn(1900)), rebalance: int32(100 + cl.rng.Intn(2900))}

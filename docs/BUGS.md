@@ -102,6 +102,29 @@ Phase 1's storage engine and the rest of Phase 2's broker passed 5000 seeds
 with no other finding. See "what is untested or weak" in the phase reports
 for how much that is worth.
 
+### S6. A batch got in ahead of the one before it, and that one's retry was refused (A2)
+
+- **Seeds:** 683 and 2706 of 5000, with the fix removed.
+- **Invariant:** I8, "t0/0 refused producer 140737489928192 epoch 0
+  sequence 0 (attempt 10) with code 45".
+- **Root cause:** a producer pipelined sequence 0 and sequence 3 of one
+  partition to node 1. Node 1 answered the first "not leader", became
+  leader, and then read the second, which was already on the wire. It
+  had no state for the producer on a partition other producers had
+  written, and Kafka's rule for that case accepts any sequence, because
+  the state may have expired. So sequence 3 was appended without 0, and
+  every retry of 0 after it was out of order. The client's records were
+  written out of order and the producer was stuck.
+- **Fix:** Samsa keeps producer state for ever in part (a), so no state
+  means the producer never wrote to the partition, and its first batch
+  must be sequence 0 everywhere, not only on a partition never written
+  (`partition.admit`). Part (b), which expires state, has to keep this
+  for producers it has not expired.
+- **Lesson:** the design copied Kafka's rule 4 together with the reason for
+  it (expiry), which part (a) does not have. Review point 6 argued that
+  pipelined batches stay in order, and it missed the node that refuses one
+  request and accepts the next. I8 exists to check that argument.
+
 ## Bugs found by real clients
 
 ### C1. Null record set in a fetch response broke librdkafka (Phase 2)

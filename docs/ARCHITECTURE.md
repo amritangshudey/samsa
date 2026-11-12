@@ -102,6 +102,7 @@ internal/raft/        Raft as a pure state machine; its log is storage.Log
 internal/broker/      the node
     node.go           connections, framing, dispatch, propose/apply, leadership
     state.go          the applied state machine and its hash
+    producerid.go     producer ids from per-node blocks (ADR 0015)
     handlers.go       produce, fetch, metadata, offsets, topics
     groups.go         the group coordinator's soft state (rounds, timers)
     leader.go         what a node answers when it may not serve
@@ -156,6 +157,18 @@ Peers connect over TCP with a hello naming the node id, length-prefixed
 frames, at most 16 MiB a message, and a bounded queue that drops when full
 (Raft tolerates loss). A connection that stops reading is closed.
 
+**Idempotent producer** ([design](design/a2-idempotent-producer.md),
+[ADR 0015](adr/0015-producer-ids.md)). Any node answers InitProducerId
+with an id made of its node id, a block number it synced to the file
+`producer-block` before using it, and an index in the block. Each
+partition keeps, per producer id, the epoch and the last five batches'
+sequences and offsets. This is applied state, so it is replicated, hashed
+and in the snapshot. A batch is checked at apply, not before proposing,
+because what is in sequence depends on the entries ahead of it. A retry is
+answered with the first copy's offset and appends nothing. A gap or an old
+epoch is refused. A producer unknown to the partition must start at
+sequence 0 (BUGS.md S6). The state is never dropped yet: expiry is part (b).
+
 ## 5. The simulator
 
 `internal/sim` runs a whole cluster and its clients in one goroutine on
@@ -168,14 +181,20 @@ virtual time, all randomness from one seed ([ADR 0007](adr/0007-history-checking
   Each seed draws its own mix (swarm testing).
 - **Clients** (`client.go`): producers, consumers and group members that
   pick a random supported version for each request, with resets and
-  fragmented bytes.
+  fragmented bytes. Idempotent producers (`idempotent.go`, `sync always`
+  runs only) re-send unanswered batches unchanged and give up after two
+  seconds with a new epoch. They check I8 (a producer that follows the
+  protocol is never refused a sequence) and I9 (no producer id is handed
+  out twice). A retry written twice puts one record at two offsets, which
+  the history model reports.
 - **Checkers.** `history.go` holds an exact model of each partition and
   checks every answer: nothing acknowledged lost (under `always`), offsets
   dense and never moving, no record changing. `groups.go` checks the group
   invariants (generations only move forward and all members of one hear
   the same thing; each member gets what the leader assigned and no slot
   goes to two members; no commit accepted from an older generation;
-  acknowledged commits are what an offset fetch returns, across crashes). `monitor.go` checks Raft: one leader per term, committed entries
+  acknowledged commits are what an offset fetch returns, across crashes). `monitor.go` checks Raft: one leader per term, a term that never goes
+  back and a vote that is never forgotten across restarts, committed entries
   never replaced, replicas that applied the same prefix having equal state
   hashes. A failure prints the seed and the command that replays it.
 - **Quiet period.** Faults stop and everything heals; then a leader must
@@ -184,7 +203,8 @@ virtual time, all randomness from one seed ([ADR 0007](adr/0007-history-checking
 - **Proof the checks work.** `TestMutationSuite` turns on deliberate bugs
   (vote before persisting, vote by log length, truncate on a stale message,
   acknowledge before sync, serve before applying the term's entry, read
-  without the lease, no fencing) and requires each to be caught, then
+  without the lease, no fencing, snapshot before sync, delete segments
+  early, no sequence check) and requires each to be caught, then
   replays the catching seed without the bug to confirm the system is clean.
   The Figure 8 bug is caught by the Raft-level random schedules instead
   (`internal/raft/random_test.go`).

@@ -56,6 +56,9 @@ type Stats struct {
 	// Log prefixes deleted by retention, and snapshots installed from a
 	// leader (counted when they begin).
 	Trims, Installs int
+	// Idempotent producers: records acknowledged, batches sent again,
+	// ids handed out, and partitions moved to a new epoch.
+	IdempotentAcked, Retries, ProducerIDs, EpochBumps int
 }
 
 // simNode is one machine of the cluster: a disk that outlives the
@@ -67,6 +70,8 @@ type simNode struct {
 	inc       *incarnation // nil while the node is down
 	powerLost bool         // the disk must be restarted before the node
 	term      int64        // S5: the highest term seen on this node, ever
+	vote      sys.NodeID   // S5: whom it voted for in that term, if voted
+	voted     bool
 }
 
 // world owns virtual time and everything outside the nodes.
@@ -88,11 +93,13 @@ type world struct {
 
 	model   *Model
 	clients []*client
-	quiet   bool // no new faults, no new client requests
-	err     error
-	stats   Stats
-	hash    uint32
-	trace   io.Writer
+	// I9: every producer id handed out
+	producerIDs map[int64]bool
+	quiet       bool // no new faults, no new client requests
+	err         error
+	stats       Stats
+	hash        uint32
+	trace       io.Writer
 }
 
 // incarnation is one life of the node, from start to crash. It is the

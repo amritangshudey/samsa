@@ -81,6 +81,13 @@ func (f *hardStateFile) save(hs hardState) error {
 	return writeAtomic(f.disk, f.dir, "hardstate", b, f.skipSync, f.skipDirSync)
 }
 
+// WriteAtomic replaces dir/name with b durably, as the hard state is
+// replaced: after a crash the file holds b or what it held before. It is
+// for the small files other packages keep next to Raft's.
+func WriteAtomic(disk sys.Disk, dir, name string, b []byte) error {
+	return writeAtomic(disk, dir, name, b, false, false)
+}
+
 // writeAtomic replaces dir/name with b, durably: after a crash the file
 // holds either b or what it held before, never anything else. skipSync and
 // skipDirSync each remove one step, for tests that prove a crash test notices.

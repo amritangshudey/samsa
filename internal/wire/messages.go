@@ -727,3 +727,66 @@ func (m *ListOffsetsResponse) Encode(w *Writer, v int16) {
 		}
 	}
 }
+
+// InitProducerIDRequest is the body of an InitProducerId request (key 22).
+type InitProducerIDRequest struct {
+	// Transactional is set when the request names a transactional id. The
+	// id itself, the timeout, and the producer id and epoch of v3+ are not
+	// kept: without a transactional id Kafka ignores them too
+	// (TransactionCoordinator.handleInitProducerId).
+	Transactional bool
+}
+
+// Decode implements Message.
+func (m *InitProducerIDRequest) Decode(r *Reader, v int16) {
+	flex := v >= 2
+	_, null := r.NullableString(flex)
+	m.Transactional = !null
+	r.Int32() // TransactionTimeoutMs
+	if v >= 3 {
+		r.Int64() // ProducerId
+		r.Int16() // ProducerEpoch
+	}
+	r.Tags(flex)
+}
+
+// Encode implements Message.
+func (m *InitProducerIDRequest) Encode(w *Writer, v int16) {
+	flex := v >= 2
+	if m.Transactional {
+		w.String(flex, "")
+	} else {
+		w.NullString(flex)
+	}
+	w.Int32(1<<31 - 1) // TransactionTimeoutMs: what the Java client sends without transactions
+	if v >= 3 {
+		w.Int64(-1)
+		w.Int16(-1)
+	}
+	w.Tags(flex)
+}
+
+// InitProducerIDResponse is the body of an InitProducerId response.
+type InitProducerIDResponse struct {
+	ErrorCode     int16
+	ProducerID    int64
+	ProducerEpoch int16
+}
+
+// Decode implements Message.
+func (m *InitProducerIDResponse) Decode(r *Reader, v int16) {
+	r.Int32() // ThrottleTimeMs
+	m.ErrorCode = r.Int16()
+	m.ProducerID = r.Int64()
+	m.ProducerEpoch = r.Int16()
+	r.Tags(v >= 2)
+}
+
+// Encode implements Message.
+func (m *InitProducerIDResponse) Encode(w *Writer, v int16) {
+	w.Int32(0) // ThrottleTimeMs
+	w.Int16(m.ErrorCode)
+	w.Int64(m.ProducerID)
+	w.Int16(m.ProducerEpoch)
+	w.Tags(v >= 2)
+}
