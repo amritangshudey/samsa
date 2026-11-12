@@ -97,6 +97,37 @@ func refusal(req wire.Message) wire.Message {
 			resp.Topics = append(resp.Topics, tr)
 		}
 		return resp
+	case *wire.DeleteTopicsRequest:
+		resp := &wire.DeleteTopicsResponse{}
+		for _, t := range m.Topics {
+			resp.Topics = append(resp.Topics, wire.DeleteTopicResult{Name: t.Name, TopicID: t.TopicID, ErrorCode: wire.ErrNotController, ErrorMessage: "this node is not the leader"})
+		}
+		return resp
+	case *wire.CreatePartitionsRequest:
+		resp := &wire.CreatePartitionsResponse{}
+		for _, t := range m.Topics {
+			resp.Results = append(resp.Results, wire.CreatePartitionsResult{Name: t.Name, ErrorCode: wire.ErrNotController, ErrorMessage: "this node is not the leader"})
+		}
+		return resp
+	case *wire.DeleteRecordsRequest:
+		resp := &wire.DeleteRecordsResponse{}
+		for _, t := range m.Topics {
+			tr := wire.DeleteRecordsTopicResult{Name: t.Name}
+			for _, p := range t.Partitions {
+				tr.Partitions = append(tr.Partitions, wire.DeleteRecordsPartitionResult{Index: p.Index, LowWatermark: -1, ErrorCode: wire.ErrNotLeaderOrFollower})
+			}
+			resp.Topics = append(resp.Topics, tr)
+		}
+		return resp
+	case *wire.DescribeGroupsRequest:
+		resp := &wire.DescribeGroupsResponse{}
+		for _, g := range m.Groups {
+			resp.Groups = append(resp.Groups, wire.DescribedGroup{ErrorCode: wire.ErrNotCoordinator, ID: g})
+		}
+		return resp
 	}
-	return nil // APIVersions, Metadata, FindCoordinator
+	// APIVersions, Metadata, FindCoordinator, DescribeConfigs and
+	// DescribeCluster are answered by every node; ListGroups by every node,
+	// empty unless it serves.
+	return nil
 }

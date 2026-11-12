@@ -197,7 +197,7 @@ func (n *Node) listOffsets(req *wire.ListOffsetsRequest) *wire.ListOffsetsRespon
 				// if exact seek-by-time matters.
 				for _, b := range p.batches {
 					if b.maxTimestamp >= q.Timestamp {
-						pr.Offset, pr.Timestamp = b.base, b.maxTimestamp
+						pr.Offset, pr.Timestamp = max(b.base, p.start), b.maxTimestamp
 						break
 					}
 				}
