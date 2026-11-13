@@ -30,18 +30,41 @@ const (
 	peerIOTimeout  = 2 * time.Second
 )
 
-// Peers makes this loop node self of a cluster. It accepts peer connections
-// on ln and sends to the others at addrs, which maps every other node's id
-// to its peer address. It must be called before Run.
-func (l *Loop) Peers(self sys.NodeID, ln net.Listener, addrs map[sys.NodeID]string) {
-	l.self, l.peerLn, l.peerAddr = self, ln, addrs
+// Peers makes this loop node self of a cluster, accepting peer connections
+// on ln. The node names the other nodes' addresses with PeerAddr. It must
+// be called before Run.
+func (l *Loop) Peers(self sys.NodeID, ln net.Listener) {
+	l.self, l.peerLn = self, ln
+	l.peerAddr = map[sys.NodeID]string{}
 	l.peerOut = map[sys.NodeID]chan []byte{}
 	l.peerIn = map[net.Conn]struct{}{}
-	for id := range addrs {
-		if id != self {
-			l.peerOut[id] = make(chan []byte, maxPeerQueue)
+}
+
+// PeerAddr implements sys.Network. A new id gets its queue and sender at
+// once; a known one is dialled at the new address from its next
+// connection on. It must be called from a handler.
+func (l *Loop) PeerAddr(id sys.NodeID, addr string) {
+	if l.peerLn == nil || id == l.self || id <= 0 {
+		return
+	}
+	l.peerMu.Lock()
+	l.peerAddr[id] = addr
+	l.peerMu.Unlock()
+	if l.peerOut[id] == nil {
+		ch := make(chan []byte, maxPeerQueue)
+		l.peerOut[id] = ch
+		if l.peersStarted {
+			l.wg.Add(1)
+			go l.sendPeer(id, ch)
 		}
 	}
+}
+
+// addrOf returns where id listens; "" for an id this node never heard of.
+func (l *Loop) addrOf(id sys.NodeID) string {
+	l.peerMu.Lock()
+	defer l.peerMu.Unlock()
+	return l.peerAddr[id]
 }
 
 // PeerTLS makes peer connections mutual TLS. cfg is used to dial: it must
@@ -68,9 +91,10 @@ func (l *Loop) startPeers() {
 	}
 	l.wg.Add(1)
 	go l.acceptPeers()
+	l.peersStarted = true
 	for id, ch := range l.peerOut {
 		l.wg.Add(1)
-		go l.sendPeer(l.peerAddr[id], ch)
+		go l.sendPeer(id, ch)
 	}
 }
 
@@ -87,7 +111,7 @@ func (l *Loop) stopPeers() {
 }
 
 // sendPeer writes the queued messages for one peer, connecting as needed.
-func (l *Loop) sendPeer(addr string, ch chan []byte) {
+func (l *Loop) sendPeer(id sys.NodeID, ch chan []byte) {
 	defer l.wg.Done()
 	var c net.Conn
 	defer func() {
@@ -108,6 +132,7 @@ func (l *Loop) sendPeer(addr string, ch chan []byte) {
 				continue // the peer was just unreachable: drop, do not hammer it
 			}
 			lastDial = time.Now()
+			addr := l.addrOf(id)
 			var err error
 			d := &net.Dialer{Timeout: peerIOTimeout} // with TLS, the handshake is within the timeout too
 			if l.peerTLS != nil {
@@ -166,7 +191,7 @@ func (l *Loop) readPeer(c net.Conn) {
 		return
 	}
 	from := sys.NodeID(binary.BigEndian.Uint32(head[:]))
-	if _, known := l.peerOut[from]; !known {
+	if l.addrOf(from) == "" {
 		return // not a node of this cluster
 	}
 	c.SetReadDeadline(time.Time{}) //nolint:errcheck // as above

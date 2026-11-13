@@ -114,6 +114,11 @@ type Network interface {
 	// lost, delayed, repeated or overtaken by a later message, and the
 	// sender is not told. msg may be reused by the caller afterwards.
 	SendPeer(to NodeID, msg []byte)
+
+	// PeerAddr says where messages for node id go from now on: addr is
+	// host:port. The node calls it for every peer it learns of, before
+	// sending to it; a call for a known id moves it.
+	PeerAddr(id NodeID, addr string)
 }
 
 // Random is the node's only source of randomness.

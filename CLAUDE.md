@@ -128,7 +128,7 @@ The JDK is keg-only and not on PATH: use `/opt/homebrew/opt/openjdk/bin/java`.
 
 ## Layout
 
-See ADR 0003. `cmd/samsa` wires the real implementations; `internal/sys`
+See ADR 0003. `cmd/samsa` wires the real implementations (`node.go` is `samsa node add|remove`); `internal/sys`
 holds the interfaces; `internal/realsys` is the only impure package under
 `internal/`; everything else there is core: `storage` (the log), `wire`
 (Kafka encoding), `raft` (consensus as a pure state machine; its log is
