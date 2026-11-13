@@ -74,7 +74,10 @@ follower" (highest match index, then lowest id):
    and gave its lease up in step 1. The log rule and one vote per term
    apply as always.
 4. If the leader is still leader one election timeout later, the transfer
-   is abandoned and it serves again.
+   is abandoned. If TimeoutNow went out, the leader steps down, because
+   the message may still arrive, late or copied, and win a lease-free
+   election. Otherwise it serves again. (Corrected in C8b, BUGS.md S8:
+   the original design served again in both cases.)
 
 Why the bypass is safe in general: a transfer vote for term T+1 is sent
 only after a TimeoutNow from the leader of term T. A node that heard from a
@@ -149,7 +152,8 @@ Second pass, looking for what breaks:
    proposals while transferring as a second guard. Proposing during a
    transfer would make the target's log never catch up.
 5. **The target dies after TimeoutNow.** The leader abandons the transfer
-   after an election timeout and serves again; the other followers' lease
+   after an election timeout and steps down (BUGS.md S8; first written as
+   "serves again", which was wrong); the other followers' lease
    rule has run out by then, so a normal election also works.
 6. **Mixed versions.** Old nodes drop the new message types as malformed:
    a cluster mixing builds from before and after this change may fail to
