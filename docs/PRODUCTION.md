@@ -156,4 +156,5 @@ Blockers are written to `docs/QUESTIONS.md` as they arrive.
 | 3 Operations | part (a), admin APIs: done (`docs/reports/b4a-admin-apis.md`). Part (b), metrics, health, `samsa check`, config file: done (`docs/reports/b4b-operations.md`) |
 | 4 Black-box chaos test | done (`docs/reports/a4-chaos.md`) |
 | 5 Simulator tools | done (`docs/reports/a3-sim-tools.md`). Found: the simulator never lets an expired idempotent producer come back (expiry 15 s, runs 10 s); open, covered meanwhile by `TestJavaProducerAfterExpiry` |
+| 5b Application fault testing | done (`docs/reports/a5b-app-faults.md`, guide `docs/guides/testing-applications.md`). Three of the section 2 fault kinds (lost ack, not leader, forced rebalance); session expiry, slow or empty fetches and retention cuts are open |
 | 6–17 | not started |

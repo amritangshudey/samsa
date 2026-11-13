@@ -184,6 +184,17 @@ touches the node from another goroutine. `samsa check` runs the node's own
 recovery (`broker.Check`) on a disk wrapper that records writes instead
 of making them. `OpenDisk` holds a `flock` on the data directory's `LOCK`.
 
+**Application faults** ([design](design/a5b-app-faults.md),
+[ADR 0018](adr/0018-application-faults.md)). `Config.Faults` gives the node
+a splitmix64 stream of its own (never `sys.Random`, so faults off changes
+nothing). Each eligible request draws once: a produce that wrote
+(`lostack`: commit, then close the connection unanswered), a produce,
+fetch or offset commit (`notleader`: the non-leader refusal of ADR 0011),
+a heartbeat of a stable group (`rebalance`: `startRound`). `broker.Judge`
+loads data as `Check` does and reads the input and output topics through
+the replayed batch references; `samsa verdict` prints it, with the spec
+the binary kept in the data directory's `FAULTS`.
+
 **Idempotent producer** ([design](design/a2-idempotent-producer.md),
 [ADR 0015](adr/0015-producer-ids.md)). Any node answers InitProducerId
 with an id made of its node id, a block number it synced to the file
