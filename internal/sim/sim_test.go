@@ -271,6 +271,13 @@ type mutationCase struct {
 // TimeoutNow went out (raft.MutAbandonKeepsLeading, BUGS.md S8): one seed
 // in 2000 catches it, the one that found the bug, and any change to the
 // seeds would lose it. TestTimeoutNowAfterAbandon in internal/raft does.
+// Nor Raft's two membership rules (design C1, section 3), because the
+// broker guards in front of them. It runs one change at a time and
+// accepts one only while serving, which already means an entry of its
+// term has committed. So MutTwoChanges matters only after a change times
+// out uncommitted, and MutChangeBeforeCommit never does through the
+// broker. Not caught in 2000 seeds; TestRandomSchedulesCatchBrokenRaft
+// catches the first, and TestErratumCounterexample the second.
 var mutations = []mutationCase{
 	{"grant a vote before it is on disk", func(c *broker.Config) { c.UnsafeRaft |= raft.MutVoteWithoutPersist }},
 	{"grant a vote comparing log length only", func(c *broker.Config) { c.UnsafeRaft |= raft.MutVoteByLength }},

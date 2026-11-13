@@ -85,6 +85,9 @@ type options struct {
 	classic     bool          // Raft without PreVote and CheckQuorum
 	admins      int           // admin clients (admin.go)
 	nodes       int
+	// changes adds spares nodes that start with no configuration and a
+	// client that adds and removes voters (voters.go, design C1).
+	changes bool
 	// Between nodes (network.go): drop and duplicate probabilities per
 	// message, and whether partition scenarios run.
 	drop, dup  float64
@@ -165,6 +168,7 @@ func Run(cfg Config) Result {
 		w.bcfg.UnsafeRaft |= raft.MutNoPreVote | raft.MutNoCheckQuorum
 	}
 	w.opts.admins = pick.Intn(2)
+	w.opts.changes = w.opts.nodes > 1 && pick.Chance(0.5) // drawn last, so older seeds keep their other choices
 	if cfg.Calm {
 		w.opts.drop, w.opts.dup = 0, 0
 	}
@@ -191,8 +195,8 @@ func Run(cfg Config) Result {
 	if w.bcfg.RetentionBytes > 0 || w.opts.admins > 0 { // DeleteRecords moves the start as retention does
 		w.model.Trimming()
 	}
-	res := Result{Seed: cfg.Seed, Setup: fmt.Sprintf("nodes=%d sync=%d segment=%d election=%v faults=%v every=%v drop=%v dup=%v partitions=%v append=%d snapshot=%d retention=%d disconnects=%v producers=%d consumers=%d vandals=%d members=%d idempotent=%d expiry=%v classic=%v admins=%d",
-		w.opts.nodes, w.bcfg.Sync, w.bcfg.SegmentBytes, w.bcfg.ElectionTimeout, w.opts.faults, w.opts.faultEvery, w.opts.drop, w.opts.dup, w.opts.partitions, w.bcfg.MaxAppendBytes, w.bcfg.SnapshotEvery, w.bcfg.RetentionBytes, w.opts.disconnects, w.opts.producers, w.opts.consumers, w.opts.vandals, w.opts.members, w.opts.idempotent, w.opts.expiry, w.opts.classic, w.opts.admins)}
+	res := Result{Seed: cfg.Seed, Setup: fmt.Sprintf("nodes=%d sync=%d segment=%d election=%v faults=%v every=%v drop=%v dup=%v partitions=%v append=%d snapshot=%d retention=%d disconnects=%v producers=%d consumers=%d vandals=%d members=%d idempotent=%d expiry=%v classic=%v admins=%d changes=%v",
+		w.opts.nodes, w.bcfg.Sync, w.bcfg.SegmentBytes, w.bcfg.ElectionTimeout, w.opts.faults, w.opts.faultEvery, w.opts.drop, w.opts.dup, w.opts.partitions, w.bcfg.MaxAppendBytes, w.bcfg.SnapshotEvery, w.bcfg.RetentionBytes, w.opts.disconnects, w.opts.producers, w.opts.consumers, w.opts.vandals, w.opts.members, w.opts.idempotent, w.opts.expiry, w.opts.classic, w.opts.admins, w.opts.changes)}
 	if w.trace != nil {
 		_, _ = fmt.Fprintf(w.trace, "seed %d: %s\n", cfg.Seed, res.Setup)
 	}
@@ -200,9 +204,16 @@ func Run(cfg Config) Result {
 	for id := int32(1); id <= int32(w.opts.nodes); id++ {
 		w.bcfg.Peers = append(w.bcfg.Peers, broker.Peer{ID: id, Host: "sim", Port: 9091 + id})
 	}
-	for _, p := range w.bcfg.Peers {
+	all := slices.Clone(w.bcfg.Peers)
+	if w.opts.changes {
+		for id := int32(w.opts.nodes) + 1; id <= int32(w.opts.nodes)+spares; id++ {
+			all = append(all, broker.Peer{ID: id, Host: "sim", Port: 9091 + id})
+		}
+	}
+	for _, p := range all {
 		nd := &simNode{id: p.ID, cfg: w.bcfg, disk: simsys.NewDisk(diskRng.Fork(), simsys.DiskConfig{})}
 		nd.cfg.NodeID, nd.cfg.Port = p.ID, p.Port
+		nd.cfg.Join = p.ID > int32(w.opts.nodes) // a spare waits to be added
 		nd.cfg.Logger = w.bcfg.Logger.With("node", p.ID)
 		w.nodes = append(w.nodes, nd)
 	}
@@ -213,7 +224,7 @@ func Run(cfg Config) Result {
 	behaviours := []struct {
 		n    int
 		step func(*client)
-	}{{w.opts.producers, (*client).produce}, {w.opts.consumers, (*client).consume}, {w.opts.vandals, (*client).vandalise}, {w.opts.members, (*client).groupMember}, {w.opts.idempotent, (*client).produceIdempotent}, {w.opts.admins, (*client).admin}}
+	}{{w.opts.producers, (*client).produce}, {w.opts.consumers, (*client).consume}, {w.opts.vandals, (*client).vandalise}, {w.opts.members, (*client).groupMember}, {w.opts.idempotent, (*client).produceIdempotent}, {w.opts.admins, (*client).admin}, {voterClients(w.opts.changes), (*client).changeVoters}}
 	for _, b := range behaviours {
 		for range b.n {
 			cl := &client{w: w, lane: len(w.clients), rng: rng.Fork(), step: b.step, cursors: map[TP]int64{}, idem: &idemProducer{id: -1}}
@@ -250,7 +261,7 @@ func Run(cfg Config) Result {
 	w.stats.TermsWithoutLeader = int(maxTerm) - len(w.leaders)
 	res.Err, res.Stats, res.TraceHash, res.Faults = w.err, w.stats, w.hash, w.faults
 	if w.tl != nil {
-		w.tl.nodes, w.tl.clients, w.tl.end = w.opts.nodes, len(w.clients), w.now
+		w.tl.nodes, w.tl.clients, w.tl.end = len(w.nodes), len(w.clients), w.now
 		if err := w.tl.write(cfg.Timeline, fmt.Sprintf("Seed %d", cfg.Seed), res.Setup, w.faults); err != nil && res.Err == nil {
 			res.Err = fmt.Errorf("write timeline: %w", err)
 		}
@@ -353,7 +364,7 @@ func (w *world) writable(leader *simNode) bool {
 	acked := false
 	m.TopicAttempted(tp.Topic, catalogue[0].parts)
 	epoch := m.Epoch()
-	create := &wire.CreateTopicsRequest{Topics: []wire.CreateTopic{{Name: tp.Topic, NumPartitions: catalogue[0].parts, ReplicationFactor: int16(len(w.nodes))}}}
+	create := &wire.CreateTopicsRequest{Topics: []wire.CreateTopic{{Name: tp.Topic, NumPartitions: catalogue[0].parts, ReplicationFactor: w.replication()}}}
 	cresp := &wire.CreateTopicsResponse{}
 	v.request(wire.KeyCreateTopics, 4, create, cresp, func(ok bool) {
 		if !ok || len(cresp.Topics) != 1 || (cresp.Topics[0].ErrorCode != wire.ErrNone && cresp.Topics[0].ErrorCode != wire.ErrTopicAlreadyExists) {
@@ -403,7 +414,7 @@ func (w *world) settled() *simNode {
 			return false
 		}
 		last := leader.inc.n.Raft().LastIndex()
-		for _, nd := range w.nodes {
+		for _, nd := range w.voters(leader) {
 			if a, _ := nd.inc.n.StateHash(); a != last+1 || nd.inc.n.Raft().LastIndex() != last {
 				return false
 			}
@@ -420,7 +431,7 @@ func (w *world) settled() *simNode {
 	}
 	lr := leader.inc.n.Raft()
 	_, want := leader.inc.n.StateHash()
-	for _, nd := range w.nodes {
+	for _, nd := range w.voters(leader) {
 		if _, h := nd.inc.n.StateHash(); h != want {
 			w.fail("S4: nodes %d and %d applied the same %d entries and differ: state hash %08x and %08x", leader.id, nd.id, lr.LastIndex()+1, want, h)
 			return nil

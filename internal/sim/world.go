@@ -73,6 +73,8 @@ type Stats struct {
 	// it, and terms that ended without electing anyone (split votes, or a
 	// candidate cut off).
 	LeaderFaults, LeaderIsolated, TermsWithoutLeader int
+	// VoterChanges counts AddRaftVoter and RemoveRaftVoter acknowledged.
+	VoterChanges int
 }
 
 // simNode is one machine of the cluster: a disk that outlives the
