@@ -98,7 +98,7 @@ func (h *harness) must(err error) {
 	}
 }
 
-func (h *harness) open(c sys.ConnID) { h.must(h.node.OnConnOpen(c)) }
+func (h *harness) open(c sys.ConnID) { h.must(h.node.OnConnOpen(c, "127.0.0.1")) }
 
 // run delivers everything that is due: closes the node asked for, then
 // timers in deadline order, until nothing is left.
@@ -747,7 +747,7 @@ func TestSyncFailureStopsNode(t *testing.T) {
 	if len(h.net.sent[1]) != 0 {
 		t.Fatal("a write was acknowledged although its sync failed")
 	}
-	if err := h.node.OnConnOpen(5); !errors.Is(err, simsys.ErrInjected) {
+	if err := h.node.OnConnOpen(5, "127.0.0.1"); !errors.Is(err, simsys.ErrInjected) {
 		t.Fatalf("node kept working after a failed sync: %v", err)
 	}
 }

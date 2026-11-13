@@ -161,3 +161,25 @@ func runUser(args []string, stdin io.Reader, out io.Writer) (bool, error) {
 	fmt.Fprintf(out, "%s: credentials for %q (SCRAM-SHA-256, SCRAM-SHA-512; PLAIN checks against them)\n", *file, *name) //nolint:errcheck // nowhere to report it
 	return true, nil
 }
+
+// loadAuthorization is the ACL configuration of -acl, -super-users and
+// -allow-if-no-acl, or nil without -acl.
+func loadAuthorization(on bool, superUsers string, allowNoACL bool) (*broker.Authorization, error) {
+	if !on {
+		if superUsers != "" || allowNoACL {
+			return nil, errors.New("-super-users and -allow-if-no-acl need -acl")
+		}
+		return nil, nil
+	}
+	a := &broker.Authorization{AllowIfNoACL: allowNoACL}
+	for _, p := range strings.Split(superUsers, ",") {
+		if p = strings.TrimSpace(p); p == "" {
+			continue
+		}
+		if !strings.Contains(p, ":") {
+			return nil, fmt.Errorf("-super-users: %q is not a principal (User:name)", p)
+		}
+		a.SuperUsers = append(a.SuperUsers, p)
+	}
+	return a, nil
+}

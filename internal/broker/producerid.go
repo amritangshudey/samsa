@@ -91,12 +91,20 @@ func (p *producerIDs) next() (int64, error) {
 // initProducerID answers InitProducerId. Any node does, leader or not:
 // clients ask whichever node they like (Sender.java, leastLoadedNode), and
 // the ids need nothing from the cluster.
-func (n *Node) initProducerID(m *wire.InitProducerIDRequest) *wire.InitProducerIDResponse {
+//
+// Without a transactional id it needs IDEMPOTENT_WRITE on the cluster, or
+// WRITE on at least one topic (KafkaApis.handleInitProducerIdRequest).
+func (n *Node) initProducerID(c *conn, m *wire.InitProducerIDRequest) *wire.InitProducerIDResponse {
 	resp := &wire.InitProducerIDResponse{ProducerID: -1, ProducerEpoch: -1}
 	if m.Transactional {
 		// shortcut: no transactions yet (docs/PRODUCTION.md item 15); a
 		// client that asks for them is told so at once.
 		resp.ErrorCode = wire.ErrInvalidRequest
+		return resp
+	}
+	if !n.may(c, opIdempotentWrite, resCluster, clusterName) &&
+		!authorizeAny(n.st.acls, n.cfg.Authorization, subject{c.principal(), c.host}, opWrite, resTopic) {
+		resp.ErrorCode = wire.ErrClusterAuthorizationFailed
 		return resp
 	}
 	id, err := n.pids.next()

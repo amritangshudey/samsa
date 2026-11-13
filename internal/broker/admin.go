@@ -29,6 +29,7 @@ func collect(answer func()) (add func(), done func()) {
 func (n *Node) deleteTopics(c *conn, h wire.RequestHeader, req *wire.DeleteTopicsRequest) {
 	resp := &wire.DeleteTopicsResponse{Topics: make([]wire.DeleteTopicResult, len(req.Topics))}
 	add, done := collect(func() { n.respond(c, h, resp) })
+	clusterDelete := n.may(c, opDelete, resCluster, clusterName)
 	seen := map[string]bool{}
 	for i, t := range req.Topics {
 		res := &resp.Topics[i]
@@ -39,8 +40,12 @@ func (n *Node) deleteTopics(c *conn, h wire.RequestHeader, req *wire.DeleteTopic
 			res.ErrorCode, res.ErrorMessage = wire.ErrUnknownTopicID, "topics are named by name only (ADR 0016)"
 		case seen[t.Name]:
 			res.ErrorCode, res.ErrorMessage = wire.ErrInvalidRequest, "topic appears twice in the request"
+		case !clusterDelete && !n.may(c, opDescribe, resTopic, t.Name):
+			res.ErrorCode = wire.ErrTopicAuthorizationFailed // before existence: it is not disclosed
 		case n.st.topics[t.Name] == nil:
 			res.ErrorCode = wire.ErrUnknownTopicOrPartition
+		case !clusterDelete && !n.may(c, opDelete, resTopic, t.Name):
+			res.ErrorCode = wire.ErrTopicAuthorizationFailed
 		}
 		seen[t.Name] = true
 		if res.ErrorCode != wire.ErrNone {
@@ -65,6 +70,8 @@ func (n *Node) createPartitions(c *conn, h wire.RequestHeader, req *wire.CreateP
 		switch tp := n.st.topics[t.Name]; {
 		case seen[t.Name]:
 			res.ErrorCode, res.ErrorMessage = wire.ErrInvalidRequest, "topic appears twice in the request"
+		case !n.may(c, opAlter, resTopic, t.Name):
+			res.ErrorCode = wire.ErrTopicAuthorizationFailed
 		case tp == nil:
 			res.ErrorCode = wire.ErrUnknownTopicOrPartition
 		case t.HasAssignments:
@@ -99,6 +106,8 @@ func (n *Node) deleteRecords(c *conn, h wire.RequestHeader, req *wire.DeleteReco
 			res := &resp.Topics[i].Partitions[j]
 			res.Index, res.LowWatermark = q.Index, -1
 			switch p := n.st.partition(t.Name, q.Index); {
+			case !n.may(c, opDelete, resTopic, t.Name):
+				res.ErrorCode = wire.ErrTopicAuthorizationFailed
 			case p == nil:
 				res.ErrorCode = wire.ErrUnknownTopicOrPartition
 			case q.Offset < -1 || q.Offset > p.next:
@@ -120,7 +129,7 @@ func (n *Node) deleteRecords(c *conn, h wire.RequestHeader, req *wire.DeleteReco
 // describeConfigs is answered by every node from its own configuration and
 // applied state, like Metadata: nothing in it is ever changed by a client,
 // and a follower is at most a little behind on which topics exist.
-func (n *Node) describeConfigs(req *wire.DescribeConfigsRequest) *wire.DescribeConfigsResponse {
+func (n *Node) describeConfigs(c *conn, req *wire.DescribeConfigsRequest) *wire.DescribeConfigsResponse {
 	retention := strconv.FormatInt(n.cfg.RetentionBytes, 10)
 	if n.cfg.RetentionBytes <= 0 {
 		retention = "-1"
@@ -151,6 +160,10 @@ func (n *Node) describeConfigs(req *wire.DescribeConfigsRequest) *wire.DescribeC
 		out := wire.DescribeConfigsResult{Type: res.Type, Name: res.Name}
 		var all []wire.ConfigEntry
 		switch {
+		case res.Type == wire.ResourceTopic && !n.may(c, opDescribeConfigs, resTopic, res.Name):
+			out.ErrorCode = wire.ErrTopicAuthorizationFailed
+		case res.Type == wire.ResourceBroker && !n.may(c, opDescribeConfigs, resCluster, clusterName):
+			out.ErrorCode = wire.ErrClusterAuthorizationFailed
 		case res.Type == wire.ResourceTopic && n.st.topics[res.Name] != nil:
 			all = topicConfigs
 		case res.Type == wire.ResourceTopic:
@@ -191,13 +204,18 @@ func (n *Node) groupState(name string) string {
 
 // listGroups is sent by the admin client to every node, which merges the
 // answers. Only the serving leader coordinates groups, so every other node
-// answers an empty list, without error.
-func (n *Node) listGroups(req *wire.ListGroupsRequest) *wire.ListGroupsResponse {
+// answers an empty list, without error. Without DESCRIBE on the cluster, a
+// client sees only the groups it may describe; that is never an error.
+func (n *Node) listGroups(c *conn, req *wire.ListGroupsRequest) *wire.ListGroupsResponse {
 	resp := &wire.ListGroupsResponse{}
 	if !n.canRead() {
 		return resp
 	}
+	all := n.may(c, opDescribe, resCluster, clusterName)
 	for _, name := range sortedKeys(n.st.groups) {
+		if !all && !n.may(c, opDescribe, resGroup, name) {
+			continue
+		}
 		lg := wire.ListedGroup{ID: name, ProtocolType: n.st.groups[name].protocolType, State: n.groupState(name), Type: "classic"}
 		if len(req.States) > 0 && !slices.ContainsFunc(req.States, func(s string) bool { return strings.EqualFold(s, lg.State) }) ||
 			len(req.Types) > 0 && !slices.ContainsFunc(req.Types, func(s string) bool { return strings.EqualFold(s, lg.Type) }) {
@@ -208,9 +226,13 @@ func (n *Node) listGroups(req *wire.ListGroupsRequest) *wire.ListGroupsResponse 
 	return resp
 }
 
-func (n *Node) describeGroups(req *wire.DescribeGroupsRequest) *wire.DescribeGroupsResponse {
+func (n *Node) describeGroups(c *conn, req *wire.DescribeGroupsRequest) *wire.DescribeGroupsResponse {
 	resp := &wire.DescribeGroupsResponse{}
 	for _, name := range req.Groups {
+		if !n.may(c, opDescribe, resGroup, name) {
+			resp.Groups = append(resp.Groups, wire.DescribedGroup{ID: name, ErrorCode: wire.ErrGroupAuthorizationFailed})
+			continue
+		}
 		dg := wire.DescribedGroup{ID: name, State: n.groupState(name)}
 		if g := n.st.groups[name]; g != nil {
 			dg.ProtocolType = g.protocolType
@@ -238,8 +260,9 @@ func (n *Node) describeGroups(req *wire.DescribeGroupsRequest) *wire.DescribeGro
 	return resp
 }
 
-// describeCluster is answered by every node, like Metadata.
-func (n *Node) describeCluster(req *wire.DescribeClusterRequest) *wire.DescribeClusterResponse {
+// describeCluster is answered by every node, like Metadata. Kafka checks no
+// ACL for it (AuthHelper.computeDescribeClusterResponse).
+func (n *Node) describeCluster(_ *conn, req *wire.DescribeClusterRequest) *wire.DescribeClusterResponse {
 	if req.EndpointType != wire.EndpointBrokers {
 		return &wire.DescribeClusterResponse{ErrorCode: wire.ErrUnsupportedEndpointType, ErrorMessage: "Samsa has no separate controllers",
 			EndpointType: req.EndpointType, ClusterID: n.cfg.ClusterID, ControllerID: -1}

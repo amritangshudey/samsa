@@ -516,7 +516,7 @@ func (w *world) connect(cl *client) *conn {
 	w.at(c.toNodeAt, func() {
 		if !inc.dead && !c.nodeClosed {
 			w.note("open", uint64(c.id), nil)
-			w.call(inc, inc.n.OnConnOpen(c.id))
+			w.call(inc, inc.n.OnConnOpen(c.id, "127.0.0.1"))
 		}
 	})
 	return c

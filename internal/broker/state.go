@@ -29,6 +29,9 @@ const (
 	cmdDeleteTopic      byte = 8
 	cmdCreatePartitions byte = 9
 	cmdDeleteRecords    byte = 10
+	// The ACL commands of docs/design/c8-acls.md.
+	cmdCreateACL  byte = 11
+	cmdDeleteACLs byte = 12
 )
 
 // errBadCommand marks a command in the log that cannot be decoded. The log
@@ -202,6 +205,8 @@ type state struct {
 	topics   map[string]*topic
 	names    []string // sorted, for deterministic listing
 	groups   map[string]*group
+	// acls are the ACLs in the order they were created, without duplicates.
+	acls []wire.ACL
 	// noFencing is Config.UnsafeNoFencing, noSequences
 	// Config.UnsafeNoSequenceCheck: deliberate bugs.
 	noFencing, noSequences bool
@@ -380,7 +385,8 @@ func (s *state) partition(name string, index int32) *partition {
 // proposed it.
 type result struct {
 	errCode    int16
-	baseOffset int64 // Append: offset assigned to the batch's first record; DeleteRecords: the new start
+	baseOffset int64      // Append: offset assigned to the batch's first record; DeleteRecords: the new start
+	acls       []wire.ACL // DeleteAcls: the ACLs removed
 }
 
 // apply executes the command stored at log index. The error is non-nil only
@@ -577,6 +583,31 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 		p.batches = slices.Delete(p.batches, 0, max(keep, 0))
 		return result{baseOffset: p.start}, nil
 
+	case cmdCreateACL:
+		a := readACL(r)
+		if r.Err() != nil || r.Len() != 0 || validACL(a) != "" {
+			return result{}, fmt.Errorf("%w: create ACL at index %d", errBadCommand, index)
+		}
+		if !slices.Contains(s.acls, a) { // creating an existing ACL succeeds and changes nothing, as in Kafka
+			s.acls = append(s.acls, a)
+		}
+		return result{}, nil
+
+	case cmdDeleteACLs:
+		f := readFilter(r)
+		if r.Err() != nil || r.Len() != 0 || !validFilter(f) {
+			return result{}, fmt.Errorf("%w: delete ACLs at index %d", errBadCommand, index)
+		}
+		var gone []wire.ACL
+		s.acls = slices.DeleteFunc(s.acls, func(a wire.ACL) bool {
+			if filterMatches(f, a) {
+				gone = append(gone, a)
+				return true
+			}
+			return false
+		})
+		return result{acls: gone}, nil
+
 	case cmdExpireProducers:
 		before := r.Int64()
 		if r.Err() != nil || before < 0 || before > index {
@@ -693,5 +724,65 @@ func (s *state) hash() uint32 {
 			}
 		}
 	}
+	add(int64(len(s.acls)))
+	for _, a := range s.acls {
+		str(a.ResourceName, a.Principal, a.Host)
+		add(int64(a.ResourceType), int64(a.PatternType), int64(a.Operation), int64(a.Permission))
+	}
 	return sum
+}
+
+func encodeCreateACL(a wire.ACL) []byte {
+	w := wire.Writer{B: []byte{cmdCreateACL}}
+	writeACL(&w, a)
+	return w.B
+}
+
+func encodeDeleteACLs(f wire.ACLFilter) []byte {
+	w := wire.Writer{B: []byte{cmdDeleteACLs}}
+	w.Int8(f.ResourceType)
+	nullable(&w, f.ResourceName)
+	w.Int8(f.PatternType)
+	nullable(&w, f.Principal)
+	nullable(&w, f.Host)
+	w.Int8(f.Operation)
+	w.Int8(f.Permission)
+	return w.B
+}
+
+func nullable(w *wire.Writer, s *string) {
+	if s == nil {
+		w.NullString(false)
+	} else {
+		w.String(false, *s)
+	}
+}
+
+func readNullable(r *wire.Reader) *string {
+	s, null := r.NullableString(false)
+	if null {
+		return nil
+	}
+	return &s
+}
+
+func readFilter(r *wire.Reader) wire.ACLFilter {
+	return wire.ACLFilter{ResourceType: r.Int8(), ResourceName: readNullable(r), PatternType: r.Int8(),
+		Principal: readNullable(r), Host: readNullable(r), Operation: r.Int8(), Permission: r.Int8()}
+}
+
+// writeACL and readACL are the ACL's encoding in commands and snapshots.
+func writeACL(w *wire.Writer, a wire.ACL) {
+	w.Int8(a.ResourceType)
+	w.String(false, a.ResourceName)
+	w.Int8(a.PatternType)
+	w.String(false, a.Principal)
+	w.String(false, a.Host)
+	w.Int8(a.Operation)
+	w.Int8(a.Permission)
+}
+
+func readACL(r *wire.Reader) wire.ACL {
+	return wire.ACL{ResourceType: r.Int8(), ResourceName: r.String(false), PatternType: r.Int8(),
+		Principal: r.String(false), Host: r.String(false), Operation: r.Int8(), Permission: r.Int8()}
 }

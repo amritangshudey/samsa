@@ -423,9 +423,12 @@ func (sg *softGroup) size(g *group) int {
 	return size
 }
 
-func (n *Node) findCoordinator(req *wire.FindCoordinatorRequest) *wire.FindCoordinatorResponse {
+func (n *Node) findCoordinator(c *conn, req *wire.FindCoordinatorRequest) *wire.FindCoordinatorResponse {
 	if req.KeyType != 0 { // only groups have a coordinator here
 		return &wire.FindCoordinatorResponse{ErrorCode: wire.ErrCoordinatorNotAvailable, NodeID: -1}
+	}
+	if !n.may(c, opDescribe, resGroup, req.Key) {
+		return &wire.FindCoordinatorResponse{ErrorCode: wire.ErrGroupAuthorizationFailed, NodeID: -1}
 	}
 	// The leader coordinates every group. Any node can say who that is.
 	p, ok := n.leader()
@@ -438,6 +441,10 @@ func (n *Node) findCoordinator(req *wire.FindCoordinatorRequest) *wire.FindCoord
 func (n *Node) joinGroup(c *conn, h wire.RequestHeader, req *wire.JoinGroupRequest) {
 	fail := func(code int16) {
 		n.respond(c, h, &wire.JoinGroupResponse{ErrorCode: code, GenerationID: -1, MemberID: req.MemberID})
+	}
+	if !n.may(c, opRead, resGroup, req.GroupID) {
+		fail(wire.ErrGroupAuthorizationFailed)
+		return
 	}
 	if req.GroupID == "" {
 		fail(wire.ErrInvalidGroupID)
@@ -520,6 +527,10 @@ func (n *Node) joinGroup(c *conn, h wire.RequestHeader, req *wire.JoinGroupReque
 }
 
 func (n *Node) syncGroup(c *conn, h wire.RequestHeader, req *wire.SyncGroupRequest) {
+	if !n.may(c, opRead, resGroup, req.GroupID) {
+		n.respond(c, h, &wire.SyncGroupResponse{ErrorCode: wire.ErrGroupAuthorizationFailed})
+		return
+	}
 	sg, g := n.groups[req.GroupID], n.st.group(req.GroupID)
 	m := g.member(req.MemberID)
 	code := wire.ErrNone
@@ -557,7 +568,10 @@ func (n *Node) syncGroup(c *conn, h wire.RequestHeader, req *wire.SyncGroupReque
 	}
 }
 
-func (n *Node) heartbeat(req *wire.HeartbeatRequest) *wire.HeartbeatResponse {
+func (n *Node) heartbeat(c *conn, req *wire.HeartbeatRequest) *wire.HeartbeatResponse {
+	if !n.may(c, opRead, resGroup, req.GroupID) {
+		return &wire.HeartbeatResponse{ErrorCode: wire.ErrGroupAuthorizationFailed}
+	}
 	sg, g := n.groups[req.GroupID], n.st.group(req.GroupID)
 	m := g.member(req.MemberID)
 	switch {
@@ -578,6 +592,10 @@ func (n *Node) heartbeat(req *wire.HeartbeatRequest) *wire.HeartbeatResponse {
 }
 
 func (n *Node) leaveGroup(c *conn, h wire.RequestHeader, req *wire.LeaveGroupRequest) {
+	if !n.may(c, opRead, resGroup, req.GroupID) {
+		n.respond(c, h, &wire.LeaveGroupResponse{ErrorCode: wire.ErrGroupAuthorizationFailed})
+		return
+	}
 	sg := n.groups[req.GroupID]
 	resp := &wire.LeaveGroupResponse{}
 	for _, id := range req.Members {
@@ -606,14 +624,20 @@ func (n *Node) offsetCommit(c *conn, h wire.RequestHeader, req *wire.OffsetCommi
 	resp := &wire.OffsetCommitResponse{}
 	var entries []offsetEntry
 	var accepted []*int16 // error slots of the partitions that are proposed
+	groupOK := n.may(c, opRead, resGroup, req.GroupID)
 	for _, t := range req.Topics {
+		topicOK := n.may(c, opRead, resTopic, t.Name)
 		tr := wire.OffsetCommitTopicResponse{Name: t.Name, Partitions: make([]wire.PartitionError, len(t.Partitions))}
 		for i, p := range t.Partitions {
 			pr := &tr.Partitions[i]
 			pr.Index = p.Index
 			switch {
+			case !groupOK:
+				pr.ErrorCode = wire.ErrGroupAuthorizationFailed
 			case req.GroupID == "":
 				pr.ErrorCode = wire.ErrInvalidGroupID
+			case !topicOK:
+				pr.ErrorCode = wire.ErrTopicAuthorizationFailed
 			case len(p.Metadata) > maxOffsetMetadata:
 				pr.ErrorCode = wire.ErrOffsetMetadataTooLarge
 			case n.st.partition(t.Name, p.Index) == nil:
@@ -643,23 +667,37 @@ func (n *Node) offsetCommit(c *conn, h wire.RequestHeader, req *wire.OffsetCommi
 	})
 }
 
-func (n *Node) offsetFetch(req *wire.OffsetFetchRequest) *wire.OffsetFetchResponse {
+// offsetFetch needs DESCRIBE on the group, and on each topic: offsets of
+// topics the client may not describe are refused by name and left out of
+// an all-topics answer (KafkaApis.handleOffsetFetchRequest).
+func (n *Node) offsetFetch(c *conn, req *wire.OffsetFetchRequest) *wire.OffsetFetchResponse {
 	offsets := n.st.group(req.GroupID).offsets
+	resp := &wire.OffsetFetchResponse{}
+	groupOK := n.may(c, opDescribe, resGroup, req.GroupID)
+	if !groupOK {
+		resp.ErrorCode = wire.ErrGroupAuthorizationFailed // v2+; v1 sees it per partition
+	}
 	topics := req.Topics
 	if req.AllTopics {
 		topics = nil
 		for _, name := range sortedKeys(offsets) {
-			topics = append(topics, wire.OffsetFetchTopic{Name: name, Partitions: sortedKeys(offsets[name])})
+			if groupOK && n.may(c, opDescribe, resTopic, name) {
+				topics = append(topics, wire.OffsetFetchTopic{Name: name, Partitions: sortedKeys(offsets[name])})
+			}
 		}
 	}
-	resp := &wire.OffsetFetchResponse{}
 	for _, t := range topics {
 		tr := wire.OffsetFetchTopicResponse{Name: t.Name}
+		topicOK := n.may(c, opDescribe, resTopic, t.Name)
 		for _, index := range t.Partitions {
 			// No commit is not an error: the consumer falls back to its
 			// reset policy.
 			pr := wire.OffsetFetchPartition{Index: index, Offset: -1, LeaderEpoch: -1}
-			if o, ok := offsets[t.Name][index]; ok {
+			if !groupOK {
+				pr.ErrorCode = wire.ErrGroupAuthorizationFailed
+			} else if !topicOK {
+				pr.ErrorCode = wire.ErrTopicAuthorizationFailed
+			} else if o, ok := offsets[t.Name][index]; ok {
 				pr.Offset, pr.LeaderEpoch, pr.Metadata = o.offset, o.leaderEpoch, o.metadata
 			}
 			tr.Partitions = append(tr.Partitions, pr)

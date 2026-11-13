@@ -194,6 +194,15 @@ SaslAuthenticate and closes the connection on anything else. SCRAM is the
 pure package `internal/scram`; the node supplies nonces from `sys.Random`.
 Credentials come from a users file loaded at start.
 
+**ACLs** ([design](design/c8-acls.md), [ADR 0020](adr/0020-acls.md)).
+ACLs are applied state: `cmdCreateACL` and `cmdDeleteACLs` in the log, a
+slice in creation order in `state`, a section of the snapshot (version 5)
+and part of the state hash. `acl.go` holds the authorizer, a pure function
+of that slice, the configuration, the connection's principal and host,
+the operation and the resource, with `StandardAuthorizerData`'s rules.
+Each handler asks `n.may(c, op, resource, name)` where KafkaApis checks.
+The host comes from `OnConnOpen`, which carries the client's IP address.
+
 **Application faults** ([design](design/a5b-app-faults.md),
 [ADR 0018](adr/0018-application-faults.md)). `Config.Faults` gives the node
 a splitmix64 stream of its own (never `sys.Random`, so faults off changes

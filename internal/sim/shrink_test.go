@@ -22,11 +22,12 @@ func TestSkipNothingIsTheSameRun(t *testing.T) {
 	}
 }
 
-// shrinkSeed fails with acks before sync and shrinks well (39 faults to 1
-// in 2026-11). Any change to the bytes the simulated clients receive (the
+// shrinkSeed fails with acks before sync and shrinks well (175 faults to
+// 1, rule S3, after the ACL APIs moved the seeds on 2026-11-14; seed 4,
+// 39 faults to 1, before). Any change to the bytes the simulated clients receive (the
 // advertised API list, say) moves every seed, because the network draws
 // once per delivered fragment: then pick another one that fails.
-const shrinkSeed = 4
+const shrinkSeed = 5
 
 // The shrink seed with acks before sync shrinks to fewer faults, fails by
 // the same rule, and its replay arguments reproduce it.

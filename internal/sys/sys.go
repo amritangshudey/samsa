@@ -48,8 +48,9 @@ type Handler interface {
 	// OnTimer reports that the timer armed with [Clock.SetTimer] has expired.
 	OnTimer(id TimerID) error
 
-	// OnConnOpen reports a new inbound connection.
-	OnConnOpen(c ConnID) error
+	// OnConnOpen reports a new inbound connection from the client at host,
+	// its IP address as text ("10.0.0.5", "::1"); ACLs match on it.
+	OnConnOpen(c ConnID, host string) error
 
 	// OnConnData delivers the next bytes received on c. p is non-empty and
 	// may be any fragment of the stream: message boundaries are not

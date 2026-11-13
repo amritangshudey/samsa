@@ -86,6 +86,9 @@ func run() error {
 	peerCA := flag.String("peer-tls-ca", "", "PEM CA that signed every node's peer certificate")
 	saslMechs := flag.String("sasl-mechanisms", "", "require SASL authentication with these mechanisms: PLAIN, SCRAM-SHA-256, SCRAM-SHA-512 (comma-separated)")
 	saslUsers := flag.String("sasl-users", "", "users file for -sasl-mechanisms, written by `samsa user add`")
+	aclOn := flag.Bool("acl", false, "check every request against ACLs (CreateAcls, kafka-acls.sh); without an ACL, a resource is denied")
+	superUsers := flag.String("super-users", "", "with -acl: principals allowed everything, comma-separated (User:admin,...)")
+	allowNoACL := flag.Bool("allow-if-no-acl", false, "with -acl: allow requests on resources that have no ACL (Kafka's allow.everyone.if.no.acl.found)")
 	faultsSpec := flag.String("faults", "", "inject Kafka-level faults to test applications: seed=N[,rate=R][,kinds=lostack+notleader+rebalance] (see docs/guides/testing-applications.md)")
 	configFile := flag.String("config", "", "file of key = value lines, one per flag; flags on the command line win")
 	showVersion := flag.Bool("version", false, "print the version and exit")
@@ -123,6 +126,10 @@ func run() error {
 		}
 	} else if *saslUsers != "" {
 		return errors.New("-sasl-users needs -sasl-mechanisms")
+	}
+	auth, err := loadAuthorization(*aclOn, *superUsers, *allowNoACL)
+	if err != nil {
+		return err
 	}
 	var clientTLS *tls.Config
 	if *tlsCert != "" || *tlsKey != "" || *tlsClientCA != "" {
@@ -210,7 +217,10 @@ func run() error {
 	cfg := broker.Config{
 		NodeID: int32(*nodeID), Host: host, Port: int32(port), Peers: peers,
 		Sync: policy, SyncInterval: *syncInterval, Logger: logger, RetentionBytes: *retention, ProducerExpiry: *producerExpiry,
-		Faults: faults, SASL: sasl,
+		Faults: faults, SASL: sasl, Authorization: auth,
+	}
+	if auth != nil && sasl == nil {
+		logger.Warn("ACLs without SASL: every client is User:ANONYMOUS")
 	}
 	if sasl != nil && clientTLS == nil {
 		logger.Warn("SASL without TLS: credentials and data cross the network readable; PLAIN sends the password itself", "mechanisms", sasl.Mechanisms)

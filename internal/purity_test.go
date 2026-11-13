@@ -41,13 +41,15 @@ var allowedImports = map[string]bool{
 	"log/slog":        true,
 	"math":            true,
 	"math/bits":       true,
-	"path":            true,
-	"slices":          true,
-	"sort":            true,
-	"strconv":         true,
-	"strings":         true,
-	"time":            true,
-	"unicode/utf8":    true,
+	// Parsing addresses and CIDR ranges for ACL hosts (ADR 0020); no I/O.
+	"net/netip":    true,
+	"path":         true,
+	"slices":       true,
+	"sort":         true,
+	"strconv":      true,
+	"strings":      true,
+	"time":         true,
+	"unicode/utf8": true,
 }
 
 // allowedTime is what the core may use from package time: the duration type

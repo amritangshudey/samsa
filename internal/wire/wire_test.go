@@ -239,6 +239,18 @@ func messages() map[string]struct {
 			func() Message { return &SaslAuthenticateRequest{} }},
 		"SaslAuthenticateResponse": {KeySaslAuthenticate, &SaslAuthenticateResponse{ErrorCode: 58, ErrorMessage: "no", AuthBytes: []byte("v=sig")},
 			func() Message { return &SaslAuthenticateResponse{} }},
+		"CreateAclsRequest": {KeyCreateAcls, &CreateAclsRequest{Creations: []ACL{testACL}},
+			func() Message { return &CreateAclsRequest{} }},
+		"CreateAclsResponse": {KeyCreateAcls, &CreateAclsResponse{Results: []ACLResult{{}, {ErrorCode: 42, ErrorMessage: "bad"}}},
+			func() Message { return &CreateAclsResponse{} }},
+		"DeleteAclsRequest": {KeyDeleteAcls, &DeleteAclsRequest{Filters: []ACLFilter{testFilter, {ResourceType: 1, PatternType: 1, Operation: 1, Permission: 1}}},
+			func() Message { return &DeleteAclsRequest{} }},
+		"DeleteAclsResponse": {KeyDeleteAcls, &DeleteAclsResponse{Results: []DeleteAclsResult{{Matching: []DeleteAclsMatch{{ACL: testACL}}}, {ACLResult: ACLResult{ErrorCode: 31, ErrorMessage: "no"}}}},
+			func() Message { return &DeleteAclsResponse{} }},
+		"DescribeAclsRequest": {KeyDescribeAcls, &DescribeAclsRequest{testFilter},
+			func() Message { return &DescribeAclsRequest{} }},
+		"DescribeAclsResponse": {KeyDescribeAcls, &DescribeAclsResponse{Resources: []ACLResource{{ResourceType: 2, ResourceName: "t", PatternType: 4, ACLs: []ACLEntry{{"User:a", "*", 3, 3}}}}},
+			func() Message { return &DescribeAclsResponse{} }},
 	}
 }
 
@@ -472,3 +484,9 @@ func TestSaslAuthBytesNeverNull(t *testing.T) {
 		}
 	}
 }
+
+var (
+	testACL    = ACL{ResourceType: 2, ResourceName: "orders", PatternType: 3, Principal: "User:alice", Host: "*", Operation: 3, Permission: 3}
+	anyName    = "orders"
+	testFilter = ACLFilter{ResourceType: 2, ResourceName: &anyName, PatternType: 2, Operation: 1, Permission: 1}
+)

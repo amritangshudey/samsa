@@ -111,6 +111,7 @@ CI, report. Each milestone is a tagged release.
 |---|---|---|---|
 | 7 | TLS (clients and peers, mutual between peers), SASL PLAIN and SCRAM | C5 | real clients over TLS+SCRAM; wrong credentials and plaintext refused; standard library only |
 | 8 | ACLs (replicated commands; the Kafka ACL APIs) | — | every API has an allowed and a denied test; default-deny mode |
+| 8b | Replicated SCRAM credentials (AlterUserScramCredentials, DescribeUserScramCredentials) and forwarding admin writes from followers to the leader | — | a credential change takes effect on every node without a restart; `kafka-acls.sh` and `kafka-configs.sh` work against any node of a cluster |
 
 ### v0.5 — changeable
 
@@ -158,5 +159,6 @@ Blockers are written to `docs/QUESTIONS.md` as they arrive.
 | 5 Simulator tools | done (`docs/reports/a3-sim-tools.md`). Found: the simulator never lets an expired idempotent producer come back (expiry 15 s, runs 10 s); open, covered meanwhile by `TestJavaProducerAfterExpiry` |
 | 5b Application fault testing | done (`docs/reports/a5b-app-faults.md`, guide `docs/guides/testing-applications.md`). Three of the section 2 fault kinds (lost ack, not leader, forced rebalance); session expiry, slow or empty fetches and retention cuts are open |
 | 6 Soak | harness merged (PR 21, `make soak`); the 24 h run started 2026-11-14 00:53 IST, results to follow |
-| 7 TLS and SASL | done (`docs/reports/c5-tls-sasl.md`). Credentials from a file (restart to change); replicated credentials (API 51) go with item 8 |
-| 8–17 | not started |
+| 7 TLS and SASL | done (`docs/reports/c5-tls-sasl.md`). Credentials from a file (restart to change); replicated credentials (API 51) moved to item 8b |
+| 8 ACLs | done (`docs/reports/c8-acls.md`). ACL changes must reach the leader (no forwarding yet); certificate principals not supported |
+| 8b–17 | not started |

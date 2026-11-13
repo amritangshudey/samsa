@@ -29,6 +29,10 @@ const (
 	KeySaslAuthenticate int16 = 36
 	// KeyInitProducerID is how an idempotent producer gets its id.
 	KeyInitProducerID int16 = 22
+	// KeyDescribeAcls, KeyCreateAcls and KeyDeleteAcls manage ACLs (C8).
+	KeyDescribeAcls int16 = 29
+	KeyCreateAcls   int16 = 30
+	KeyDeleteAcls   int16 = 31
 )
 
 // Kafka error codes used by the broker, from Errors.java.
@@ -52,6 +56,9 @@ const (
 	ErrUnknownMemberID             int16 = 25
 	ErrInvalidSessionTimeout       int16 = 26
 	ErrRebalanceInProgress         int16 = 27
+	ErrTopicAuthorizationFailed    int16 = 29
+	ErrGroupAuthorizationFailed    int16 = 30
+	ErrClusterAuthorizationFailed  int16 = 31
 	ErrUnsupportedSaslMechanism    int16 = 33
 	ErrIllegalSaslState            int16 = 34
 	ErrUnsupportedVersion          int16 = 35
@@ -66,6 +73,8 @@ const (
 	ErrInvalidProducerEpoch        int16 = 47
 	ErrMemberIDRequired            int16 = 79
 	ErrGroupMaxSizeReached         int16 = 81
+	ErrTransactionalIDAuthFailed   int16 = 53
+	ErrSecurityDisabled            int16 = 54
 	ErrSaslAuthenticationFailed    int16 = 58
 	ErrInvalidRecord               int16 = 87
 	ErrUnknownTopicID              int16 = 100
@@ -108,6 +117,9 @@ var APIs = []API{
 	{Key: KeyDeleteTopics, Min: 1, Max: 6, AdvertisedMin: 1, FlexFrom: 4},
 	{Key: KeyDeleteRecords, Min: 0, Max: 2, AdvertisedMin: 0, FlexFrom: 2},
 	{Key: KeyInitProducerID, Min: 0, Max: 4, AdvertisedMin: 0, FlexFrom: 2},
+	{Key: KeyDescribeAcls, Min: 1, Max: 3, AdvertisedMin: 1, FlexFrom: 2},
+	{Key: KeyCreateAcls, Min: 1, Max: 3, AdvertisedMin: 1, FlexFrom: 2},
+	{Key: KeyDeleteAcls, Min: 1, Max: 3, AdvertisedMin: 1, FlexFrom: 2},
 	{Key: KeyDescribeConfigs, Min: 1, Max: 4, AdvertisedMin: 1, FlexFrom: 4},
 	{Key: KeySaslAuthenticate, Min: 0, Max: 2, AdvertisedMin: 0, FlexFrom: 2},
 	{Key: KeyCreatePartitions, Min: 0, Max: 3, AdvertisedMin: 0, FlexFrom: 2},

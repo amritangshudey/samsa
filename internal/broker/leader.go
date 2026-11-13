@@ -119,6 +119,18 @@ func refusal(req wire.Message) wire.Message {
 			resp.Topics = append(resp.Topics, tr)
 		}
 		return resp
+	case *wire.CreateAclsRequest:
+		resp := &wire.CreateAclsResponse{}
+		for range m.Creations {
+			resp.Results = append(resp.Results, wire.ACLResult{ErrorCode: wire.ErrNotController, ErrorMessage: "this node is not the leader"})
+		}
+		return resp
+	case *wire.DeleteAclsRequest:
+		resp := &wire.DeleteAclsResponse{}
+		for range m.Filters {
+			resp.Results = append(resp.Results, wire.DeleteAclsResult{ACLResult: wire.ACLResult{ErrorCode: wire.ErrNotController, ErrorMessage: "this node is not the leader"}})
+		}
+		return resp
 	case *wire.DescribeGroupsRequest:
 		resp := &wire.DescribeGroupsResponse{}
 		for _, g := range m.Groups {
@@ -126,8 +138,8 @@ func refusal(req wire.Message) wire.Message {
 		}
 		return resp
 	}
-	// APIVersions, Metadata, FindCoordinator, DescribeConfigs and
-	// DescribeCluster are answered by every node; ListGroups by every node,
+	// APIVersions, Metadata, FindCoordinator, DescribeConfigs,
+	// DescribeCluster and DescribeAcls are answered by every node; ListGroups by every node,
 	// empty unless it serves.
 	return nil
 }
