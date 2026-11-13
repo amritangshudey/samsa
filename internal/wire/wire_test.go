@@ -231,6 +231,14 @@ func messages() map[string]struct {
 			func() Message { return &DescribeClusterRequest{} }},
 		"DescribeClusterResponse": {KeyDescribeCluster, &DescribeClusterResponse{EndpointType: EndpointBrokers, ClusterID: "samsa", ControllerID: 2, Brokers: []Broker{{1, "localhost", 9092}, {2, "localhost", 9093}}},
 			func() Message { return &DescribeClusterResponse{} }},
+		"SaslHandshakeRequest": {KeySaslHandshake, &SaslHandshakeRequest{Mechanism: "SCRAM-SHA-256"},
+			func() Message { return &SaslHandshakeRequest{} }},
+		"SaslHandshakeResponse": {KeySaslHandshake, &SaslHandshakeResponse{ErrorCode: 33, Mechanisms: []string{"PLAIN", "SCRAM-SHA-512"}},
+			func() Message { return &SaslHandshakeResponse{} }},
+		"SaslAuthenticateRequest": {KeySaslAuthenticate, &SaslAuthenticateRequest{AuthBytes: []byte("n,,n=u,r=abc")},
+			func() Message { return &SaslAuthenticateRequest{} }},
+		"SaslAuthenticateResponse": {KeySaslAuthenticate, &SaslAuthenticateResponse{ErrorCode: 58, ErrorMessage: "no", AuthBytes: []byte("v=sig")},
+			func() Message { return &SaslAuthenticateResponse{} }},
 	}
 }
 
@@ -442,6 +450,25 @@ func TestAddSequence(t *testing.T) {
 	} {
 		if got := AddSequence(tt.seq, tt.n); got != tt.want {
 			t.Errorf("AddSequence(%d, %d) = %d, want %d", tt.seq, tt.n, got, tt.want)
+		}
+	}
+}
+
+// AuthBytes is not nullable: an empty one must be encoded as empty, at
+// every version, or the Java client fails to parse the response.
+func TestSaslAuthBytesNeverNull(t *testing.T) {
+	for v := int16(0); v <= 2; v++ {
+		for _, m := range []Message{&SaslAuthenticateResponse{ErrorCode: 58}, &SaslAuthenticateRequest{}} {
+			var w Writer
+			m.Encode(&w, v)
+			r := NewReader(w.B)
+			if _, ok := m.(*SaslAuthenticateResponse); ok {
+				r.Int16()
+				r.NullableString(v >= 2)
+			}
+			if b := r.Bytes(v >= 2); b == nil || r.Err() != nil {
+				t.Errorf("%T v%d: AuthBytes decoded as null (%v)", m, v, r.Err())
+			}
 		}
 	}
 }
