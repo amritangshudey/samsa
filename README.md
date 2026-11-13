@@ -97,6 +97,15 @@ kills at once.
   exit status 0 (pass), 1 (fail) or 2 (cannot judge). How to use it from
   JUnit, Go and Python: [docs/guides/testing-applications.md](docs/guides/testing-applications.md).
   Never run `-faults` in production.
+- **Adding and removing nodes.** Start the new node with `-join` and a
+  `-peers` list naming itself and the current voters, then run
+  `samsa node add -bootstrap 127.0.0.1:9092 -id 4 -client 127.0.0.1:9095
+  -peer 127.0.0.1:9195`. It catches up as a learner and becomes a voter.
+  `samsa node remove -bootstrap 127.0.0.1:9092 -id 1` removes one; stop
+  that process afterwards. One change at a time. To replace a dead node,
+  remove it and add the new one under a **new id**: a node that kept its
+  id but lost its disk could vote twice in one term. Details:
+  [docs/design/c1b-membership-binary.md](docs/design/c1b-membership-binary.md).
 - **Checking a data directory.** `./bin/samsa check -data d1` reads a
   stopped node's data as a start would and changes nothing: it verifies
   every log entry's checksum, the hard state and the snapshot, and replays
@@ -144,9 +153,8 @@ fetch, metadata, offsets, topics) and [ADR 0008](docs/adr/0008-group-api-version
 Transactions (a transactional producer is refused with `INVALID_REQUEST`),
 log compaction, retention by time or per topic (only `-retention-bytes`, one
 bound for the whole log), changing configs (AlterConfigs), client quotas, topic ids, tiered storage,
-adding a node to a running cluster of real processes (the Raft and broker
-sides, AddRaftVoter and RemoveRaftVoter, are built and simulated; the binary
-cannot join yet), the KIP-848 group protocol, static membership,
+reusing a node id with a new disk (replace a node under a new id),
+`kafka-metadata-quorum.sh` (DescribeQuorum, add-controller), the KIP-848 group protocol, static membership,
 fetch sessions, more than one Raft
 group (all partitions share one log, [ADR 0010](docs/adr/0010-one-raft-group.md)),
 authentication between nodes. Limits of each phase are listed in

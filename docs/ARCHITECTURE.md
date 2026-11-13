@@ -145,7 +145,10 @@ lease, CheckQuorum) counts the voters in force. A new voter first catches
 up as a learner; a leader changes nothing before an entry of its own term
 commits (Ongaro's 2015 erratum). The Kafka APIs AddRaftVoter and
 RemoveRaftVoter request changes and answer once the entry commits; each
-voter's listeners travel in the configuration.
+voter's listeners travel in the configuration. A node started with
+`-join` holds no configuration until it is added; `samsa node add` and
+`samsa node remove` (`cmd/samsa/node.go`) send the requests to the
+leader, which they find through Metadata.
 
 On SIGTERM the real loop calls `OnStop` and runs until the node no longer
 leads, for at most 10 s. The simulator's `stop` fault does the same, and
@@ -185,7 +188,12 @@ were held reconnect.
 fire timers, and a channel serialises their events into handler calls.
 Peers connect over TCP with a hello naming the node id, length-prefixed
 frames, at most 16 MiB a message, and a bounded queue that drops when full
-(Raft tolerates loss). A connection that stops reading is closed.
+(Raft tolerates loss). A connection that stops reading is closed. The
+address book is the core's to fill: the broker calls `Network.PeerAddr`
+for every `-peers` entry at start and for every voter whenever the
+configuration in force changes, since each voter's `PEER` listener is in
+the configuration ([ADR 0023](adr/0023-peer-addresses-in-the-log.md)).
+Only ids in the book may connect.
 
 **Operations** ([ADR 0017](adr/0017-operations-interfaces.md)). Every 250 ms
 the loop calls a hook on its own goroutine (`Loop.Every`); `cmd/samsa`
