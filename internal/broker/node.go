@@ -245,6 +245,7 @@ type Node struct {
 	fatal error
 	// stopping is set by OnStop: the node is handing over and will exit.
 	stopping bool
+	stats    counters // see Metrics
 }
 
 // New returns a node that will use the given clock, network, disk and
@@ -353,6 +354,7 @@ func (n *Node) OnPeerMessage(from sys.NodeID, msg []byte) error {
 // OnConnOpen implements sys.Handler.
 func (n *Node) OnConnOpen(id sys.ConnID) error {
 	n.conns[id] = &conn{id: id}
+	n.stats.conns++
 	return n.settle()
 }
 
@@ -362,6 +364,7 @@ func (n *Node) OnConnData(id sys.ConnID, p []byte) error {
 	if c == nil || c.closed {
 		return n.settle()
 	}
+	n.stats.bytesIn += int64(len(p))
 	c.in = append(c.in, p...) // p is only valid during this call
 	if len(c.in) > 2*n.cfg.MaxRequestBytes {
 		n.drop(c, "input buffer limit exceeded")
@@ -713,6 +716,7 @@ func (n *Node) finish(c *conn) {
 func (n *Node) drop(c *conn, reason string) {
 	if !c.closed {
 		c.closed = true
+		n.stats.drops++
 		n.log.Warn("closing connection", "conn", uint64(c.id), "reason", reason)
 		n.net.Close(c.id) // the driver answers with OnConnClose
 	}
@@ -728,6 +732,7 @@ func (n *Node) respond(c *conn, h wire.RequestHeader, body wire.Message) {
 		body.Encode(&w, h.Version)
 		binary.BigEndian.PutUint32(w.B, uint32(len(w.B)-4))
 		n.net.Send(c.id, w.B)
+		n.stats.bytesOut += int64(len(w.B))
 	}
 	n.finish(c)
 }
@@ -755,6 +760,8 @@ func (n *Node) dispatch(c *conn, frame []byte) {
 		n.respond(c, h, &wire.APIVersionsResponse{ErrorCode: wire.ErrUnsupportedVersion, APIs: advertised()})
 		return
 	}
+
+	n.stats.requests[h.Key]++ // supported, so 0 <= key < 64
 
 	var req wire.Message
 	var handle func()
