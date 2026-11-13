@@ -198,6 +198,7 @@ func (cl *client) sendIdempotent(p *idemPart, b *idemBatch) {
 			cl.check(m.Acked(b.first, b.n, resp.Topics[0].Partitions[0].BaseOffset, epoch))
 			w.stats.RecordsAcked += b.n
 			w.stats.IdempotentAcked += b.n
+			w.tl.mark(w.opts.nodes+cl.lane, w.now, "ack", "")
 		case wire.ErrOutOfOrderSequenceNumber, wire.ErrInvalidProducerEpoch:
 			// Every copy the partition accepted was sent no later than
 			// lastBorn. Expiry needs ProducerExpiry of silence after that

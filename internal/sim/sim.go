@@ -26,6 +26,22 @@ type Config struct {
 	// Mutate, if set, may change the broker's configuration after the seed
 	// has chosen it. Tests use it to break the broker on purpose.
 	Mutate func(*broker.Config)
+	// Skip names faults, by their sequence number in Result.Faults, that
+	// are drawn as usual but do not act. Used to shrink a failing seed.
+	Skip map[int]bool
+	// Timeline, if set, receives an HTML page of the run when it ends.
+	Timeline io.Writer
+	// Calm sets the drop and duplicate probabilities between nodes to 0.
+	// Every draw is still made, so the rest of the run stays aligned.
+	Calm bool
+}
+
+// Fault is one fault of a run, numbered in the order it happened.
+type Fault struct {
+	Seq     int
+	At      time.Duration // virtual time since the run began
+	What    string
+	Skipped bool // drawn, but Config.Skip kept it from acting
 }
 
 // Result is the outcome of a run.
@@ -36,6 +52,8 @@ type Result struct {
 	// Setup describes the configuration the seed chose.
 	Setup string
 	Stats Stats
+	// Faults lists every fault drawn, skipped ones included.
+	Faults []Fault
 	// TraceHash covers every event delivered to the node and every byte it
 	// sent, with their virtual times. Equal seeds must give equal hashes.
 	TraceHash uint32
@@ -49,6 +67,7 @@ const (
 	faultKill                   // the process dies; the disk keeps unsynced data
 	faultSync                   // the next sync fails
 	faultStop                   // a graceful stop (SIGTERM): hand over, then exit
+	faultNone                   // a fault that was drawn and then skipped
 )
 
 // options is the swarm configuration: what kind of run the seed selected.
@@ -73,7 +92,7 @@ type options struct {
 }
 
 func (f fault) String() string {
-	return [...]string{"power", "diskcrash", "kill", "syncfail", "stop"}[f]
+	return [...]string{"power", "diskcrash", "kill", "syncfail", "stop", "none"}[f]
 }
 
 // Run executes one simulation and returns what happened. It is a pure
@@ -86,6 +105,10 @@ func Run(cfg Config) Result {
 	w := &world{
 		rng: rng.Fork(), now: epochStart, trace: cfg.Trace,
 		conns: map[sys.ConnID]*conn{}, producerIDs: map[int64]bool{}, leaders: map[int64]int32{}, cut: map[[2]int32]bool{},
+		skip: cfg.Skip,
+	}
+	if cfg.Timeline != nil {
+		w.tl = newTimeline(0) // lanes are counted once the setup is known
 	}
 	diskRng := rng.Fork()
 
@@ -142,6 +165,9 @@ func Run(cfg Config) Result {
 		w.bcfg.UnsafeRaft |= raft.MutNoPreVote | raft.MutNoCheckQuorum
 	}
 	w.opts.admins = pick.Intn(2)
+	if cfg.Calm {
+		w.opts.drop, w.opts.dup = 0, 0
+	}
 	if cfg.Mutate != nil {
 		cfg.Mutate(&w.bcfg)
 	}
@@ -190,7 +216,7 @@ func Run(cfg Config) Result {
 	}{{w.opts.producers, (*client).produce}, {w.opts.consumers, (*client).consume}, {w.opts.vandals, (*client).vandalise}, {w.opts.members, (*client).groupMember}, {w.opts.idempotent, (*client).produceIdempotent}, {w.opts.admins, (*client).admin}}
 	for _, b := range behaviours {
 		for range b.n {
-			cl := &client{w: w, rng: rng.Fork(), step: b.step, cursors: map[TP]int64{}, idem: &idemProducer{id: -1}}
+			cl := &client{w: w, lane: len(w.clients), rng: rng.Fork(), step: b.step, cursors: map[TP]int64{}, idem: &idemProducer{id: -1}}
 			// Timeouts well under answerBound: a held JoinGroup or
 			// SyncGroup is answered within the rebalance timeout.
 			cl.mem = &membership{group: groupNames[cl.rng.Intn(len(groupNames))], session: int32(100 + cl.rng.Intn(1900)), rebalance: int32(100 + cl.rng.Intn(2900))}
@@ -217,7 +243,18 @@ func Run(cfg Config) Result {
 	if w.err == nil {
 		w.finalChecks()
 	}
-	res.Err, res.Stats, res.TraceHash = w.err, w.stats, w.hash
+	var maxTerm int64
+	for _, nd := range w.nodes {
+		maxTerm = max(maxTerm, nd.term)
+	}
+	w.stats.TermsWithoutLeader = int(maxTerm) - len(w.leaders)
+	res.Err, res.Stats, res.TraceHash, res.Faults = w.err, w.stats, w.hash, w.faults
+	if w.tl != nil {
+		w.tl.nodes, w.tl.clients, w.tl.end = w.opts.nodes, len(w.clients), w.now
+		if err := w.tl.write(cfg.Timeline, fmt.Sprintf("Seed %d", cfg.Seed), res.Setup, w.faults); err != nil && res.Err == nil {
+			res.Err = fmt.Errorf("write timeline: %w", err)
+		}
+	}
 	return res
 }
 

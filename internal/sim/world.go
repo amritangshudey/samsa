@@ -68,6 +68,11 @@ type Stats struct {
 	// Admin operations acknowledged: DeleteRecords, partitions added,
 	// topics deleted.
 	RecordDeletes, PartitionsAdded, TopicsDeleted int
+	// Coverage of states that are hard to reach (docs/design/a3-sim-tools.md,
+	// 2.3): a fault that hit the serving leader, a partition that isolated
+	// it, and terms that ended without electing anyone (split votes, or a
+	// candidate cut off).
+	LeaderFaults, LeaderIsolated, TermsWithoutLeader int
 }
 
 // simNode is one machine of the cluster: a disk that outlives the
@@ -99,6 +104,10 @@ type world struct {
 	leaders   map[int64]int32   // S1: who led each term
 	committed []int64           // S3: the term of each entry first seen committed
 	cut       map[[2]int32]bool // directed links that drop everything; see network.go
+	// Faults, numbered in the order they happen (docs/design/a3-sim-tools.md).
+	faults []Fault
+	skip   map[int]bool
+	tl     *timeline // nil unless Config.Timeline is set
 
 	model   *Model
 	clients []*client
@@ -165,6 +174,7 @@ func (w *world) fail(format string, args ...any) {
 	if w.err == nil {
 		w.err = fmt.Errorf(format, args...)
 		w.note("VIOLATION: "+w.err.Error(), 0, nil)
+		w.tl.fail(w.now, w.err)
 	}
 }
 
@@ -328,6 +338,7 @@ func (w *world) down(nd *simNode, power bool, why string) {
 		return
 	}
 	w.note(nd.tag("node-down: "+why), 0, nil)
+	w.tl.down(nd.id, w.now, why)
 	inc.dead = true
 	nd.inc = nil
 	if power {
@@ -365,11 +376,15 @@ func (w *world) start(nd *simNode) {
 	}
 	nd.disk.SetSyncErrorRate(0)
 	if !w.quiet && w.opts.diskCrash && w.rng.Chance(0.25) {
-		nd.disk.CrashAfter(1 + w.rng.Intn(40)) // lands inside recovery, or soon after
+		n := 1 + w.rng.Intn(40) // lands inside recovery, or soon after
+		if w.faultAllowed(int(nd.id-1), fmt.Sprintf("diskcrash in recovery node %d", nd.id)) {
+			nd.disk.CrashAfter(n)
+		}
 	}
 	inc := &incarnation{w: w, node: nd, timers: map[sys.TimerID]uint64{}}
 	inc.n = broker.New(nd.cfg, inc, inc, nd.disk, w.rng.Fork())
 	w.note(nd.tag("node-start"), 0, nil)
+	w.tl.up(nd.id, w.now)
 	if err := inc.n.OnStart(); err != nil {
 		inc.dead = true // it may have armed timers before it failed
 		if !nd.disk.Crashed() {
@@ -392,13 +407,34 @@ func (w *world) start(nd *simNode) {
 	w.monitor(inc)
 }
 
+// faultAllowed numbers a fault about to happen, records it, and reports
+// whether it may act: false if the run was told to skip it. The caller has
+// already made the draws that chose it.
+func (w *world) faultAllowed(lane int, what string) bool {
+	f := Fault{Seq: len(w.faults) + 1, At: time.Duration(w.now - epochStart), What: what, Skipped: w.skip[len(w.faults)+1]}
+	w.faults = append(w.faults, f)
+	kind := "fault"
+	if f.Skipped {
+		w.note("skipped: "+what, 0, nil)
+		kind = "skipped"
+	}
+	w.tl.mark(lane, w.now, kind, fmt.Sprintf("#%d %s", f.Seq, what))
+	return !f.Skipped
+}
+
 // chaos injects one fault and schedules the next.
 func (w *world) chaos() {
 	if w.quiet || len(w.opts.faults) == 0 {
 		return
 	}
 	if nd := w.target(); nd.inc != nil {
-		switch w.opts.faults[w.rng.Intn(len(w.opts.faults))] {
+		kind := w.opts.faults[w.rng.Intn(len(w.opts.faults))]
+		if !w.faultAllowed(int(nd.id-1), fmt.Sprintf("%s node %d", kind, nd.id)) {
+			kind = faultNone
+		} else if nd.inc.n.Serving() {
+			w.stats.LeaderFaults++
+		}
+		switch kind {
 		case faultPower:
 			w.down(nd, true, "power loss")
 		case faultDiskCrash:

@@ -3,6 +3,7 @@ package sim
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/amritangshudey/samsa/internal/sys"
@@ -29,8 +30,10 @@ func (w *world) sendPeer(from *simNode, to int32, msg []byte) {
 		if w.rng.Chance(0.1) {
 			delay = time.Duration(w.rng.Intn(int(w.bcfg.ElectionTimeout / 2)))
 		}
+		sent := w.now
 		w.after(delay, func() {
 			if t := nd.inc; t != nil && !t.dead {
+				w.tl.msg(from.id, to, sent, w.now)
 				w.note(nd.tag("peer"), uint64(from.id), msg)
 				w.call(t, t.n.OnPeerMessage(sys.NodeID(from.id), msg))
 			}
@@ -59,7 +62,8 @@ func (w *world) partition() {
 	}
 	victim := w.target().id
 	others := slices.DeleteFunc(slices.Clone(ids), func(id int32) bool { return id == victim })
-	both := func(a, b int32) { w.cut[[2]int32{a, b}], w.cut[[2]int32{b, a}] = true, true }
+	var cuts [][2]int32
+	both := func(a, b int32) { cuts = append(cuts, [2]int32{a, b}, [2]int32{b, a}) }
 	var what string
 	switch w.rng.Intn(4) {
 	case 0, 1: // isolate: in a cluster of three, also the minority/majority split
@@ -70,13 +74,22 @@ func (w *world) partition() {
 	case 2:
 		o := others[w.rng.Intn(len(others))]
 		what = fmt.Sprintf("one-way %d->%d", victim, o)
-		w.cut[[2]int32{victim, o}] = true
+		cuts = append(cuts, [2]int32{victim, o})
 	case 3: // the victim sees both sides; they do not see each other
 		what = fmt.Sprintf("bridge via %d", victim)
 		both(others[0], others[1])
 	}
-	w.note("partition: "+what, 0, nil)
-	w.stats.Partitions++
+	if w.faultAllowed(-1, "partition: "+what) {
+		if nd := w.node(victim); strings.HasPrefix(what, "isolate") && nd.inc != nil && nd.inc.n.Serving() {
+			w.stats.LeaderIsolated++
+		}
+		for _, c := range cuts {
+			w.cut[c] = true
+		}
+		w.tl.cut(w.now, what)
+		w.note("partition: "+what, 0, nil)
+		w.stats.Partitions++
+	}
 	w.after(time.Duration(50+w.rng.Intn(1950))*time.Millisecond, func() {
 		w.heal()
 		w.after(time.Duration(w.rng.Intn(500))*time.Millisecond, w.partition)
@@ -100,5 +113,6 @@ func (w *world) heal() {
 	if len(w.cut) > 0 {
 		w.note("heal", 0, nil)
 		clear(w.cut)
+		w.tl.heal(w.now)
 	}
 }
