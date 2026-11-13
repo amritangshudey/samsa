@@ -23,7 +23,7 @@ VERSION ?=
 LDFLAGS := -ldflags "-X main.version=$(VERSION)"
 PLATFORMS := darwin/arm64 darwin/amd64 linux/arm64 linux/amd64
 
-.PHONY: build test race lint fuzz integration chaos sim shrink bench release
+.PHONY: soak build test race lint fuzz integration chaos sim shrink bench release
 
 build:
 	CGO_ENABLED=0 go build -trimpath $(LDFLAGS) -o bin/samsa ./cmd/samsa
@@ -84,6 +84,12 @@ integration: build $(JARS) $(KAFKA_DIST)
 CHAOS_DURATION ?= 10m
 chaos: build
 	cd integration && SAMSA_BIN=$(CURDIR)/bin/samsa CHAOS_DURATION=$(CHAOS_DURATION) go test -count=1 -v -timeout 2h -run '^TestChaos$$' .
+
+# One node under a steady, churning workload; docs/design/g5-soak.md.
+# SOAK_DURATION defaults to 24h. Samples and summary go to soak/.
+SOAK_DURATION ?= 24h
+soak: build
+	cd integration && SAMSA_BIN=$(CURDIR)/bin/samsa SAMSA_SOAK=1 SAMSA_SOAK_DURATION=$(SOAK_DURATION) SAMSA_SOAK_OUT=$(CURDIR)/soak go test -count=1 -v -timeout 0 -run '^TestSoak$$' .
 
 # Throughput and latency of the built binary; method in docs/design/phase-7.md.
 # Takes about 15 minutes. Results go to bench.md.
