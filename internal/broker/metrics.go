@@ -17,6 +17,8 @@ type Metrics struct {
 	// node closed for bad input or limits; Open is the number open now.
 	Connections, Dropped int64
 	Open                 int
+	// Faults counts faults injected on purpose (Config.Faults).
+	Faults int64
 
 	Leader, Serving                               bool
 	Term, Committed, Applied, LogStart, LastIndex int64
@@ -40,7 +42,7 @@ type counters struct {
 func (n *Node) Metrics() Metrics {
 	m := Metrics{
 		Requests: n.stats.requests, BytesIn: n.stats.bytesIn, BytesOut: n.stats.bytesOut,
-		Connections: n.stats.conns, Dropped: n.stats.drops, Open: len(n.conns),
+		Connections: n.stats.conns, Dropped: n.stats.drops, Open: len(n.conns), Faults: n.faults.count,
 		Leader: n.raft.Role() == raft.Leader, Serving: n.serving,
 		Term: n.raft.Term(), Committed: n.raft.Committed(), Applied: n.applied,
 		LogStart: n.raft.LogStart(), LastIndex: n.raft.LastIndex(), Snapshot: n.raft.SnapshotIndex(),

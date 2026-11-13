@@ -71,7 +71,15 @@ kills at once.
   `samsa_raft_committed_entries`, `samsa_raft_applied_entries`,
   `samsa_raft_log_start`, `samsa_raft_last_index`,
   `samsa_raft_snapshot_index`, `samsa_topics`, `samsa_partitions`,
-  `samsa_groups`.
+  `samsa_groups`, `samsa_faults_injected_total`.
+- **Testing your application under faults.** `-faults seed=42` makes the
+  broker lose produce acknowledgements, refuse requests as a non-leader
+  and force rebalances, from a seed. `samsa verdict -data DIR -in T -out
+  T2 -group G`, run on the stopped broker's data, reports every input
+  record as processed once, duplicated, lost or not yet processed, with
+  exit status 0 (pass), 1 (fail) or 2 (cannot judge). How to use it from
+  JUnit, Go and Python: [docs/guides/testing-applications.md](docs/guides/testing-applications.md).
+  Never run `-faults` in production.
 - **Checking a data directory.** `./bin/samsa check -data d1` reads a
   stopped node's data as a start would and changes nothing: it verifies
   every log entry's checksum, the hard state and the snapshot, and replays
@@ -99,6 +107,7 @@ unmodified client library or tool, against the built binary, over TCP.
 | Admin with the standard Kafka 4.4 CLI tools: `kafka-topics` (create, list, describe, alter partitions, delete), `kafka-configs --describe` (read-only), `kafka-delete-records`, `kafka-consumer-groups` (list, describe, state), `kafka-get-offsets`, `kafka-cluster cluster-id`, on a three-node cluster | [`TestKafkaCLI`](integration/cli_test.go), [`admin_test.go`](internal/broker/admin_test.go), the simulator (R1, D1) |
 | Config file, Prometheus metrics, `/healthz`, `/readyz`; `samsa check` passes clean data and reports a torn tail, a flipped byte, a cut snapshot and a corrupt hard state; a locked data directory | [`TestOperations`](integration/ops_test.go), [`TestCheckFindsCorruption`](internal/broker/check_test.go), [`TestLoadConfig`](cmd/samsa/main_test.go) |
 | Three real processes under SIGKILL, graceful restarts, partitions, one-way cuts, slow links and connection resets, every franz-go answer judged by the simulator's own checker; a build with stale reads switched on is caught, and the same scenario passes on the real build | [`TestChaos`](integration/chaos_test.go), [`TestChaosCatchesBrokenBuild`](integration/chaos_test.go) |
+| An application that commits before it processes is reported as losing records under forced rebalances, with the seed; the same application committing after processing passes under all three fault kinds | [`TestVerdictCatchesCommitBeforeProcess`](integration/apps_test.go), [`TestJudge`](internal/broker/verdict_test.go), [`TestFaultLostAck`](internal/broker/faults_test.go) |
 | Replication with Raft; a three-process cluster survives two leader kills with no record lost | [`TestClusterSurvivesLeaderKill`](integration/cluster_test.go) |
 | Acknowledged writes survive power loss (fsync before ack, torn writes, failed fsyncs) | [`TestCrashRecoveryProperty`](internal/storage/crash_test.go), the simulator |
 | Every produce and fetch answer checked against an exact model of each partition, under crashes and partitions, 1–5 nodes ([ADR 0007](docs/adr/0007-history-checking.md)) | [`TestSim`](internal/sim/sim_test.go), [`TestRegressions`](internal/sim/sim_test.go) |

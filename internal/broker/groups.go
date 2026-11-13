@@ -567,6 +567,10 @@ func (n *Node) heartbeat(req *wire.HeartbeatRequest) *wire.HeartbeatResponse {
 		return &wire.HeartbeatResponse{ErrorCode: wire.ErrIllegalGeneration}
 	}
 	n.touch(sg, m)
+	if sg.round == nil && !sg.proposing && n.faults.inject(FaultRebalance) {
+		n.log.Info("fault injected", "kind", FaultRebalance, "group", req.GroupID, "fault", n.faults.count)
+		n.startRound(sg, nil)
+	}
 	if sg.round != nil || sg.proposing {
 		return &wire.HeartbeatResponse{ErrorCode: wire.ErrRebalanceInProgress}
 	}

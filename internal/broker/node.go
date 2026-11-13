@@ -92,6 +92,9 @@ type Config struct {
 	MaxGroupSize int
 	// Logger receives structured logs. Default: discard.
 	Logger *slog.Logger
+	// Faults are injected into client answers on purpose, to test
+	// applications (faults.go). The zero value injects none.
+	Faults Faults
 
 	// UnsafeAckBeforeSync breaks the commit rule on purpose: under
 	// SyncAlways, commands count as durable here when appended, not when
@@ -246,6 +249,7 @@ type Node struct {
 	// stopping is set by OnStop: the node is handing over and will exit.
 	stopping bool
 	stats    counters // see Metrics
+	faults   faulter  // injected faults; see Config.Faults
 }
 
 // New returns a node that will use the given clock, network, disk and
@@ -256,6 +260,7 @@ func New(cfg Config, clock sys.Clock, net sys.Network, disk sys.Disk, rand sys.R
 		cfg: cfg, clock: clock, net: net, disk: disk, rand: rand, log: cfg.Logger,
 		trimmedAt: -1, conns: map[sys.ConnID]*conn{}, nextTimer: firstFreeTimer,
 		timers: map[sys.TimerID]func(){}, groups: map[string]*softGroup{},
+		faults: faulter{cfg: cfg.Faults, state: cfg.Faults.Seed},
 	}
 	n.adopt(newState())
 	return n
@@ -841,15 +846,20 @@ func (n *Node) dispatch(c *conn, frame []byte) {
 		n.drop(c, fmt.Sprintf("malformed request body: key %d version %d", h.Key, h.Version))
 		return
 	}
+	var resp wire.Message
 	if !n.canRead() {
-		if resp := refusal(req); resp != nil {
-			if p, ok := req.(*wire.ProduceRequest); ok && p.Acks == 0 {
-				n.finish(c) // the client asked for no answer, and gets none
-			} else {
-				n.respond(c, h, resp)
-			}
-			return
+		resp = refusal(req)
+	} else if f := notLeaderFault(req); f != nil && n.faults.inject(FaultNotLeader) {
+		n.log.Info("fault injected", "kind", FaultNotLeader, "key", h.Key, "fault", n.faults.count)
+		resp = f
+	}
+	if resp != nil {
+		if p, ok := req.(*wire.ProduceRequest); ok && p.Acks == 0 {
+			n.finish(c) // the client asked for no answer, and gets none
+		} else {
+			n.respond(c, h, resp)
 		}
+		return
 	}
 	handle()
 }

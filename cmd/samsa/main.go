@@ -5,6 +5,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -44,10 +45,12 @@ func versionString() string {
 }
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "check" {
-		ok, err := runCheck(os.Args[2:], os.Stdout)
+	if len(os.Args) > 1 && (os.Args[1] == "check" || os.Args[1] == "verdict") {
+		sub := map[string]func([]string, io.Writer) (bool, error){"check": runCheck, "verdict": runVerdict}[os.Args[1]]
+		ok, err := sub(os.Args[2:], os.Stdout)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "samsa check:", err)
+			fmt.Fprintf(os.Stderr, "samsa %s: %v\n", os.Args[1], err)
+			os.Exit(2)
 		}
 		if !ok {
 			os.Exit(1)
@@ -72,6 +75,7 @@ func run() error {
 	producerExpiry := flag.Duration("producer-expiry", 24*time.Hour, "forget an idempotent producer after it writes nothing for this long (negative: never)")
 	logLevel := flag.String("log-level", "info", "debug, info, warn or error")
 	metricsListen := flag.String("metrics-listen", "", "address to serve /metrics, /healthz and /readyz on over HTTP (default: none)")
+	faultsSpec := flag.String("faults", "", "inject Kafka-level faults to test applications: seed=N[,rate=R][,kinds=lostack+notleader+rebalance] (see docs/guides/testing-applications.md)")
 	configFile := flag.String("config", "", "file of key = value lines, one per flag; flags on the command line win")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
@@ -114,11 +118,21 @@ func run() error {
 		return fmt.Errorf("-advertise: %w", err)
 	}
 
+	var faults broker.Faults
+	if *faultsSpec != "" {
+		if faults, err = broker.ParseFaults(*faultsSpec); err != nil {
+			return fmt.Errorf("-faults: %w", err)
+		}
+	}
+
 	disk, err := realsys.OpenDisk(*dataDir)
 	if err != nil {
 		return err
 	}
 	defer disk.Close() //nolint:errcheck // exiting
+	if err := recordFaults(*dataDir, faults); err != nil {
+		return err
+	}
 
 	loop := realsys.NewLoop(ln, 0)
 	var peers []broker.Peer
@@ -144,6 +158,7 @@ func run() error {
 	cfg := broker.Config{
 		NodeID: int32(*nodeID), Host: host, Port: int32(port), Peers: peers,
 		Sync: policy, SyncInterval: *syncInterval, Logger: logger, RetentionBytes: *retention, ProducerExpiry: *producerExpiry,
+		Faults: faults,
 	}
 	if unsafeConfig != nil {
 		on, err := unsafeConfig(&cfg)
@@ -153,6 +168,9 @@ func run() error {
 		if on != "" {
 			logger.Warn("deliberate bugs switched on: never run this in production", "unsafe", on)
 		}
+	}
+	if faults.Rate > 0 {
+		logger.Warn("injecting faults on purpose: never run this in production", "faults", faults.String())
 	}
 	node := broker.New(cfg, loop, loop, disk, realsys.Random{})
 
