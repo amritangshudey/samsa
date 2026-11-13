@@ -224,14 +224,18 @@ func count(xs []string, x string) (n int) {
 func TestBrokerOverTCP(t *testing.T) {
 	dir := t.TempDir()
 	run := func() (string, func() error) {
-		return startLoop(t, 0, func(l *Loop) sys.Handler {
-			disk, err := OpenDisk(dir)
-			if err != nil {
+		var disk *Disk
+		addr, stop := startLoop(t, 0, func(l *Loop) sys.Handler {
+			var err error
+			if disk, err = OpenDisk(dir); err != nil {
 				t.Fatal(err)
 			}
-			t.Cleanup(func() { disk.Close() })
 			return broker.New(broker.Config{NodeID: 1, Host: "127.0.0.1", Port: 1}, l, l, disk, Random{})
 		})
+		// The restart reopens dir, so the lock must go when the node stops.
+		stopAndClose := func() error { return errors.Join(stop(), disk.Close()) }
+		t.Cleanup(func() { disk.Close() })
+		return addr, stopAndClose
 	}
 	var corr int32
 	call := func(c net.Conn, key, version int16, req, resp wire.Message) {

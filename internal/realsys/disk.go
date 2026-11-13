@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"sort"
+	"syscall"
 
 	"github.com/amritangshudey/samsa/internal/sys"
 )
@@ -18,22 +20,42 @@ import (
 // Every path is resolved inside that directory by os.Root, so no name can
 // reach outside it. Sync is os.File.Sync, which on macOS issues F_FULLFSYNC
 // (plain fsync there does not force the drive to flush).
-type Disk struct{ root *os.Root }
+type Disk struct {
+	root *os.Root
+	lock *os.File // holds an exclusive flock on LOCK while the Disk is open
+}
 
-// OpenDisk returns a Disk rooted at dir, creating dir if needed.
+// ErrInUse is returned by OpenDisk for a directory another process holds.
+var ErrInUse = errors.New("data directory is in use by another process")
+
+// OpenDisk returns a Disk rooted at dir, creating dir if needed. It takes
+// an exclusive lock on dir/LOCK, so that two processes never share a data
+// directory; the lock goes with the process, however it ends.
 func OpenDisk(dir string) (*Disk, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create data directory: %w", err)
 	}
+	lock, err := os.OpenFile(filepath.Join(dir, "LOCK"), os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("open lock file: %w", err)
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		lock.Close() //nolint:errcheck // already failing
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, fmt.Errorf("%s: %w", dir, ErrInUse)
+		}
+		return nil, fmt.Errorf("lock data directory: %w", err)
+	}
 	root, err := os.OpenRoot(dir)
 	if err != nil {
+		lock.Close() //nolint:errcheck // already failing
 		return nil, fmt.Errorf("open data directory: %w", err)
 	}
-	return &Disk{root: root}, nil
+	return &Disk{root: root, lock: lock}, nil
 }
 
-// Close releases the data directory.
-func (d *Disk) Close() error { return d.root.Close() }
+// Close releases the data directory and its lock.
+func (d *Disk) Close() error { return errors.Join(d.root.Close(), d.lock.Close()) }
 
 // notExist makes a missing-file error also match sys.ErrNotExist.
 func notExist(err error) error {
