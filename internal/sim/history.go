@@ -89,6 +89,7 @@ type Model struct {
 	topics    map[string]*topicModel
 	finalPass int
 	trimming  bool
+	rebatched bool
 	groups    groupModel
 }
 
@@ -289,6 +290,12 @@ type Fetch struct {
 // may raise it, and nothing may lower it (docs/design/a1-snapshots.md, 3.4).
 func (m *Model) Start(tp TP) int64 { return m.part(tp).start }
 
+// Rebatched tells the model that its clients form their own batches, as
+// a real client does (docs/design/a4-chaos.md): records registered one by
+// one may be read back several to a batch, in any mix of ids. Each record
+// is then still checked for where it sits, but not the batch's shape.
+func (m *Model) Rebatched() { m.rebatched = true }
+
 // Trimming tells the model the broker may delete old records. Without a
 // log start in the answer (Fetch below v5), an out-of-range answer below
 // the end is then believed. shortcut: unchecked for those versions.
@@ -388,7 +395,7 @@ func (m *Model) observe(tp TP, base int64, records []wire.Record) error {
 			return fmt.Errorf("I4: %v offset %d holds a record nobody sent, or a damaged one", tp, base+int64(i))
 		}
 		r := &m.recs[id]
-		if i == 0 {
+		if i == 0 && !m.rebatched {
 			first = id
 			if r.first != id || r.n != len(records) {
 				return fmt.Errorf("I4: %v offset %d: batch of %d starting at record %d was sent as a batch of %d starting at record %d",
@@ -396,7 +403,7 @@ func (m *Model) observe(tp TP, base int64, records []wire.Record) error {
 			}
 		}
 		switch {
-		case id != first+uint64(i):
+		case !m.rebatched && id != first+uint64(i):
 			return fmt.Errorf("I4: %v offset %d: record %d is out of place in its batch", tp, base+int64(i), id)
 		case r.tp != tp:
 			return fmt.Errorf("I4: record %d was sent to %v but read from %v", id, r.tp, tp)

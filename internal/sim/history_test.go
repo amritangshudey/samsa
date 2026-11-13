@@ -239,3 +239,31 @@ func TestModel(t *testing.T) {
 		})
 	}
 }
+
+// A real client's batch mixes records registered one by one: Rebatched
+// accepts it, and still places each record.
+func TestRebatched(t *testing.T) {
+	tp := TP{"t", 0}
+	batch := func(ids ...uint64) []byte {
+		var recs []wire.Record
+		for _, id := range ids {
+			recs = append(recs, wire.Record{Value: Value(id)})
+		}
+		return wire.EncodeBatch(recs)
+	}
+	for _, rebatched := range []bool{false, true} {
+		m := NewModel(true)
+		if rebatched {
+			m.Rebatched()
+		}
+		m.TopicAttempted("t", 1)
+		m.TopicCreated("t", 0)
+		a, b := m.Send(tp, 1), m.Send(TP{"t", 1}, 1)
+		c := m.Send(tp, 1)
+		_, _ = b, m.Acked(a, 1, 0, 0)
+		_, err := m.Fetched(Fetch{TP: tp, Known: true, Floor: m.Floor(tp), HW: 2, LogStart: -1, MustProgress: true, Records: batch(a, c)})
+		if (err == nil) != rebatched {
+			t.Fatalf("rebatched=%v: %v", rebatched, err)
+		}
+	}
+}
