@@ -191,3 +191,8 @@ file, the same on every node:
    step that the simulator checks. Authentication is not in the
    simulator. Its negative cases are explicit tests against three real
    clients, which is the stronger evidence here.
+9. **CI found two seeds failing S6** (1946, 2496) once the seeds moved.
+   Both were the monitor, not the broker: a leader of an older term,
+   elected by a late vote answer, while a newer leader held its lease.
+   Raft allows that; such a leader cannot commit or lease. S6 now compares
+   terms. `docs/BUGS.md` M10.

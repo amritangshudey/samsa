@@ -357,3 +357,22 @@ would happen against Kafka too (not tested against Kafka).
   have seen). Unit cases in `history_test.go`.
 - **Lesson:** the same as M1 and M3. Every answer is judged against what
   was known when the request was sent, never when it returned.
+
+### M10. S6 condemned a stale leader of an older term (C5)
+
+- **Seeds:** 1946 and 2496 (CI, PR 22), after the new SASL APIs moved
+  every seed.
+- **Reported as:** S6, "node 1 became leader of term 19 while node 2 held
+  a lease in term 20".
+- **Root cause:** node 1 became a candidate in term 19 and node 3 voted
+  for it. Node 2 then won term 20, with node 3's vote, and took a lease.
+  Node 3's term-19 vote answer reached node 1 late, and node 1 became
+  leader of term 19. That is legal Raft: a majority is already past term
+  19, so node 1 can neither commit nor gain a lease, and steps down at the
+  first answer it gets. The monitor treated any new leader under a live
+  lease as a violation.
+- **Fix:** S6 fails only when the new leader's term is newer than the
+  lease holder's. Two leaders of the same term remain S1. The mutation
+  suite still catches `UnsafeNoLease`; 3000 seeds pass.
+- **Lesson:** the same as M1. Late messages make stale states legal; the
+  invariant must say which order of terms it forbids.

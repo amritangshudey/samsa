@@ -21,8 +21,10 @@ import (
 //	S5  a node's term never decreases and a vote it gave in a term never
 //	    changes, not even across restarts; its commit index never
 //	    decreases while it runs.
-//	S6  no node becomes leader while another holds a lease (ADR 0013):
-//	    the guarantee that lets a leader answer reads on its own.
+//	S6  no node becomes leader of a newer term while another holds a lease
+//	    (ADR 0013): the guarantee that lets a leader answer reads on its
+//	    own. A stale leader of an older term may still appear (late vote
+//	    answers); it can neither commit nor lease (BUGS.md M10).
 
 // monitor runs after every handler call that leaves inc alive.
 func (w *world) monitor(inc *incarnation) {
@@ -57,7 +59,11 @@ func (w *world) monitor(inc *incarnation) {
 			w.stats.Leaders++
 			w.tl.newLeader(nd.id, term, w.now)
 			for _, o := range w.nodes {
-				if o != nd && o.inc != nil && !o.inc.dead && o.inc.n.Raft() != nil && o.inc.n.Raft().Lease() {
+				if o != nd && o.inc != nil && !o.inc.dead && o.inc.n.Raft() != nil && o.inc.n.Raft().Lease() &&
+					// A leader of an older term, elected by vote answers that arrived
+					// late, cannot commit or hold a lease: a majority has moved past
+					// its term. Only a newer term may not start under a live lease.
+					o.inc.n.Raft().Term() < term {
 					w.fail("S6: node %d became leader of term %d while node %d held a lease in term %d", nd.id, term, o.id, o.inc.n.Raft().Term())
 					return
 				}
