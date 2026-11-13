@@ -72,6 +72,14 @@ kills at once.
   `samsa_raft_log_start`, `samsa_raft_last_index`,
   `samsa_raft_snapshot_index`, `samsa_topics`, `samsa_partitions`,
   `samsa_groups`, `samsa_faults_injected_total`.
+- **TLS and SASL.** `-tls-cert c.pem -tls-key k.pem` puts the client
+  listener on TLS (`-tls-client-ca ca.pem` also requires client
+  certificates). `-peer-tls-cert`, `-peer-tls-key` and `-peer-tls-ca` make
+  the nodes talk mutual TLS. `-sasl-mechanisms SCRAM-SHA-512,PLAIN
+  -sasl-users users` requires a login. Create the users file with
+  `samsa user add -file users -name alice` (the password is read on stdin;
+  only SCRAM credentials are stored, never the password). Changing users
+  needs a restart. Details and limits: [docs/design/c5-tls-sasl.md](docs/design/c5-tls-sasl.md).
 - **Testing your application under faults.** `-faults seed=42` makes the
   broker lose produce acknowledgements, refuse requests as a non-leader
   and force rebalances, from a seed. `samsa verdict -data DIR -in T -out
@@ -108,6 +116,7 @@ unmodified client library or tool, against the built binary, over TCP.
 | Config file, Prometheus metrics, `/healthz`, `/readyz`; `samsa check` passes clean data and reports a torn tail, a flipped byte, a cut snapshot and a corrupt hard state; a locked data directory | [`TestOperations`](integration/ops_test.go), [`TestCheckFindsCorruption`](internal/broker/check_test.go), [`TestLoadConfig`](cmd/samsa/main_test.go) |
 | Three real processes under SIGKILL, graceful restarts, partitions, one-way cuts, slow links and connection resets, every franz-go answer judged by the simulator's own checker; a build with stale reads switched on is caught, and the same scenario passes on the real build | [`TestChaos`](integration/chaos_test.go), [`TestChaosCatchesBrokenBuild`](integration/chaos_test.go) |
 | An application that commits before it processes is reported as losing records under forced rebalances, with the seed; the same application committing after processing passes under all three fault kinds | [`TestVerdictCatchesCommitBeforeProcess`](integration/apps_test.go), [`TestJudge`](internal/broker/verdict_test.go), [`TestFaultLostAck`](internal/broker/faults_test.go) |
+| TLS for clients and between nodes; SCRAM-SHA-256, SCRAM-SHA-512 and PLAIN with franz-go, the Java client and kcat; wrong passwords, unknown users, plaintext, untrusted brokers and certificates from another CA refused | [`TestTLSAndSASL`](integration/security_test.go), [`TestTLSAndSASLOtherClients`](integration/security_test.go), [`TestPeerTLS`](integration/security_test.go), [`TestRFC7677Example`](internal/scram/scram_test.go) |
 | Replication with Raft; a three-process cluster survives two leader kills with no record lost | [`TestClusterSurvivesLeaderKill`](integration/cluster_test.go) |
 | Acknowledged writes survive power loss (fsync before ack, torn writes, failed fsyncs) | [`TestCrashRecoveryProperty`](internal/storage/crash_test.go), the simulator |
 | Every produce and fetch answer checked against an exact model of each partition, under crashes and partitions, 1–5 nodes ([ADR 0007](docs/adr/0007-history-checking.md)) | [`TestSim`](internal/sim/sim_test.go), [`TestRegressions`](internal/sim/sim_test.go) |

@@ -184,6 +184,16 @@ touches the node from another goroutine. `samsa check` runs the node's own
 recovery (`broker.Check`) on a disk wrapper that records writes instead
 of making them. `OpenDisk` holds a `flock` on the data directory's `LOCK`.
 
+**TLS and SASL** ([design](design/c5-tls-sasl.md),
+[ADR 0019](adr/0019-tls-and-sasl.md)). TLS is the I/O layer's: `cmd/samsa`
+wraps the client and peer listeners with `tls.NewListener`, and
+`Loop.PeerTLS` dials peers with mutual TLS; the core sees plain byte
+streams. SASL is the core's: each `conn` carries an `authState`; until it
+holds a user, dispatch accepts only ApiVersions, SaslHandshake and
+SaslAuthenticate and closes the connection on anything else. SCRAM is the
+pure package `internal/scram`; the node supplies nonces from `sys.Random`.
+Credentials come from a users file loaded at start.
+
 **Application faults** ([design](design/a5b-app-faults.md),
 [ADR 0018](adr/0018-application-faults.md)). `Config.Faults` gives the node
 a splitmix64 stream of its own (never `sys.Random`, so faults off changes
