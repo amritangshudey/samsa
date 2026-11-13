@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/amritangshudey/samsa/internal/scram"
 	"github.com/amritangshudey/samsa/internal/wire"
 )
 
@@ -11,8 +12,8 @@ import (
 // an older snapshot apart.
 // Version 2 adds the log start and each partition's start offset; version 3
 // each partition's idempotent producers; version 4 each producer's last
-// log index; version 5 the ACLs.
-const snapshotVersion = 5
+// log index; version 5 the ACLs; version 6 the SCRAM credentials.
+const snapshotVersion = 6
 
 // encode returns the whole state machine as bytes, for a Raft snapshot
 // (docs/design/a1-snapshots.md). Maps are walked in sorted order, so equal
@@ -92,6 +93,15 @@ func (s *state) encode() []byte {
 	w.ArrayLen(false, len(s.acls))
 	for _, a := range s.acls {
 		writeACL(&w, a)
+	}
+	users := sortedKeys(s.creds)
+	w.ArrayLen(false, len(users))
+	for _, user := range users {
+		w.String(false, user)
+		w.ArrayLen(false, len(s.creds[user]))
+		for _, c := range s.creds[user] {
+			w.String(false, c.String())
+		}
 	}
 	return w.B
 }
@@ -200,6 +210,23 @@ func decodeState(b []byte) (*state, error) {
 				bad = true
 			}
 			s.acls = append(s.acls, a)
+			return struct{}{}
+		})
+	}
+	if v >= 6 {
+		last := ""
+		wire.Array(r, false, func() struct{} {
+			user := r.String(false)
+			var cs []scram.Credential
+			wire.Array(r, false, func() struct{} {
+				c, err := scram.ParseCredential(r.String(false))
+				// one per mechanism, sorted, as apply keeps them
+				bad = bad || (r.Err() == nil && (err != nil || len(cs) > 0 && cs[len(cs)-1].Mechanism >= c.Mechanism))
+				cs = append(cs, c)
+				return struct{}{}
+			})
+			bad = bad || (r.Err() == nil && (len(cs) == 0 || len(s.creds) > 0 && user <= last))
+			s.creds[user], last = cs, user
 			return struct{}{}
 		})
 	}

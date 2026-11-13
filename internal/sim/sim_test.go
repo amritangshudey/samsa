@@ -267,6 +267,10 @@ type mutationCase struct {
 // keeping a deleted topic's offsets (UnsafeKeepOffsetsOnDelete). The
 // simulator never creates a topic again under a deleted one's name;
 // TestDeleteTopicForgetsEverything in internal/broker catches it.
+// Nor, reliably, keeping the lead after abandoning a transfer whose
+// TimeoutNow went out (raft.MutAbandonKeepsLeading, BUGS.md S8): one seed
+// in 2000 catches it, the one that found the bug, and any change to the
+// seeds would lose it. TestTimeoutNowAfterAbandon in internal/raft does.
 var mutations = []mutationCase{
 	{"grant a vote before it is on disk", func(c *broker.Config) { c.UnsafeRaft |= raft.MutVoteWithoutPersist }},
 	{"grant a vote comparing log length only", func(c *broker.Config) { c.UnsafeRaft |= raft.MutVoteByLength }},

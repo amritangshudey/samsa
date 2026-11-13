@@ -160,5 +160,6 @@ Blockers are written to `docs/QUESTIONS.md` as they arrive.
 | 5b Application fault testing | done (`docs/reports/a5b-app-faults.md`, guide `docs/guides/testing-applications.md`). Three of the section 2 fault kinds (lost ack, not leader, forced rebalance); session expiry, slow or empty fetches and retention cuts are open |
 | 6 Soak | harness merged (PR 21, `make soak`); the 24 h run started 2026-11-14 00:53 IST, results to follow |
 | 7 TLS and SASL | done (`docs/reports/c5-tls-sasl.md`). Credentials from a file (restart to change); replicated credentials (API 51) moved to item 8b |
-| 8 ACLs | done (`docs/reports/c8-acls.md`). ACL changes must reach the leader (no forwarding yet); certificate principals not supported |
-| 8b–17 | not started |
+| 8 ACLs | done (`docs/reports/c8-acls.md`). certificate principals not supported; forwarding added in 8b |
+| 8b Credentials and forwarding | done (`docs/reports/c8b-credentials-forwarding.md`). Found and fixed BUGS.md S8 in Raft leadership transfer. Forwarded ACL changes are authorized on the follower's applied state |
+| 9–17 | not started |

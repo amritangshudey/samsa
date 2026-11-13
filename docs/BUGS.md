@@ -146,6 +146,38 @@ for how much that is worth.
   only as a hang. AppendEntries has the same shape (each answer may send
   more) but stops when the follower catches up.
 
+### S8. A leader took its lease back while its TimeoutNow was still on the way (C8b)
+
+- **Seed:** 1219, on branch `credentials`, after the new SCRAM and quota
+  APIs moved every seed. Three nodes, 30% message drops, 10% duplicates.
+- **Reported as:** S6, "node 2 became leader of term 13 while node 1 held
+  a lease in term 12".
+- **Root cause:** node 1 was told to stop, so it began handing leadership
+  to node 2 and sent TimeoutNow (B3). Node 2 did not start an election
+  within an election timeout, so node 1 abandoned the transfer and served
+  again with a fresh lease, as the design said it should. Then the
+  TimeoutNow, or a copy of it, reached node 2. Node 2 started a transfer
+  election, which voters grant without the lease rule. Node 2 won while
+  node 1 still held its lease, so two nodes could answer reads at once.
+  The design's argument for skipping the lease rule ("the only leader it
+  could depose asked for it, and gave up its lease first") forgot that
+  the leader takes the lease back after abandoning a transfer, and that a
+  message can arrive any time later.
+- **Fix:** a leader that abandons a transfer after sending TimeoutNow
+  steps down instead of serving again. A late TimeoutNow then meets a
+  term with no lease. A newer term ignores it, because it is stale. If
+  TimeoutNow was never sent (the target never caught up), the leader still
+  serves again. `TestTimeoutNowAfterAbandon` delays a TimeoutNow past the
+  abandonment. It shows two overlapping leases with the new mutation
+  `MutAbandonKeepsLeading`, and none without it. The simulator's mutation
+  suite does not catch the switch reliably: one seed in 2000 does, 1219
+  itself, so the unit test is the guard (`sim_test.go`, the comment above
+  `mutations`).
+- **Lesson:** an argument about which messages can arrive must include
+  late and duplicate copies of the node's own earlier messages. "The only
+  leader it could depose asked for it" was true when the request was sent,
+  not when it arrived.
+
 ## Bugs found by real clients
 
 ### C1. Null record set in a fetch response broke librdkafka (Phase 2)

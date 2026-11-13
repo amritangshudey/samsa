@@ -115,6 +115,9 @@ const (
 	// MutTransferKeepsLease keeps the lease, and proposals, during a
 	// leadership transfer; the broker also keeps serving.
 	MutTransferKeepsLease
+	// MutAbandonKeepsLeading lets a leader whose TimeoutNow went out keep
+	// leading, lease included, when it abandons the transfer.
+	MutAbandonKeepsLeading
 )
 
 // ErrTransferring is returned by TransferLeadership when it cannot start.
@@ -462,8 +465,9 @@ func (r *Raft) handingOver() bool { return r.Transferring() && !r.mut(MutTransfe
 
 // TransferLeadership starts handing leadership to the follower to, or with
 // to = 0 to the most up-to-date one. The lease is void from now on. The
-// caller learns of the outcome through Role: if this node still leads an
-// election timeout later, the transfer was abandoned and it may serve again.
+// caller learns of the outcome through Role. An election timeout later the
+// transfer is abandoned: if TimeoutNow went out, this node steps down
+// (the message may still arrive); otherwise it serves again.
 func (r *Raft) TransferLeadership(to sys.NodeID) error {
 	switch {
 	case r.err != nil:
@@ -723,7 +727,15 @@ func (r *Raft) OnTimer(t Timer) {
 			return
 		}
 		if r.transferee != noVote && r.env.Now() >= r.transferUntil {
-			r.transferee = noVote // abandoned: serve again
+			if r.timeoutSent && !r.mut(MutAbandonKeepsLeading) {
+				// The TimeoutNow may still arrive, late or copied, and start a
+				// transfer election that ignores leases: stop leading rather
+				// than lease again (BUGS.md S8).
+				r.follow(r.hard.term)
+				r.leader = noVote
+				return
+			}
+			r.transferee = noVote // TimeoutNow never sent: serve again
 		}
 		r.broadcast(true) // also repairs a lost request or response
 		r.maybeTimeoutNow()
@@ -770,8 +782,9 @@ func (r *Raft) Step(from sys.NodeID, raw []byte) {
 	// their term: that is what makes the leader's read lease sound, and it
 	// keeps a node returning from a partition from deposing a working
 	// leader (the Raft thesis, section 4.2.3). A transfer vote is the
-	// exception: the only leader it could depose asked for it, and gave
-	// up its lease first (docs/design/b3-raft-hardening.md, 2.3).
+	// exception: the only leader it could depose asked for it, gave up
+	// its lease first, and never takes it back in that term
+	// (docs/design/b3-raft-hardening.md, 2.3; BUGS.md S8).
 	if m.typ == msgRequestVote && r.heardFromLeader() {
 		return
 	}

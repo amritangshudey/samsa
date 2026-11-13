@@ -320,7 +320,7 @@ func (n *Node) createACLs(c *conn, h wire.RequestHeader, req *wire.CreateAclsReq
 			res.ErrorCode, res.ErrorMessage = wire.ErrInvalidRequest, why
 		default:
 			add()
-			n.propose(encodeCreateACL(a), func(r result) {
+			n.proposeOrForward(encodeCreateACL(a), func(r result) {
 				res.ErrorCode = r.errCode
 				done()
 			})
@@ -344,7 +344,7 @@ func (n *Node) deleteACLs(c *conn, h wire.RequestHeader, req *wire.DeleteAclsReq
 			res.ErrorCode, res.ErrorMessage = wire.ErrInvalidRequest, "invalid filter"
 		default:
 			add()
-			n.propose(encodeDeleteACLs(f), func(r result) {
+			n.proposeOrForward(encodeDeleteACLs(f), func(r result) {
 				res.ErrorCode = r.errCode
 				for _, a := range r.acls {
 					res.Matching = append(res.Matching, wire.DeleteAclsMatch{ACL: a})

@@ -119,16 +119,20 @@ func refusal(req wire.Message) wire.Message {
 			resp.Topics = append(resp.Topics, tr)
 		}
 		return resp
-	case *wire.CreateAclsRequest:
-		resp := &wire.CreateAclsResponse{}
-		for range m.Creations {
-			resp.Results = append(resp.Results, wire.ACLResult{ErrorCode: wire.ErrNotController, ErrorMessage: "this node is not the leader"})
+	case *wire.AlterUserScramCredentialsRequest:
+		resp := &wire.AlterUserScramCredentialsResponse{}
+		seen := map[string]bool{}
+		for _, d := range m.Deletions {
+			if !seen[d.Name] {
+				seen[d.Name] = true
+				resp.Results = append(resp.Results, wire.UserResult{User: d.Name, ErrorCode: wire.ErrNotController, ErrorMessage: "this node is not the leader"})
+			}
 		}
-		return resp
-	case *wire.DeleteAclsRequest:
-		resp := &wire.DeleteAclsResponse{}
-		for range m.Filters {
-			resp.Results = append(resp.Results, wire.DeleteAclsResult{ACLResult: wire.ACLResult{ErrorCode: wire.ErrNotController, ErrorMessage: "this node is not the leader"}})
+		for _, u := range m.Upsertions {
+			if !seen[u.Name] {
+				seen[u.Name] = true
+				resp.Results = append(resp.Results, wire.UserResult{User: u.Name, ErrorCode: wire.ErrNotController, ErrorMessage: "this node is not the leader"})
+			}
 		}
 		return resp
 	case *wire.DescribeGroupsRequest:
@@ -139,7 +143,8 @@ func refusal(req wire.Message) wire.Message {
 		return resp
 	}
 	// APIVersions, Metadata, FindCoordinator, DescribeConfigs,
-	// DescribeCluster and DescribeAcls are answered by every node; ListGroups by every node,
+	// DescribeCluster and DescribeAcls are answered by every node, and
+	// CreateAcls and DeleteAcls forwarded to the leader (forward.go); ListGroups by every node,
 	// empty unless it serves.
 	return nil
 }

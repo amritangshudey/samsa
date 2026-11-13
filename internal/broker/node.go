@@ -248,6 +248,7 @@ type Node struct {
 	parked     []*parkedFetch // in arrival order
 	nextTimer  sys.TimerID
 	timers     map[sys.TimerID]func() // armed by after; see groups.go
+	forwards   map[uint64]*forward    // ACL changes sent to the leader, by tag; see forward.go
 	groups     map[string]*softGroup
 
 	// fatal is the first error after which the node cannot be trusted: a
@@ -271,7 +272,7 @@ func New(cfg Config, clock sys.Clock, net sys.Network, disk sys.Disk, rand sys.R
 	n := &Node{
 		cfg: cfg, clock: clock, net: net, disk: disk, rand: rand, log: cfg.Logger,
 		trimmedAt: -1, conns: map[sys.ConnID]*conn{}, nextTimer: firstFreeTimer,
-		timers: map[sys.TimerID]func(){}, groups: map[string]*softGroup{},
+		timers: map[sys.TimerID]func(){}, groups: map[string]*softGroup{}, forwards: map[uint64]*forward{},
 		faults: faulter{cfg: cfg.Faults, state: cfg.Faults.Seed},
 	}
 	if cfg.SASL != nil {
@@ -369,7 +370,11 @@ func (n *Node) OnStart() error {
 
 // OnPeerMessage implements sys.Handler.
 func (n *Node) OnPeerMessage(from sys.NodeID, msg []byte) error {
-	n.raft.Step(from, msg)
+	if len(msg) > 0 && msg[0] == brokerMsg {
+		n.onBrokerMessage(from, msg)
+	} else {
+		n.raft.Step(from, msg)
+	}
 	return n.settle()
 }
 
@@ -632,6 +637,9 @@ func (n *Node) advance() {
 		if w.done != nil {
 			w.done(res)
 		}
+		if cmd[0] == cmdForwarded && res.origin == n.cfg.NodeID {
+			n.completeForward(res.tag, res)
+		}
 	}
 	if len(n.waiters) == 0 {
 		n.waiters = nil // release the backing array
@@ -874,6 +882,15 @@ func (n *Node) dispatch(c *conn, frame []byte) {
 	case wire.KeyDeleteAcls:
 		m := &wire.DeleteAclsRequest{}
 		req, handle = m, func() { n.deleteACLs(c, h, m) }
+	case wire.KeyDescribeUserScramCredentials:
+		m := &wire.DescribeUserScramCredentialsRequest{}
+		req, handle = m, func() { n.respond(c, h, n.describeCredentials(c, m)) }
+	case wire.KeyAlterUserScramCredentials:
+		m := &wire.AlterUserScramCredentialsRequest{}
+		req, handle = m, func() { n.alterCredentials(c, h, m) }
+	case wire.KeyDescribeClientQuotas:
+		m := &wire.DescribeClientQuotasRequest{}
+		req, handle = m, func() { n.respond(c, h, n.describeQuotas(c)) }
 	default: // unreachable while wire.APIs and this switch agree
 		n.drop(c, fmt.Sprintf("no handler for key %d", h.Key))
 		return

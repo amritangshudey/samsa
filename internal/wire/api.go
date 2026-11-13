@@ -33,6 +33,13 @@ const (
 	KeyDescribeAcls int16 = 29
 	KeyCreateAcls   int16 = 30
 	KeyDeleteAcls   int16 = 31
+	// KeyDescribeUserScramCredentials and KeyAlterUserScramCredentials
+	// manage SASL users (C8b).
+	KeyDescribeUserScramCredentials int16 = 50
+	KeyAlterUserScramCredentials    int16 = 51
+	// KeyDescribeClientQuotas answers kafka-configs.sh --describe; Samsa
+	// has no quotas, so always with none (C8b).
+	KeyDescribeClientQuotas int16 = 48
 )
 
 // Kafka error codes used by the broker, from Errors.java.
@@ -77,6 +84,9 @@ const (
 	ErrSecurityDisabled            int16 = 54
 	ErrSaslAuthenticationFailed    int16 = 58
 	ErrInvalidRecord               int16 = 87
+	ErrResourceNotFound            int16 = 91
+	ErrDuplicateResource           int16 = 92
+	ErrUnacceptableCredential      int16 = 93
 	ErrUnknownTopicID              int16 = 100
 	ErrUnsupportedEndpointType     int16 = 115
 )
@@ -123,6 +133,9 @@ var APIs = []API{
 	{Key: KeyDescribeConfigs, Min: 1, Max: 4, AdvertisedMin: 1, FlexFrom: 4},
 	{Key: KeySaslAuthenticate, Min: 0, Max: 2, AdvertisedMin: 0, FlexFrom: 2},
 	{Key: KeyCreatePartitions, Min: 0, Max: 3, AdvertisedMin: 0, FlexFrom: 2},
+	{Key: KeyDescribeUserScramCredentials, Min: 0, Max: 0, AdvertisedMin: 0, FlexFrom: 0},
+	{Key: KeyAlterUserScramCredentials, Min: 0, Max: 0, AdvertisedMin: 0, FlexFrom: 0},
+	{Key: KeyDescribeClientQuotas, Min: 0, Max: 1, AdvertisedMin: 0, FlexFrom: 1},
 	{Key: KeyDescribeCluster, Min: 0, Max: 2, AdvertisedMin: 0, FlexFrom: 0},
 }
 

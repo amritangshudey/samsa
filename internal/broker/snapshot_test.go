@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/amritangshudey/samsa/internal/scram"
 	"github.com/amritangshudey/samsa/internal/wire"
 )
 
@@ -35,6 +36,9 @@ func sampleState(t *testing.T) *state {
 		encodeCreateACL(acl(resTopic, "a", patLiteral, "User:x", "*", opRead, permAllow)), // again: no change
 		encodeCreateACL(acl(resCluster, clusterName, patLiteral, "User:y", "*", opAlter, permAllow)),
 		encodeDeleteACLs(wire.ACLFilter{ResourceType: resAny, PatternType: patAny, Principal: &userY, Operation: opAny, Permission: permAny}),
+		encodeAlterCredentials(nil, []upsert{{"carol", cred(t, scram.SHA512, "c")}, {"carol", cred(t, scram.SHA256, "c")}, {"dave", cred(t, scram.SHA256, "d")}}),
+		encodeAlterCredentials([][2]string{{"dave", scram.SHA256}}, []upsert{{"carol", cred(t, scram.SHA256, "c2")}}),
+		encodeForwarded(2, 1<<63+5, encodeCreateACL(acl(resTopic, "b", patPrefixed, "User:z", "*", opWrite, permAllow))),
 	}
 	for i, cmd := range cmds {
 		if res, err := s.apply(int64(i), cmd); err != nil || res.errCode != 0 {
@@ -46,11 +50,41 @@ func sampleState(t *testing.T) *state {
 
 var userY = "User:y"
 
+func cred(t *testing.T, mech, password string) scram.Credential {
+	t.Helper()
+	c, err := scram.NewCredential(mech, password, []byte("salt"), scram.MinIterations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// Credentials: an upsert replaces the same mechanism, a delete removes one
+// mechanism and the user with its last; a forwarded command applies its
+// inner command and names its origin.
+func TestCredentialCommands(t *testing.T) {
+	s := sampleState(t)
+	if len(s.creds) != 1 || len(s.creds["carol"]) != 2 || s.creds["carol"][0].Mechanism != scram.SHA256 ||
+		!s.creds["carol"][0].CheckPassword("c2") || !s.creds["carol"][1].CheckPassword("c") {
+		t.Fatalf("credentials %+v", s.creds)
+	}
+	if len(s.acls) != 3 {
+		t.Fatalf("the forwarded ACL was not applied: %+v", s.acls)
+	}
+	res, err := s.apply(200, encodeForwarded(3, 77, encodeCreateACL(acl(resTopic, "q", patLiteral, "User:z", "*", opRead, permAllow))))
+	if err != nil || res.origin != 3 || res.tag != 77 {
+		t.Fatalf("forwarded result %+v, %v", res, err)
+	}
+	if _, err := s.apply(201, encodeForwarded(3, 78, encodeCreateTopic("x", 1))); err == nil {
+		t.Fatal("a forwarded command other than an ACL change was applied")
+	}
+}
+
 // ACLs are created once however often they are asked for, and a delete
 // returns what it removed.
 func TestACLCommands(t *testing.T) {
 	s := sampleState(t)
-	if len(s.acls) != 2 || s.acls[0].Principal != "User:x" || s.acls[1].ResourceType != resGroup {
+	if len(s.acls) != 3 || s.acls[0].Principal != "User:x" || s.acls[1].ResourceType != resGroup { // the third is forwarded
 		t.Fatalf("ACLs %+v", s.acls)
 	}
 	res, err := s.apply(100, encodeDeleteACLs(wire.ACLFilter{ResourceType: resTopic, PatternType: patMatch, ResourceName: new(string), Operation: opAny, Permission: permAny}))
@@ -59,7 +93,7 @@ func TestACLCommands(t *testing.T) {
 	}
 	a := "a"
 	res, _ = s.apply(101, encodeDeleteACLs(wire.ACLFilter{ResourceType: resTopic, PatternType: patMatch, ResourceName: &a, Operation: opAny, Permission: permAny}))
-	if len(res.acls) != 1 || len(s.acls) != 1 {
+	if len(res.acls) != 1 || len(s.acls) != 2 {
 		t.Fatalf("removed %+v, left %+v", res.acls, s.acls)
 	}
 	if _, err := s.apply(102, encodeCreateACL(acl(resTopic, "", patLiteral, "User:x", "*", opRead, permAllow))); err == nil {

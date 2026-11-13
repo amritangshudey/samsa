@@ -139,14 +139,17 @@ func TestLeadershipTransfer(t *testing.T) {
 	}
 }
 
-// A transfer to a dead follower is abandoned after an election timeout,
-// and the leader serves again; with MutTransferKeepsLease it never stopped.
+// A transfer to a dead follower that never caught up is abandoned after an
+// election timeout, and the leader serves again: no TimeoutNow went out.
+// With MutTransferKeepsLease it never stopped.
 func TestLeadershipTransferAbandoned(t *testing.T) {
 	c := newCluster(t, 3, nil)
 	c.startAll()
 	c.elect(1)
 	c.run(nil)
 	c.crash(3)
+	c.propose(1, "a") // node 3 misses it, so it never gets TimeoutNow
+	c.run(nil)
 	if err := c.r(1).TransferLeadership(3); err != nil {
 		t.Fatal(err)
 	}
@@ -170,5 +173,41 @@ func TestLeadershipTransferAbandoned(t *testing.T) {
 	}
 	if !m.r(1).Lease() {
 		t.Fatal("MutTransferKeepsLease gave up the lease: the switch does nothing")
+	}
+}
+
+// BUGS.md S8: a TimeoutNow that arrives after the transfer was abandoned
+// starts an election that ignores leases. The leader that sent it must not
+// hold a lease by then, so abandoning after TimeoutNow steps down.
+func TestTimeoutNowAfterAbandon(t *testing.T) {
+	for _, mutated := range []bool{false, true} {
+		c := newCluster(t, 3, func(cfg *Config) {
+			if mutated {
+				cfg.Unsafe |= MutAbandonKeepsLeading
+			}
+		})
+		c.startAll()
+		c.elect(1)
+		c.run(nil)
+		c.tick(10*time.Millisecond, nil)
+		if err := c.r(1).TransferLeadership(2); err != nil {
+			t.Fatal(err)
+		}
+		late := c.queue // the TimeoutNow, held back
+		c.queue = nil
+		if len(late) != 1 {
+			t.Fatalf("%d messages after TransferLeadership, want the TimeoutNow", len(late))
+		}
+		for range 5 {
+			c.tick(100*time.Millisecond, nil)
+		}
+		c.queue = append(c.queue, late...)
+		c.step(len(c.queue) - 1) // the TimeoutNow reaches node 2 at last
+		c.run(only(2, 3))        // node 1 has not heard yet: any overlap shows now
+		overlap := c.r(1).Lease() && c.r(2).Role() == Leader && c.r(2).Term() > c.r(1).Term()
+		if overlap != mutated {
+			t.Fatalf("mutated %v: node 1 leads %v with lease %v while node 2 leads %v in term %d",
+				mutated, c.r(1).Role() == Leader, c.r(1).Lease(), c.r(2).Role() == Leader, c.r(2).Term())
+		}
 	}
 }

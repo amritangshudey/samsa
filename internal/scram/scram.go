@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"hash"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -71,10 +72,28 @@ func NewCredential(mechanism, password string, salt []byte, iterations int) (Cre
 	if err != nil {
 		return Credential{}, err
 	}
+	return FromSalted(mechanism, salt, salted, iterations)
+}
+
+// FromSalted derives the credential from a salted password, as a client
+// sends it in AlterUserScramCredentials: StoredKey = H(HMAC(salted,
+// "Client Key")), ServerKey = HMAC(salted, "Server Key") (RFC 5802). The
+// salted password itself is not kept.
+func FromSalted(mechanism string, salt, salted []byte, iterations int) (Credential, error) {
+	h, err := hashFor(mechanism)
+	if err != nil {
+		return Credential{}, err
+	}
+	if iterations < MinIterations || iterations > MaxIterations {
+		return Credential{}, fmt.Errorf("iterations %d outside [%d, %d]", iterations, MinIterations, MaxIterations)
+	}
+	if len(salted) != h().Size() {
+		return Credential{}, fmt.Errorf("salted password of %d bytes, want %d", len(salted), h().Size())
+	}
 	clientKey := mac(h, salted, "Client Key")
 	stored := h()
 	stored.Write(clientKey)
-	return Credential{Mechanism: mechanism, Iterations: iterations, Salt: salt,
+	return Credential{Mechanism: mechanism, Iterations: iterations, Salt: slices.Clone(salt),
 		StoredKey: stored.Sum(nil), ServerKey: mac(h, salted, "Server Key")}, nil
 }
 

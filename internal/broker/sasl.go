@@ -120,13 +120,25 @@ func (n *Node) authenticatedAs(c *conn, user string) {
 
 func (n *Node) lookupCredential(mech string) func(string) (scram.Credential, bool) {
 	return func(user string) (scram.Credential, bool) {
-		for _, c := range n.cfg.SASL.Users[user] {
+		for _, c := range n.credentials(user) {
 			if c.Mechanism == mech {
 				return c, true
 			}
 		}
 		return scram.Credential{}, false
 	}
+}
+
+// credentials are a user's SCRAM credentials: from the -sasl-users file if
+// it names the user (the file owns its names), else the replicated ones
+// (docs/design/c8b-credentials-forwarding.md, section 2).
+func (n *Node) credentials(user string) []scram.Credential {
+	if n.cfg.SASL != nil {
+		if c, ok := n.cfg.SASL.Users[user]; ok {
+			return c
+		}
+	}
+	return n.st.creds[user]
 }
 
 // checkPlain verifies a PLAIN message: [authzid] NUL authcid NUL password
@@ -138,7 +150,7 @@ func (n *Node) checkPlain(msg []byte) (string, bool) {
 		return "", false
 	}
 	user, password := string(parts[1]), string(parts[2])
-	creds := n.cfg.SASL.Users[user]
+	creds := n.credentials(user)
 	if len(creds) == 0 {
 		scram.NewCredential(scram.SHA256, password, n.unknownKey, scram.MinIterations) //nolint:errcheck // only the cost matters: a real check costs one derivation too
 		return "", false
