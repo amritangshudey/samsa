@@ -50,6 +50,12 @@ Design: `docs/design/a3-sim-tools.md`.
 
 ## How to run it
 
+Note, 2026-11-14: adding the SASL APIs (item 7) changed the advertised API
+list, and with it every seed, because the simulated network draws once per
+delivered fragment. The seed-1 example below no longer fails. The same
+demonstration is now seed 4: 39 faults shrink to 1, rule S3
+(`TestShrink`).
+
     make shrink SEED=1 MUTATION="acknowledge entries before they are synced"
     make sim SEED=1 CALM=1 SKIP=1-11 MUTATION="acknowledge entries before they are synced" TIMELINE=t.html
     make sim SEEDS=1000          # the totals end with "never reached: ..."

@@ -22,13 +22,19 @@ func TestSkipNothingIsTheSameRun(t *testing.T) {
 	}
 }
 
-// Seed 1 with acks before sync shrinks to fewer faults, fails by the same
-// rule, and its replay arguments reproduce it.
+// shrinkSeed fails with acks before sync and shrinks well (39 faults to 1
+// in 2026-11). Any change to the bytes the simulated clients receive (the
+// advertised API list, say) moves every seed, because the network draws
+// once per delivered fragment: then pick another one that fails.
+const shrinkSeed = 4
+
+// The shrink seed with acks before sync shrinks to fewer faults, fails by
+// the same rule, and its replay arguments reproduce it.
 func TestShrink(t *testing.T) {
-	cfg := Config{Seed: 1, Mutate: ackBeforeSync}
+	cfg := Config{Seed: shrinkSeed, Mutate: ackBeforeSync}
 	orig := Run(cfg)
 	if orig.Err == nil {
-		t.Fatal("seed 1 no longer fails with acks before sync: pick another seed")
+		t.Fatalf("seed %d no longer fails with acks before sync: pick another seed", shrinkSeed)
 	}
 	s, err := Shrink(cfg, 100)
 	if err != nil {
@@ -44,7 +50,7 @@ func TestShrink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	replay := Run(Config{Seed: 1, Mutate: ackBeforeSync, Calm: s.Config.Calm, Skip: skip})
+	replay := Run(Config{Seed: shrinkSeed, Mutate: ackBeforeSync, Calm: s.Config.Calm, Skip: skip})
 	if replay.Err == nil || replay.TraceHash != s.Result.TraceHash {
 		t.Fatalf("the replay differs: %v, %08x vs %08x", replay.Err, replay.TraceHash, s.Result.TraceHash)
 	}

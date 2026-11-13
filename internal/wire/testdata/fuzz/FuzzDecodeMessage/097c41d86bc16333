@@ -1,0 +1,4 @@
+go test fuzz v1
+byte('-')
+int16(1)
+[]byte("00\x00\x00\xff\xff\xff\xff00000000")

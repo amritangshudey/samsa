@@ -92,6 +92,9 @@ type Config struct {
 	MaxGroupSize int
 	// Logger receives structured logs. Default: discard.
 	Logger *slog.Logger
+	// SASL, if set, makes every client connection authenticate first
+	// (sasl.go, ADR 0019).
+	SASL *SASL
 	// Faults are injected into client answers on purpose, to test
 	// applications (faults.go). The zero value injects none.
 	Faults Faults
@@ -198,6 +201,7 @@ type conn struct {
 	// holding for this connection. A connection has one request in
 	// progress at a time, so one slot is enough.
 	onClose func()
+	auth    authState // SASL progress; see sasl.go
 }
 
 // waiter is a proposed command that is not yet applied.
@@ -250,6 +254,10 @@ type Node struct {
 	stopping bool
 	stats    counters // see Metrics
 	faults   faulter  // injected faults; see Config.Faults
+	// unknownKey derives stand-in SCRAM credentials for users that do not
+	// exist (sasl.go). Drawn only when SASL is on, so that a node without
+	// it draws exactly what it always did.
+	unknownKey []byte
 }
 
 // New returns a node that will use the given clock, network, disk and
@@ -261,6 +269,11 @@ func New(cfg Config, clock sys.Clock, net sys.Network, disk sys.Disk, rand sys.R
 		trimmedAt: -1, conns: map[sys.ConnID]*conn{}, nextTimer: firstFreeTimer,
 		timers: map[sys.TimerID]func(){}, groups: map[string]*softGroup{},
 		faults: faulter{cfg: cfg.Faults, state: cfg.Faults.Seed},
+	}
+	if cfg.SASL != nil {
+		for range 4 {
+			n.unknownKey = binary.BigEndian.AppendUint64(n.unknownKey, rand.Uint64())
+		}
 	}
 	n.adopt(newState())
 	return n
@@ -767,6 +780,11 @@ func (n *Node) dispatch(c *conn, frame []byte) {
 	}
 
 	n.stats.requests[h.Key]++ // supported, so 0 <= key < 64
+	if !n.authenticated(c) && h.Key != wire.KeyAPIVersions && h.Key != wire.KeySaslHandshake && h.Key != wire.KeySaslAuthenticate {
+		// Kafka answers nothing here either: the client is not speaking SASL.
+		n.drop(c, fmt.Sprintf("request key %d before authentication", h.Key))
+		return
+	}
 
 	var req wire.Message
 	var handle func()
@@ -834,6 +852,12 @@ func (n *Node) dispatch(c *conn, frame []byte) {
 	case wire.KeyDescribeGroups:
 		m := &wire.DescribeGroupsRequest{}
 		req, handle = m, func() { n.respond(c, h, n.describeGroups(m)) }
+	case wire.KeySaslHandshake:
+		m := &wire.SaslHandshakeRequest{}
+		req, handle = m, func() { n.saslHandshake(c, h, m) }
+	case wire.KeySaslAuthenticate:
+		m := &wire.SaslAuthenticateRequest{}
+		req, handle = m, func() { n.saslAuthenticate(c, h, m) }
 	case wire.KeyDescribeCluster:
 		m := &wire.DescribeClusterRequest{}
 		req, handle = m, func() { n.respond(c, h, n.describeCluster(m)) }

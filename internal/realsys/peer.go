@@ -1,6 +1,7 @@
 package realsys
 
 import (
+	"crypto/tls"
 	"encoding/binary"
 	"io"
 	"net"
@@ -18,9 +19,10 @@ import (
 // be reached, when the connection breaks, or when maxPeerQueue messages are
 // already waiting.
 //
-// The id a connection announces is believed. Peers are assumed to be on a
-// network where only cluster nodes can connect; there is no authentication
-// and no encryption.
+// The id a connection announces is believed. Without PeerTLS, peers are
+// assumed to be on a network where only cluster nodes can connect. With it,
+// every peer connection is mutual TLS: only a holder of a certificate the
+// cluster's CA signed can connect, or be connected to (ADR 0019).
 const (
 	maxPeerMessage = 16 << 20 // a length above this closes the connection
 	maxPeerQueue   = 256
@@ -41,6 +43,12 @@ func (l *Loop) Peers(self sys.NodeID, ln net.Listener, addrs map[sys.NodeID]stri
 		}
 	}
 }
+
+// PeerTLS makes peer connections mutual TLS. cfg is used to dial: it must
+// hold this node's certificate and the cluster CA as RootCAs; the caller
+// wraps the peer listener with tls.NewListener and a config that requires
+// and verifies client certificates. It must be called before Run.
+func (l *Loop) PeerTLS(cfg *tls.Config) { l.peerTLS = cfg }
 
 // SendPeer implements sys.Network. It must be called from a handler.
 func (l *Loop) SendPeer(to sys.NodeID, msg []byte) {
@@ -101,7 +109,13 @@ func (l *Loop) sendPeer(addr string, ch chan []byte) {
 			}
 			lastDial = time.Now()
 			var err error
-			if c, err = net.DialTimeout("tcp", addr, peerIOTimeout); err != nil {
+			d := &net.Dialer{Timeout: peerIOTimeout} // with TLS, the handshake is within the timeout too
+			if l.peerTLS != nil {
+				c, err = tls.DialWithDialer(d, "tcp", addr, l.peerTLS)
+			} else {
+				c, err = d.Dial("tcp", addr)
+			}
+			if err != nil {
 				c = nil
 				continue
 			}

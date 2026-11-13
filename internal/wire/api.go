@@ -23,6 +23,10 @@ const (
 	KeyDescribeCluster  int16 = 60
 	KeyAPIVersions      int16 = 18
 	KeyCreateTopics     int16 = 19
+	// KeySaslHandshake and KeySaslAuthenticate authenticate a connection
+	// (ADR 0019).
+	KeySaslHandshake    int16 = 17
+	KeySaslAuthenticate int16 = 36
 	// KeyInitProducerID is how an idempotent producer gets its id.
 	KeyInitProducerID int16 = 22
 )
@@ -48,6 +52,8 @@ const (
 	ErrUnknownMemberID             int16 = 25
 	ErrInvalidSessionTimeout       int16 = 26
 	ErrRebalanceInProgress         int16 = 27
+	ErrUnsupportedSaslMechanism    int16 = 33
+	ErrIllegalSaslState            int16 = 34
 	ErrUnsupportedVersion          int16 = 35
 	ErrTopicAlreadyExists          int16 = 36
 	ErrInvalidPartitions           int16 = 37
@@ -60,6 +66,7 @@ const (
 	ErrInvalidProducerEpoch        int16 = 47
 	ErrMemberIDRequired            int16 = 79
 	ErrGroupMaxSizeReached         int16 = 81
+	ErrSaslAuthenticationFailed    int16 = 58
 	ErrInvalidRecord               int16 = 87
 	ErrUnknownTopicID              int16 = 100
 	ErrUnsupportedEndpointType     int16 = 115
@@ -95,12 +102,14 @@ var APIs = []API{
 	{Key: KeySyncGroup, Min: 0, Max: 3, AdvertisedMin: 0, FlexFrom: 4},
 	{Key: KeyDescribeGroups, Min: 0, Max: 6, AdvertisedMin: 0, FlexFrom: 5},
 	{Key: KeyListGroups, Min: 0, Max: 5, AdvertisedMin: 0, FlexFrom: 3},
+	{Key: KeySaslHandshake, Min: 1, Max: 1, AdvertisedMin: 1, FlexFrom: 2},
 	{Key: KeyAPIVersions, Min: 0, Max: 4, AdvertisedMin: 0, FlexFrom: 3},
 	{Key: KeyCreateTopics, Min: 2, Max: 4, AdvertisedMin: 2, FlexFrom: 5},
 	{Key: KeyDeleteTopics, Min: 1, Max: 6, AdvertisedMin: 1, FlexFrom: 4},
 	{Key: KeyDeleteRecords, Min: 0, Max: 2, AdvertisedMin: 0, FlexFrom: 2},
 	{Key: KeyInitProducerID, Min: 0, Max: 4, AdvertisedMin: 0, FlexFrom: 2},
 	{Key: KeyDescribeConfigs, Min: 1, Max: 4, AdvertisedMin: 1, FlexFrom: 4},
+	{Key: KeySaslAuthenticate, Min: 0, Max: 2, AdvertisedMin: 0, FlexFrom: 2},
 	{Key: KeyCreatePartitions, Min: 0, Max: 3, AdvertisedMin: 0, FlexFrom: 2},
 	{Key: KeyDescribeCluster, Min: 0, Max: 2, AdvertisedMin: 0, FlexFrom: 0},
 }

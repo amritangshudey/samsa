@@ -165,7 +165,7 @@ func createTopic(t *testing.T, cl *kgo.Client, topic string, partitions int32) {
 	t.Helper()
 	req := kmsg.NewPtrCreateTopicsRequest()
 	rt := kmsg.NewCreateTopicsRequestTopic()
-	rt.Topic, rt.NumPartitions, rt.ReplicationFactor = topic, partitions, 1
+	rt.Topic, rt.NumPartitions, rt.ReplicationFactor = topic, partitions, -1 // the broker default: every node
 	req.Topics = append(req.Topics, rt)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
