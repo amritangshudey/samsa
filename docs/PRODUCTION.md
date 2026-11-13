@@ -155,4 +155,5 @@ Blockers are written to `docs/QUESTIONS.md` as they arrive.
 | 2 Raft hardening | done (`docs/reports/b3-raft-hardening.md`) |
 | 3 Operations | part (a), admin APIs: done (`docs/reports/b4a-admin-apis.md`). Part (b), metrics, health, `samsa check`, config file: done (`docs/reports/b4b-operations.md`) |
 | 4 Black-box chaos test | done (`docs/reports/a4-chaos.md`) |
-| 5–17 | not started |
+| 5 Simulator tools | done (`docs/reports/a3-sim-tools.md`). Found: the simulator never lets an expired idempotent producer come back (expiry 15 s, runs 10 s); open, covered meanwhile by `TestJavaProducerAfterExpiry` |
+| 6–17 | not started |

@@ -52,6 +52,7 @@ type call struct {
 // flight on it, and a behaviour that issues requests.
 type client struct {
 	w        *world
+	lane     int // index in world.clients, for the timeline
 	rng      *simsys.Rand
 	step     func(*client) // issue one request
 	c        *conn
@@ -429,6 +430,7 @@ func (cl *client) produce() {
 				cl.check(m.Acked(sp.first, sp.n, p.BaseOffset, epoch))
 				if !m.stale(epoch) {
 					w.stats.RecordsAcked += sp.n
+					w.tl.mark(w.opts.nodes+cl.lane, w.now, "ack", "")
 				}
 			case sp.mustOK && !m.stale(epoch):
 				w.fail("the broker rejected a valid write to %v with code %d", sp.tp, p.ErrorCode)
@@ -512,6 +514,7 @@ func (cl *client) fetch(req *wire.FetchRequest, asked []Fetch, each func(f Fetch
 				return
 			}
 			w.stats.FetchesChecked++
+			w.tl.mark(w.opts.nodes+cl.lane, w.now, "read", "")
 			if next >= 0 {
 				w.stats.RecordsRead += int(next - max(f.Offset, 0))
 			}

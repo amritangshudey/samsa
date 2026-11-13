@@ -55,6 +55,7 @@ func (w *world) monitor(inc *incarnation) {
 		if _, ok := w.leaders[term]; !ok {
 			w.leaders[term] = nd.id
 			w.stats.Leaders++
+			w.tl.newLeader(nd.id, term, w.now)
 			for _, o := range w.nodes {
 				if o != nd && o.inc != nil && !o.inc.dead && o.inc.n.Raft() != nil && o.inc.n.Raft().Lease() {
 					w.fail("S6: node %d became leader of term %d while node %d held a lease in term %d", nd.id, term, o.id, o.inc.n.Raft().Term())

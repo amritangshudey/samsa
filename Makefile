@@ -13,13 +13,17 @@ KAFKA_DIST_SHA512 := f5ceba8a265ab6bb2d68362b1f6859a95e15d60ef92ba83b43fdf065b55
 KAFKA_DIST := integration/.cache/kafka_2.13-$(KAFKA_DIST_VERSION)
 
 SEEDS ?= 1000
+# Replaying one seed: SKIP=1-4,7 skips those faults, CALM=1 calms the
+# network, MUTATION="name" switches on a bug of the mutation suite, and
+# TIMELINE=file.html draws the run (docs/design/a3-sim-tools.md).
+REPLAY := $(if $(SKIP),-skip-faults=$(SKIP)) $(if $(CALM),-calm) $(if $(MUTATION),-mutation="$(MUTATION)") $(if $(TIMELINE),-timeline=$(abspath $(TIMELINE)))
 
 # Empty unless set: the binary then reports the commit Go stamped into it.
 VERSION ?=
 LDFLAGS := -ldflags "-X main.version=$(VERSION)"
 PLATFORMS := darwin/arm64 darwin/amd64 linux/arm64 linux/amd64
 
-.PHONY: build test race lint fuzz integration chaos sim bench release
+.PHONY: build test race lint fuzz integration chaos sim shrink bench release
 
 build:
 	CGO_ENABLED=0 go build -trimpath $(LDFLAGS) -o bin/samsa ./cmd/samsa
@@ -60,10 +64,15 @@ fuzz:
 # failing ones; `make sim SEED=1234` replays one seed with its event trace.
 sim:
 ifdef SEED
-	go test ./internal/sim -count=1 -v -run '^TestSim$$' -seed=$(SEED)
+	go test ./internal/sim -count=1 -v -run '^TestSim$$' -seed=$(SEED) $(REPLAY)
 else
 	go test ./internal/sim -count=1 -v -timeout 2h -run '^TestSim$$' -seeds=$(SEEDS)
 endif
+
+# Cut a failing seed down to the faults it needs: make shrink SEED=x
+# (with MUTATION="name" for a seed that fails only under a mutation).
+shrink:
+	go test ./internal/sim -count=1 -v -run '^TestShrinkSeed$$' -shrink=$(SEED) $(REPLAY)
 
 # Real clients (franz-go, kcat, the Java client) against the built binary.
 # Needs kcat and a JDK; set SAMSA_REQUIRE_CLIENTS=1 to fail when one is missing.

@@ -179,6 +179,8 @@ comparison with Kafka has been made.
 | `make race` | tests with the race detector |
 | `make fuzz` | every fuzz target for `FUZZTIME` each |
 | `make integration` | real clients against the binary (needs kcat and a JDK) |
+| `make shrink SEED=n` | cut a failing seed down to the faults it needs (`MUTATION="name"` for a mutation-suite seed); prints a replay command |
+| `make sim SEED=n TIMELINE=t.html` | the run as an HTML timeline; `SKIP=`, `CALM=1` and `MUTATION=` replay a shrunk schedule |
 | `make chaos` | the chaos test alone for `CHAOS_DURATION` (default 10m); `CHAOS_SEED=n` replays a scenario |
 | `make bench` | throughput and latency, about 15 minutes |
 | `make release VERSION=v0.1.0` | binaries for macOS and Linux, arm64 and amd64, with checksums |
