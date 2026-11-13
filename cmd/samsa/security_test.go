@@ -50,3 +50,19 @@ func TestUsersFile(t *testing.T) {
 		t.Fatal("an empty password was accepted")
 	}
 }
+
+func TestLoadAuthorization(t *testing.T) {
+	if a, err := loadAuthorization(false, "", false); a != nil || err != nil {
+		t.Fatalf("off: %+v, %v", a, err)
+	}
+	if _, err := loadAuthorization(false, "User:admin", false); err == nil {
+		t.Fatal("-super-users without -acl accepted")
+	}
+	if _, err := loadAuthorization(true, "admin", false); err == nil {
+		t.Fatal("a super user without a type accepted")
+	}
+	a, err := loadAuthorization(true, "User:admin, User:ops", true)
+	if err != nil || len(a.SuperUsers) != 2 || a.SuperUsers[1] != "User:ops" || !a.AllowIfNoACL {
+		t.Fatalf("%+v, %v", a, err)
+	}
+}
