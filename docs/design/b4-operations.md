@@ -197,6 +197,27 @@ only.
   unknown key is an error, not a warning: a typo in `sync` must not
   silently run with the default.
 
+**As built** (B4b), where it differs from the plan above:
+
+- The loop publishes the copy every 250 ms from a ticker on its own
+  goroutine (`Loop.Every`), not after each event: a copy per event costs
+  a 600-byte copy on every request for no reader, and the ticker also
+  proves the loop is responsive when no events arrive, which `/healthz`
+  needs.
+- Requests are counted by API key (label `api_key`), not "requests and
+  errors": most errors are per partition inside a response, and a
+  top-level error count would mean a different thing for each API.
+  Connections dropped for bad input are counted instead.
+- `samsa check` runs the node's own recovery code (`broker.Check`: Raft
+  start, snapshot decode, every entry read and replayed) on a disk wrapper
+  that records writes instead of making them. A write recovery would make
+  (cutting a torn tail, rebuilding an index, promoting an install) is
+  printed as "repair needed"; an error is printed as "corrupt". No second
+  reader of the formats exists to drift from the first.
+- There was no lock file. `realsys.OpenDisk` now takes an exclusive
+  `flock` on `LOCK` in the data directory, so a second node on the same
+  directory refuses to start, and so does `check` while a node runs.
+
 ## 6. What checks it
 
 - **Wire**: table tests per API and version against bytes built from the

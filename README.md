@@ -53,6 +53,33 @@ SIGTERM (Ctrl-C): a leader first hands leadership to a follower, so
 clients retry once instead of waiting for an election; a second signal
 kills at once.
 
+### Operating it
+
+- **Config file.** `-config samsa.conf` reads `key = value` lines, one per
+  flag (`sync = always`, `retention-bytes = 1073741824`), `#` comments.
+  Flags on the command line win. An unknown or repeated key stops the
+  start.
+- **Metrics and health.** `-metrics-listen 127.0.0.1:9100` serves, over
+  HTTP: `/metrics` in the Prometheus text format, `/healthz` (200 while the
+  event loop runs) and `/readyz` (200 when the node serves as leader, or
+  follows a known leader and has applied all it knows committed; else 503
+  and the reason). The metrics, published every 250 ms:
+  `samsa_requests_total{api_key}`, `samsa_received_bytes_total`,
+  `samsa_sent_bytes_total`, `samsa_connections_total`,
+  `samsa_connections_dropped_total`, `samsa_connections`,
+  `samsa_raft_leader`, `samsa_serving`, `samsa_ready`, `samsa_raft_term`,
+  `samsa_raft_committed_entries`, `samsa_raft_applied_entries`,
+  `samsa_raft_log_start`, `samsa_raft_last_index`,
+  `samsa_raft_snapshot_index`, `samsa_topics`, `samsa_partitions`,
+  `samsa_groups`.
+- **Checking a data directory.** `./bin/samsa check -data d1` reads a
+  stopped node's data as a start would and changes nothing: it verifies
+  every log entry's checksum, the hard state and the snapshot, and replays
+  the commands. Exit status 0 means a start would find nothing to repair;
+  otherwise it prints `corrupt: ...` or `repair needed: ...`. A data
+  directory is locked while a node holds it (`LOCK`), so a second node, or
+  a check, refuses it.
+
 ## What is supported
 
 Every row links to the test that shows it. "Real clients" means the
@@ -70,6 +97,7 @@ unmodified client library or tool, against the built binary, over TCP.
 | Graceful stop: SIGTERM to the leader hands over; a producer writing meanwhile sees no error, nothing lost or doubled | [`TestClusterGracefulStop`](integration/cluster_test.go), [`TestGracefulStopHandsOver`](internal/broker/cluster_test.go) |
 | A node returning from a partition does not depose the leader (PreVote); a leader cut off from its majority steps down (CheckQuorum) | [`TestReturningNodeDoesNotDepose`](internal/raft/hardening_test.go), [`TestCheckQuorumLetsTheMajorityElect`](internal/raft/hardening_test.go) |
 | Admin with the standard Kafka 4.4 CLI tools: `kafka-topics` (create, list, describe, alter partitions, delete), `kafka-configs --describe` (read-only), `kafka-delete-records`, `kafka-consumer-groups` (list, describe, state), `kafka-get-offsets`, `kafka-cluster cluster-id`, on a three-node cluster | [`TestKafkaCLI`](integration/cli_test.go), [`admin_test.go`](internal/broker/admin_test.go), the simulator (R1, D1) |
+| Config file, Prometheus metrics, `/healthz`, `/readyz`; `samsa check` passes clean data and reports a torn tail, a flipped byte, a cut snapshot and a corrupt hard state; a locked data directory | [`TestOperations`](integration/ops_test.go), [`TestCheckFindsCorruption`](internal/broker/check_test.go), [`TestLoadConfig`](cmd/samsa/main_test.go) |
 | Replication with Raft; a three-process cluster survives two leader kills with no record lost | [`TestClusterSurvivesLeaderKill`](integration/cluster_test.go) |
 | Acknowledged writes survive power loss (fsync before ack, torn writes, failed fsyncs) | [`TestCrashRecoveryProperty`](internal/storage/crash_test.go), the simulator |
 | Every produce and fetch answer checked against an exact model of each partition, under crashes and partitions, 1–5 nodes ([ADR 0007](docs/adr/0007-history-checking.md)) | [`TestSim`](internal/sim/sim_test.go), [`TestRegressions`](internal/sim/sim_test.go) |
