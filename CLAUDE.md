@@ -134,11 +134,11 @@ holds the interfaces; `internal/realsys` is the only impure package under
 (Kafka encoding), `raft` (consensus as a pure state machine; its log is
 the command log), `broker` (the node; `state.go` is the applied state
 machine and `snapshot.go` its encoding for snapshots, `groups.go` the group coordinator's soft state, `leader.go` what
-a non-leader answers, `sasl.go` authentication, `acl.go` the authorizer, `credentials.go` the SCRAM users API, `forward.go` forwarding ACL changes to the leader), `simsys` (simulated disk), `sim` (the simulator:
+a non-leader answers, `sasl.go` authentication, `acl.go` the authorizer, `membership.go` AddRaftVoter and RemoveRaftVoter, `credentials.go` the SCRAM users API, `forward.go` forwarding ACL changes to the leader), `simsys` (simulated disk), `sim` (the simulator:
 world, clients, the history checker in `history.go` and `groups.go`, and
 the Raft safety monitor in `monitor.go`, the peer network and partition
 scenarios in `network.go`; seeds that once failed are in
-`regressions.txt`). `realsys/peer.go` is the TCP transport between nodes.
+`regressions.txt`; `voters.go` adds and removes voters). `realsys/peer.go` is the TCP transport between nodes.
 `integration/` is a separate Go module so that client libraries never enter
 the broker's `go.mod`; it also holds the benchmark (`bench_test.go`) and
 the quick start's topic tool (`cmd/topic`). The code as built is described

@@ -2,9 +2,11 @@ package raft
 
 import (
 	"bytes"
+	"errors"
 	"flag"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/amritangshudey/samsa/internal/sys"
@@ -45,6 +47,14 @@ func randomRun(seed uint64, mutate func(*Config)) (installs int, err error) {
 				mutate(cfg)
 			}
 		})
+		// Membership mode: five nodes, of which three form the cluster and
+		// two join later; the leader adds and removes voters at random.
+		changes := seed/24%2 == 1
+		if changes {
+			c = newSeededCluster(nil, seed, 5, c.mutate)
+			c.boot = []sys.NodeID{1, 2, 3}
+			c.nodes[4].joining, c.nodes[5].joining = true, true
+		}
 		rng := c.rng
 		type seen struct {
 			term int64
@@ -173,8 +183,14 @@ func randomRun(seed uint64, mutate func(*Config)) (installs int, err error) {
 				n.r.Compact(n.r.Committed())
 			case r < 464: // hand leadership over
 				if n.r.Role() == Leader {
-					if err := n.r.TransferLeadership(0); err != nil {
+					if err := n.r.TransferLeadership(0); err != nil && !errors.Is(err, ErrTransferring) {
 						return fmt.Errorf("transfer from leader %d: %w", n.id, err)
+					}
+				}
+			case r < 476 && changes: // add or remove one voter
+				if n.r.Role() == Leader {
+					if err := randomChange(n.r, c.ids[rng.Intn(len(c.ids))]); err != nil {
+						return fmt.Errorf("change on leader %d: %w", n.id, err)
 					}
 				}
 			case len(c.queue) > 0:
@@ -236,11 +252,27 @@ func randomRun(seed uint64, mutate func(*Config)) (installs int, err error) {
 		if err := matching(); err != nil {
 			return err
 		}
-		last := c.r(c.ids[0]).LastIndex()
+		// Every voter converges; a node outside the configuration is no
+		// longer replicated to, so it may lag for ever.
+		var final []sys.NodeID
 		for _, id := range c.ids {
+			if c.r(id).Role() == Leader {
+				final = c.r(id).voters()
+			}
+		}
+		if final == nil {
+			var desc []string
+			for _, id := range c.ids {
+				r := c.r(id)
+				desc = append(desc, fmt.Sprintf("node %d: role %d term %d voters %v last %d (term %d) commit %d", id, r.Role(), r.Term(), r.voters(), r.LastIndex(), r.lastTerm(), r.Committed()))
+			}
+			return fmt.Errorf("after healing there is no leader:\n%s", strings.Join(desc, "\n"))
+		}
+		last := c.r(final[0]).LastIndex()
+		for _, id := range final {
 			if r := c.r(id); r.LastIndex() != last || r.Committed() != last+1 {
 				return fmt.Errorf("after healing node %d has last index %d and %d committed; node %d has last index %d",
-					id, r.LastIndex(), r.Committed(), c.ids[0], last)
+					id, r.LastIndex(), r.Committed(), final[0], last)
 			}
 		}
 		if len(committed) == 0 { // a crash-heavy seed commits little; none at all means healing failed
@@ -268,7 +300,10 @@ func TestRandomSchedules(t *testing.T) {
 }
 
 // Each deliberate bug must be caught by some schedule, or green runs of
-// TestRandomSchedules mean nothing.
+// TestRandomSchedules mean nothing. MutChangeBeforeCommit is not here: the
+// erratum's schedule needs an even cluster, competing changes and a lost
+// leader in one order, and 3000 seeds never made it;
+// TestErratumCounterexample plays it out step by step instead.
 func TestRandomSchedulesCatchBrokenRaft(t *testing.T) {
 	for name, mutate := range map[string]func(*Config){
 		"commit by counting replicas of any term": func(c *Config) { c.Unsafe |= MutCommitAnyTerm },
@@ -278,6 +313,7 @@ func TestRandomSchedulesCatchBrokenRaft(t *testing.T) {
 		"follower truncates on a stale message":   func(c *Config) { c.Unsafe |= MutTruncateOnStale },
 		"snapshot before the log is synced":       func(c *Config) { c.Unsafe |= MutSnapshotUnsynced },
 		"compact past the snapshot":               func(c *Config) { c.Unsafe |= MutTrimPastSnapshot },
+		"two membership changes at once":          func(c *Config) { c.Unsafe |= MutTwoChanges },
 	} {
 		caught := false
 		for seed := range uint64(3000) {
@@ -356,4 +392,31 @@ func FuzzStep(f *testing.F) {
 			}
 		}
 	})
+}
+
+// randomChange makes leader add id as a voter (as a learner first) or
+// remove it, keeping at least one voter. Refusals that only say "not now"
+// are expected; anything else is an error.
+func randomChange(leader *Raft, id sys.NodeID) error {
+	if leader.Transferring() || (id == leader.cfg.ID && !leader.isVoter(id)) {
+		return nil // no change while handing over; a leader cannot add itself
+	}
+	ms := slices.Clone(leader.Members())
+	if leader.isVoter(id) {
+		if len(ms) == 1 {
+			return nil
+		}
+		ms = slices.DeleteFunc(ms, func(m Member) bool { return m.ID == id })
+	} else {
+		if err := leader.AddLearner(id); err != nil {
+			return err
+		}
+		ms = append(ms, Member{ID: id, Info: []byte{byte(id)}})
+		slices.SortFunc(ms, func(a, b Member) int { return int(a.ID) - int(b.ID) })
+	}
+	_, err := leader.ChangeMembers(ms)
+	if errors.Is(err, ErrChangePending) || errors.Is(err, ErrNotCaughtUp) {
+		return nil
+	}
+	return err
 }

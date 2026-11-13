@@ -51,6 +51,7 @@ type call struct {
 // client is one simulated Kafka client: a connection, the requests in
 // flight on it, and a behaviour that issues requests.
 type client struct {
+	changing bool // a voter change is in flight (voters.go)
 	w        *world
 	lane     int // index in world.clients, for the timeline
 	rng      *simsys.Rand
@@ -321,7 +322,7 @@ func (cl *client) createTopic() {
 		m.TopicAttempted(name, t.parts)
 	}
 	epoch := m.Epoch()
-	req := &wire.CreateTopicsRequest{Topics: []wire.CreateTopic{{Name: name, NumPartitions: parts, ReplicationFactor: int16(len(cl.w.nodes))}}, TimeoutMs: 1000}
+	req := &wire.CreateTopicsRequest{Topics: []wire.CreateTopic{{Name: name, NumPartitions: parts, ReplicationFactor: cl.w.replication()}}, TimeoutMs: 1000}
 	resp := &wire.CreateTopicsResponse{}
 	cl.request(wire.KeyCreateTopics, v, req, resp, func(ok bool) {
 		if !ok {

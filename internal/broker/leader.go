@@ -18,7 +18,7 @@ func (n *Node) canRead() bool {
 // refuse the requests a client sends to a leader.
 func (n *Node) leader() (Peer, bool) {
 	if id, ok := n.raft.Leader(); ok && (int32(id) != n.cfg.NodeID || n.canRead()) {
-		for _, p := range n.cfg.Peers {
+		for _, p := range n.members() {
 			if p.ID == int32(id) {
 				return p, true
 			}

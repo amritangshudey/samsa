@@ -143,7 +143,7 @@ func (cl *client) doomed() {
 	switch a.phase {
 	case adminCreate:
 		m.TopicAttempted(doomedTopic, 1)
-		req := &wire.CreateTopicsRequest{Topics: []wire.CreateTopic{{Name: doomedTopic, NumPartitions: 1, ReplicationFactor: int16(len(w.nodes))}}, TimeoutMs: 1000}
+		req := &wire.CreateTopicsRequest{Topics: []wire.CreateTopic{{Name: doomedTopic, NumPartitions: 1, ReplicationFactor: w.replication()}}, TimeoutMs: 1000}
 		resp := &wire.CreateTopicsResponse{}
 		a.busy = true
 		c := cl.c

@@ -42,10 +42,15 @@ type Config struct {
 	NodeID int32
 	Host   string
 	Port   int32
-	// Peers lists every node of the cluster, this one included. The list
-	// is the same on every node and never changes. Default: this node
-	// alone.
+	// Peers lists the nodes that form a new cluster, this one included:
+	// the bootstrap configuration. Later changes are made with
+	// AddRaftVoter and RemoveRaftVoter and live in the log (design C1).
+	// Default: this node alone, unless Join.
 	Peers []Peer
+	// Join starts the node with no configuration: it waits to be added to
+	// an existing cluster. A node that joins must never use Peers, or a
+	// wiped disk could vote twice in a term (design C1, section 6).
+	Join bool
 	// ElectionTimeout, HeartbeatInterval and MaxAppendBytes tune Raft;
 	// see raft.Config.
 	ElectionTimeout   time.Duration
@@ -136,7 +141,7 @@ func (c Config) withDefaults() Config {
 	if c.Dir == "" {
 		c.Dir = "raft"
 	}
-	if len(c.Peers) == 0 {
+	if len(c.Peers) == 0 && !c.Join {
 		c.Peers = []Peer{{ID: c.NodeID, Host: c.Host, Port: c.Port}}
 	}
 	if c.SyncInterval <= 0 {
@@ -249,6 +254,7 @@ type Node struct {
 	nextTimer  sys.TimerID
 	timers     map[sys.TimerID]func() // armed by after; see groups.go
 	forwards   map[uint64]*forward    // ACL changes sent to the leader, by tag; see forward.go
+	change     *voterChange           // the voter change in progress; see membership.go
 	groups     map[string]*softGroup
 
 	// fatal is the first error after which the node cannot be trusted: a
@@ -324,9 +330,11 @@ func (n *Node) OnStart() error {
 	if n.cfg.NodeID < 0 || n.cfg.NodeID > maxNodeID {
 		return errNodeIDForProducers
 	}
-	peers := make([]sys.NodeID, len(n.cfg.Peers))
-	for i, p := range n.cfg.Peers {
-		peers[i] = sys.NodeID(p.ID)
+	var peers []sys.NodeID // none for a node that joins
+	for _, p := range n.cfg.Peers {
+		if !n.cfg.Join {
+			peers = append(peers, sys.NodeID(p.ID))
+		}
 	}
 	n.raft = raft.New(raft.Config{
 		ID: sys.NodeID(n.cfg.NodeID), Peers: peers, Dir: n.cfg.Dir,
@@ -458,7 +466,7 @@ func (n *Node) OnTimer(id sys.TimerID) error {
 // follower; any other node is stopped at once.
 func (n *Node) OnStop() error {
 	n.stopping = true
-	if n.fatal == nil && n.raft.Role() == raft.Leader && len(n.cfg.Peers) > 1 {
+	if n.fatal == nil && n.raft.Role() == raft.Leader && len(n.raft.Members()) > 1 {
 		if err := n.raft.TransferLeadership(0); err != nil {
 			n.log.Warn("leadership transfer not started", "err", err)
 		}
@@ -535,6 +543,7 @@ func (n *Node) lead() {
 // leader change ever matter.
 func (n *Node) stopServing() {
 	n.log.Info("no longer serving", "term", n.servingTerm, "waiters", len(n.waiters))
+	n.voterChangeLost()
 	n.waiters = nil // whether these commit is unknown; nobody is told they did
 	for _, f := range n.parked {
 		n.clock.CancelTimer(f.timer)
@@ -644,6 +653,7 @@ func (n *Node) advance() {
 	if len(n.waiters) == 0 {
 		n.waiters = nil // release the backing array
 	}
+	n.stepVoterChange()
 	n.raft.Compact(n.st.logStart) // effective only below a snapshot, unless UnsafeTrimEarly
 	// A Trim frees disk only once a snapshot after it exists: take one now.
 	trimPending := n.trimmedAt > n.raft.SnapshotIndex() && !n.cfg.UnsafeTrimEarly
@@ -791,7 +801,7 @@ func (n *Node) dispatch(c *conn, frame []byte) {
 		return
 	}
 
-	n.stats.requests[h.Key]++ // supported, so 0 <= key < 64
+	n.stats.requests[h.Key]++ // supported, so 0 <= key < 128 (TestMetrics checks)
 	if !n.authenticated(c) && h.Key != wire.KeyAPIVersions && h.Key != wire.KeySaslHandshake && h.Key != wire.KeySaslAuthenticate {
 		// Kafka answers nothing here either: the client is not speaking SASL.
 		n.drop(c, fmt.Sprintf("request key %d before authentication", h.Key))
@@ -888,6 +898,12 @@ func (n *Node) dispatch(c *conn, frame []byte) {
 	case wire.KeyAlterUserScramCredentials:
 		m := &wire.AlterUserScramCredentialsRequest{}
 		req, handle = m, func() { n.alterCredentials(c, h, m) }
+	case wire.KeyAddRaftVoter:
+		m := &wire.AddRaftVoterRequest{}
+		req, handle = m, func() { n.addVoter(c, h, m) }
+	case wire.KeyRemoveRaftVoter:
+		m := &wire.RemoveRaftVoterRequest{}
+		req, handle = m, func() { n.removeVoter(c, h, m) }
 	case wire.KeyDescribeClientQuotas:
 		m := &wire.DescribeClientQuotasRequest{}
 		req, handle = m, func() { n.respond(c, h, n.describeQuotas(c)) }

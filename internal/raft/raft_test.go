@@ -28,6 +28,9 @@ type tnode struct {
 	armed map[Timer]bool
 	arms  int // times the election timer was armed
 	down  bool
+	// joining marks a node added after the cluster formed: it starts with
+	// no configuration (membership_test.go).
+	joining bool
 	// armedAt is when each timer was last armed, for tests that move the
 	// clock themselves (hardening_test.go).
 	armedAt map[Timer]sys.Instant
@@ -59,7 +62,9 @@ type cluster struct {
 	nodes  map[sys.NodeID]*tnode
 	queue  []tmsg
 	mutate func(*Config)
-	now    sys.Instant // moved only by election timers; see passTime
+	// boot, if set, is the bootstrap configuration; otherwise every id.
+	boot []sys.NodeID
+	now  sys.Instant // moved only by election timers; see passTime
 	// manualFlush stops run from flushing nodes, for tests about what
 	// happens before entries are durable.
 	manualFlush bool
@@ -84,6 +89,12 @@ func newSeededCluster(t *testing.T, seed uint64, n int, mutate func(*Config)) *c
 func (c *cluster) open(id sys.NodeID) error {
 	n := c.nodes[id]
 	cfg := Config{ID: id, Peers: c.ids, Dir: "raft", Log: storage.Config{SegmentBytes: 512, MaxPayloadBytes: 128}}
+	if c.boot != nil {
+		cfg.Peers = c.boot
+	}
+	if n.joining {
+		cfg.Peers = nil
+	}
 	if c.mutate != nil {
 		c.mutate(&cfg)
 	}

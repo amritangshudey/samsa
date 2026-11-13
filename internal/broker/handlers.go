@@ -19,7 +19,7 @@ func (n *Node) metadata(c *conn, req *wire.MetadataRequest) *wire.MetadataRespon
 	leader, known := n.leader()
 	resp := &wire.MetadataResponse{ClusterID: n.cfg.ClusterID, ControllerID: leader.ID}
 	var all []int32
-	for _, p := range n.cfg.Peers {
+	for _, p := range n.members() {
 		resp.Brokers = append(resp.Brokers, wire.Broker{NodeID: p.ID, Host: p.Host, Port: p.Port})
 		all = append(all, p.ID)
 	}
@@ -97,7 +97,7 @@ func (n *Node) createTopics(c *conn, h wire.RequestHeader, req *wire.CreateTopic
 			res.ErrorCode, res.ErrorMessage = wire.ErrInvalidRequest, "manual replica assignment is not supported"
 		case parts < 1 || parts > n.cfg.MaxPartitions:
 			res.ErrorCode, res.ErrorMessage = wire.ErrInvalidPartitions, "partition count out of range"
-		case t.ReplicationFactor != -1 && int(t.ReplicationFactor) != len(n.cfg.Peers):
+		case t.ReplicationFactor != -1 && int(t.ReplicationFactor) != len(n.raft.Members()):
 			res.ErrorCode, res.ErrorMessage = wire.ErrInvalidReplicationFactor, "every node holds every partition: the replication factor is the cluster size"
 		case n.st.topics[t.Name] != nil:
 			res.ErrorCode, res.ErrorMessage = wire.ErrTopicAlreadyExists, "topic already exists"

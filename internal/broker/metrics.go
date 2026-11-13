@@ -9,8 +9,8 @@ import (
 // Metrics is a copy of a node's counters and gauges. The driver takes one
 // on the node's own goroutine and publishes it; nothing else reads the node.
 type Metrics struct {
-	// Requests counts decoded requests by API key (every key is below 64).
-	Requests [64]int64
+	// Requests counts decoded requests by API key (every key is below 128).
+	Requests [128]int64
 	// BytesIn and BytesOut count client bytes received and responses sent.
 	BytesIn, BytesOut int64
 	// Connections counts client connections accepted, Dropped those the
@@ -32,7 +32,7 @@ type Metrics struct {
 
 // counters are the node's running totals behind Metrics.
 type counters struct {
-	requests                        [64]int64
+	requests                        [128]int64
 	bytesIn, bytesOut, conns, drops int64
 }
 

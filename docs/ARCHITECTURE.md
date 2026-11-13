@@ -136,6 +136,17 @@ a broken peer. Three additions from [B3](design/b3-raft-hardening.md):
   exempt from the lease rule, because the only lease involved has just
   been given up.
 
+**Membership changes** (`raft/membership.go`, `broker/membership.go`,
+[ADR 0022](adr/0022-membership-changes.md)). One voter is added or removed
+at a time. A configuration is a log entry, in force as soon as it is in a
+node's log and dropped with it on truncation; the snapshot keeps the
+configuration as of its index. Every majority (elections, commitment, the
+lease, CheckQuorum) counts the voters in force. A new voter first catches
+up as a learner; a leader changes nothing before an entry of its own term
+commits (Ongaro's 2015 erratum). The Kafka APIs AddRaftVoter and
+RemoveRaftVoter request changes and answer once the entry commits; each
+voter's listeners travel in the configuration.
+
 On SIGTERM the real loop calls `OnStop` and runs until the node no longer
 leads, for at most 10 s. The simulator's `stop` fault does the same, and
 half the time cuts off everything sent to the stopping leader just after
