@@ -97,6 +97,15 @@ kills at once.
   exit status 0 (pass), 1 (fail) or 2 (cannot judge). How to use it from
   JUnit, Go and Python: [docs/guides/testing-applications.md](docs/guides/testing-applications.md).
   Never run `-faults` in production.
+- **Upgrading.** Restart one node at a time on the new release, with
+  SIGTERM, waiting for each to be back before the next. Old and new nodes
+  run together meanwhile. Features that need a newer format (ACL and
+  SCRAM user changes, adding or removing nodes) are refused with
+  UNSUPPORTED_VERSION until every node runs the new release. The cluster
+  then moves to the new format by itself, within a few seconds. From then
+  on an older release cannot read its data: downgrading is not supported.
+  Tested from v0.2.0 in CI; details:
+  [docs/design/g7-rolling-upgrade.md](docs/design/g7-rolling-upgrade.md).
 - **Adding and removing nodes.** Start the new node with `-join` and a
   `-peers` list naming itself and the current voters, then run
   `samsa node add -bootstrap 127.0.0.1:9092 -id 4 -client 127.0.0.1:9095

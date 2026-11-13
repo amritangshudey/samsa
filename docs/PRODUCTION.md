@@ -163,4 +163,5 @@ Blockers are written to `docs/QUESTIONS.md` as they arrive.
 | 8 ACLs | done (`docs/reports/c8-acls.md`). certificate principals not supported; forwarding added in 8b |
 | 8b Credentials and forwarding | done (`docs/reports/c8b-credentials-forwarding.md`). Found and fixed BUGS.md S8 in Raft leadership transfer. Forwarded ACL changes are authorized on the follower's applied state |
 | 9 Membership changes | part (a), Raft, broker APIs and simulator: done (`docs/reports/c1-membership-part-a.md`). "Two changes at once" caught by the random Raft schedules, the erratum by a replayed counterexample. Found and fixed BUGS.md S9. Part (b), the real binary: done (`docs/reports/c1-membership-part-b.md`): `-join`, peer addresses in the configuration, `samsa node add/remove`, three to four to three processes under a producer. Not built: DescribeQuorum, directory ids (ids must not be reused with a new disk) |
-| 10–17 | not started |
+| 10 Rolling upgrade | done (`docs/reports/g7-rolling-upgrade.md`): a cluster format level raised only once every voter supports it, and snapshots written in the oldest version that holds them. `TestRollingUpgrade` upgrades three processes from v0.2.0 under a producer, in CI. With the level raised early (`-unsafe raise-level-early`), the old nodes stop on an unknown command |
+| 11–17 | not started |
