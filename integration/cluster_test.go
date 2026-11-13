@@ -106,6 +106,21 @@ func (c *cluster) produce(cl *kgo.Client, topic, prefix string, n int, timeout t
 // write a batch again, and the test fails on any.
 func (c *cluster) readAll(topic string, n int, prefixes ...string) (duplicates int) {
 	c.t.Helper()
+	want := map[string]int{}
+	for _, p := range prefixes {
+		want[p] = n
+	}
+	return c.readAllPrefixes(topic, want)
+}
+
+// readAllPrefixes is readAll with a count per prefix: values
+// "<prefix>-<i>" for i < want[prefix].
+func (c *cluster) readAllPrefixes(topic string, want map[string]int) (duplicates int) {
+	c.t.Helper()
+	total, wanted := 0, 0
+	for _, n := range want {
+		total += n
+	}
 	cl := c.client(kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{topic: {
 		0: kgo.NewOffset().AtStart(), 1: kgo.NewOffset().AtStart(), 2: kgo.NewOffset().AtStart(),
 	}}))
@@ -115,10 +130,10 @@ func (c *cluster) readAll(topic string, n int, prefixes ...string) (duplicates i
 	lastIndex := map[string]int{} // prefix/partition -> last i seen first-time
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	for len(seen) < n*len(prefixes) {
+	for wanted < total {
 		fetches := cl.PollFetches(ctx)
 		if ctx.Err() != nil {
-			c.t.Fatalf("read %d of %d acknowledged records, then timed out: %v", len(seen), n*len(prefixes), fetches.Errors())
+			c.t.Fatalf("read %d of %d acknowledged records, then timed out: %v", wanted, total, fetches.Errors())
 		}
 		fetches.EachRecord(func(r *kgo.Record) {
 			if r.Offset != next[r.Partition] {
@@ -135,6 +150,9 @@ func (c *cluster) readAll(topic string, n int, prefixes ...string) (duplicates i
 			var i int
 			if _, err := fmt.Sscanf(strings.Replace(v, "-", " ", 1), "%s %d", &prefix, &i); err != nil {
 				c.t.Fatalf("unexpected value %q", v)
+			}
+			if i < want[prefix] {
+				wanted++
 			}
 			key := fmt.Sprintf("%s/%d", prefix, r.Partition)
 			if prev, ok := lastIndex[key]; ok && i < prev {

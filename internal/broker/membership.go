@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/amritangshudey/samsa/internal/raft"
@@ -93,6 +95,55 @@ func (n *Node) members() []Peer {
 	return out
 }
 
+// peerAddr tells the transport where node id listens for peers.
+func (n *Node) peerAddr(id int32, addr string) {
+	if addr != "" && id != n.cfg.NodeID {
+		n.net.PeerAddr(sys.NodeID(id), addr)
+	}
+}
+
+// peerListener returns the address of the PEER listener in ls, if any.
+func peerListener(ls []wire.Listener) string {
+	for _, l := range ls {
+		if l.Name == "PEER" {
+			return joinHostPort(l.Host, l.Port)
+		}
+	}
+	return ""
+}
+
+// joinHostPort and splitHostPort do what net's functions do, for a core
+// that may not import net (ADR 0003): an IPv6 host goes in brackets.
+func joinHostPort(host string, port uint16) string {
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	return host + ":" + strconv.Itoa(int(port))
+}
+
+func splitHostPort(addr string) (string, uint16, bool) {
+	i := strings.LastIndexByte(addr, ':')
+	if i < 1 {
+		return "", 0, false
+	}
+	host := strings.TrimSuffix(strings.TrimPrefix(addr[:i], "["), "]")
+	port, err := strconv.ParseUint(addr[i+1:], 10, 16)
+	return host, uint16(port), err == nil && port != 0 && host != ""
+}
+
+// peerAddrs tells the transport every voter's peer address whenever the
+// configuration in force may have changed.
+func (n *Node) peerAddrs() {
+	if i := n.raft.ConfIndex(); i != n.confIndex {
+		n.confIndex = i
+		for _, m := range n.raft.Members() {
+			if ls, err := decodeMemberInfo(m.Info); err == nil {
+				n.peerAddr(int32(m.ID), peerListener(ls))
+			}
+		}
+	}
+}
+
 // described returns the configuration in force with every voter's info
 // filled in: a bootstrap voter has none until the first change writes the
 // address this node knows for it.
@@ -101,7 +152,11 @@ func (n *Node) described() []raft.Member {
 	for i, m := range ms {
 		if len(m.Info) == 0 {
 			if p, ok := n.bootPeer(int32(m.ID)); ok {
-				ms[i].Info = encodeMemberInfo([]wire.Listener{{Name: "CLIENT", Host: p.Host, Port: uint16(p.Port)}})
+				ls := []wire.Listener{{Name: "CLIENT", Host: p.Host, Port: uint16(p.Port)}}
+				if host, port, ok := splitHostPort(p.PeerAddr); ok {
+					ls = append(ls, wire.Listener{Name: "PEER", Host: host, Port: port})
+				}
+				ms[i].Info = encodeMemberInfo(ls)
 			}
 		}
 	}
@@ -157,6 +212,7 @@ func (n *Node) addVoter(c *conn, h wire.RequestHeader, req *wire.AddRaftVoterReq
 		n.respond(c, h, voterChangeRefusal(wire.ErrDuplicateVoter, fmt.Sprintf("node %d is already a voter", id)))
 		return
 	}
+	n.peerAddr(req.VoterID, peerListener(req.Listeners))
 	if err := n.raft.AddLearner(id); err != nil {
 		n.respond(c, h, voterChangeRefusal(wire.ErrNotController, err.Error()))
 		return

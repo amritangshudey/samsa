@@ -47,8 +47,8 @@ func versionString() string {
 }
 
 func main() {
-	if len(os.Args) > 1 && (os.Args[1] == "check" || os.Args[1] == "verdict" || os.Args[1] == "user") {
-		sub := map[string]func([]string, io.Writer) (bool, error){"check": runCheck, "verdict": runVerdict,
+	if len(os.Args) > 1 && (os.Args[1] == "check" || os.Args[1] == "verdict" || os.Args[1] == "user" || os.Args[1] == "node") {
+		sub := map[string]func([]string, io.Writer) (bool, error){"check": runCheck, "verdict": runVerdict, "node": runNode,
 			"user": func(a []string, w io.Writer) (bool, error) { return runUser(a, os.Stdin, w) }}[os.Args[1]]
 		ok, err := sub(os.Args[2:], os.Stdout)
 		if err != nil {
@@ -74,6 +74,7 @@ func run() error {
 	syncInterval := flag.Duration("sync-interval", time.Second, "fsync period for -sync=interval")
 	nodeID := flag.Int("node-id", 1, "this node's id")
 	peersText := flag.String("peers", "", "every node of the cluster, this one included, as id=clientHost:port/peerHost:port,... (default: a cluster of this node alone)")
+	join := flag.Bool("join", false, "with -peers: join a running cluster instead of founding one; -peers names this node and the current voters, and `samsa node add` makes it a voter")
 	retention := flag.Int64("retention-bytes", 0, "keep about this many bytes of log, deleting the oldest segments (0: keep everything)")
 	producerExpiry := flag.Duration("producer-expiry", 24*time.Hour, "forget an idempotent producer after it writes nothing for this long (negative: never)")
 	logLevel := flag.String("log-level", "info", "debug, info, warn or error")
@@ -193,7 +194,7 @@ func run() error {
 			return fmt.Errorf("-peers: %w", err)
 		}
 		// A node that forgets acknowledged entries breaks Raft (ADR 0012).
-		if len(peers) > 1 && policy != broker.SyncAlways {
+		if (len(peers) > 1 || *join) && policy != broker.SyncAlways {
 			return fmt.Errorf("-sync=%s: a cluster of several nodes needs -sync=always", *syncMode)
 		}
 		own, ok := addrs[sys.NodeID(*nodeID)]
@@ -212,10 +213,12 @@ func run() error {
 			peerLn = tls.NewListener(peerLn, listenCfg)
 			loop.PeerTLS(dialCfg)
 		}
-		loop.Peers(sys.NodeID(*nodeID), peerLn, addrs)
+		loop.Peers(sys.NodeID(*nodeID), peerLn)
+	} else if *join {
+		return errors.New("-join needs -peers: the addresses of this node and the current voters")
 	}
 	cfg := broker.Config{
-		NodeID: int32(*nodeID), Host: host, Port: int32(port), Peers: peers,
+		NodeID: int32(*nodeID), Host: host, Port: int32(port), Peers: peers, Join: *join,
 		Sync: policy, SyncInterval: *syncInterval, Logger: logger, RetentionBytes: *retention, ProducerExpiry: *producerExpiry,
 		Faults: faults, SASL: sasl, Authorization: auth,
 	}
@@ -287,7 +290,7 @@ func parsePeers(text string) ([]broker.Peer, map[sys.NodeID]string, error) {
 		if _, dup := addrs[sys.NodeID(id)]; dup {
 			return nil, nil, fmt.Errorf("node %d appears twice", id)
 		}
-		peers = append(peers, broker.Peer{ID: int32(id), Host: host, Port: int32(port)})
+		peers = append(peers, broker.Peer{ID: int32(id), Host: host, Port: int32(port), PeerAddr: peer})
 		addrs[sys.NodeID(id)] = peer
 	}
 	return peers, addrs, nil

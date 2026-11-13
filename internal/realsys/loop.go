@@ -47,7 +47,10 @@ type Loop struct {
 	peerOut  map[sys.NodeID]chan []byte
 	peerMu   sync.Mutex
 	peerIn   map[net.Conn]struct{} // inbound peer connections, closed at shutdown
-	peerAddr map[sys.NodeID]string
+	peerAddr map[sys.NodeID]string // guarded by peerMu: senders and readers look up ids
+	// peersStarted is set when Run starts the senders; later PeerAddr
+	// calls start their own.
+	peersStarted bool
 }
 
 type eventKind uint8

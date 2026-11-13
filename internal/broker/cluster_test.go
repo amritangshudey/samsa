@@ -18,7 +18,7 @@ type trio struct {
 
 func newTrio(t *testing.T) *trio {
 	tr := &trio{t: t, h: map[sys.NodeID]*harness{}}
-	peers := []Peer{{1, "host1", 9092}, {2, "host2", 9092}, {3, "host3", 9092}}
+	peers := []Peer{{1, "host1", 9092, "host1:9192"}, {2, "host2", 9092, "host2:9192"}, {3, "host3", 9092, "host3:9192"}}
 	for _, p := range peers {
 		tr.h[sys.NodeID(p.ID)] = &harness{t: t, cfg: Config{NodeID: p.ID, Host: p.Host, Port: p.Port, Peers: peers},
 			disk: simsys.NewDisk(simsys.NewRand(uint64(p.ID)), simsys.DiskConfig{}), rand: simsys.NewRand(uint64(10 + p.ID))}

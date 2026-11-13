@@ -42,7 +42,7 @@ func TestVoterChanges(t *testing.T) {
 	n4 := tr.joinNode(4)
 	all := []sys.NodeID{1, 2, 3, 4}
 	lead.open(1)
-	add := &wire.AddRaftVoterRequest{TimeoutMs: 10000, VoterID: 4, Listeners: []wire.Listener{{Name: "CLIENT", Host: "host4", Port: 9092}}}
+	add := &wire.AddRaftVoterRequest{TimeoutMs: 10000, VoterID: 4, Listeners: []wire.Listener{{Name: "CLIENT", Host: "host4", Port: 9092}, {Name: "PEER", Host: "host4", Port: 9192}}}
 	corr := lead.voterChange(1, wire.KeyAddRaftVoter, 1, add)
 	var resp wire.VoterChangeResponse
 	for i := 0; i < 20 && !lead.recv(1, wire.KeyAddRaftVoter, 1, corr, &resp); i++ {
@@ -59,6 +59,15 @@ func TestVoterChanges(t *testing.T) {
 	n4.open(1)
 	if got := brokerIDs(n4.metadata(1)); !slices.Equal(got, []int32{1, 2, 3, 4}) {
 		t.Fatalf("node 4 lists brokers %v", got)
+	}
+	// Peer addresses travel in the configuration: node 4 started knowing
+	// none, and the others learned node 4's from the request or the log.
+	for _, h := range []*harness{lead, tr.h[2], tr.h[3], n4} {
+		for _, id := range all {
+			if want := "host" + string(rune('0'+id)) + ":9192"; id != sys.NodeID(h.cfg.NodeID) && h.net.addrs[id] != want {
+				t.Fatalf("node %d sends to node %d at %q, want %q", h.cfg.NodeID, id, h.net.addrs[id], want)
+			}
+		}
 	}
 	for _, b := range n4.metadata(1).Brokers {
 		if want := "host" + string(rune('0'+b.NodeID)); b.Host != want {

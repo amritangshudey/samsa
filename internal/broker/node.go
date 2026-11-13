@@ -34,6 +34,9 @@ type Peer struct {
 	ID   int32
 	Host string // where Kafka clients connect
 	Port int32
+	// PeerAddr is host:port where other nodes connect; empty where the
+	// network routes by id (the simulator).
+	PeerAddr string
 }
 
 // Config configures a Node. Zero values select the defaults named below.
@@ -231,6 +234,9 @@ type Node struct {
 	log   *slog.Logger
 
 	raft    *raft.Raft
+	// confIndex is raft.ConfIndex when the transport was last told the
+	// voters' addresses (peerAddrs).
+	confIndex int64
 	pids    producerIDs
 	st      *state
 	applied int64 // every log entry below this index has been applied
@@ -332,6 +338,7 @@ func (n *Node) OnStart() error {
 	}
 	var peers []sys.NodeID // none for a node that joins
 	for _, p := range n.cfg.Peers {
+		n.peerAddr(p.ID, p.PeerAddr) // a joining node must reach the leader before it holds a configuration
 		if !n.cfg.Join {
 			peers = append(peers, sys.NodeID(p.ID))
 		}
@@ -349,6 +356,8 @@ func (n *Node) OnStart() error {
 	if err := n.raft.Start(); err != nil {
 		return err
 	}
+	n.confIndex = -2 // no configuration has index -2: peerAddrs runs at once
+	n.peerAddrs()
 	// Before any request: an id from a block that is not on disk could be
 	// handed out again by the next life of this node.
 	n.pids = producerIDs{disk: n.disk, dir: n.cfg.Dir, node: int64(n.cfg.NodeID)}
@@ -654,6 +663,7 @@ func (n *Node) advance() {
 		n.waiters = nil // release the backing array
 	}
 	n.stepVoterChange()
+	n.peerAddrs()
 	n.raft.Compact(n.st.logStart) // effective only below a snapshot, unless UnsafeTrimEarly
 	// A Trim frees disk only once a snapshot after it exists: take one now.
 	trimPending := n.trimmedAt > n.raft.SnapshotIndex() && !n.cfg.UnsafeTrimEarly

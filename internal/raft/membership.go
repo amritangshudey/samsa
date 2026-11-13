@@ -124,6 +124,10 @@ func (r *Raft) confAsOf(index int64) confAt {
 // modified.
 func (r *Raft) Members() []Member { return r.conf().members }
 
+// ConfIndex returns the index of the entry that set the configuration in
+// force, or the snapshot's index: it changes whenever Members may have.
+func (r *Raft) ConfIndex() int64 { return r.conf().index }
+
 // voters returns the ids of the voters in force, sorted.
 func (r *Raft) voters() []sys.NodeID { return ids(r.conf().members) }
 

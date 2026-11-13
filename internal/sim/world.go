@@ -267,6 +267,9 @@ func (inc *incarnation) SendPeer(to sys.NodeID, msg []byte) {
 	inc.w.sendPeer(inc.node, int32(to), append([]byte(nil), msg...)) // the node may reuse msg
 }
 
+// PeerAddr implements sys.Network: the simulated network routes by id.
+func (inc *incarnation) PeerAddr(sys.NodeID, string) {}
+
 // Close implements sys.Network.
 func (inc *incarnation) Close(id sys.ConnID) {
 	w := inc.w

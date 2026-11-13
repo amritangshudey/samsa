@@ -39,6 +39,7 @@ type fakeNet struct {
 	sent   map[sys.ConnID][]byte
 	closed []sys.ConnID
 	peers  []peerMsg // what the node sent to other nodes, in order
+	addrs  map[sys.NodeID]string
 }
 
 type peerMsg struct {
@@ -50,6 +51,13 @@ func (n *fakeNet) Send(c sys.ConnID, p []byte) { n.sent[c] = append(n.sent[c], p
 func (n *fakeNet) Close(c sys.ConnID)          { n.closed = append(n.closed, c) }
 func (n *fakeNet) SendPeer(to sys.NodeID, p []byte) {
 	n.peers = append(n.peers, peerMsg{to, append([]byte(nil), p...)})
+}
+
+func (n *fakeNet) PeerAddr(id sys.NodeID, addr string) {
+	if n.addrs == nil {
+		n.addrs = map[sys.NodeID]string{}
+	}
+	n.addrs[id] = addr
 }
 
 // harness drives one node with no goroutines and no sockets.
