@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -37,6 +39,16 @@ func versionString() string {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "check" {
+		ok, err := runCheck(os.Args[2:], os.Stdout)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "samsa check:", err)
+		}
+		if !ok {
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "samsa:", err)
 		os.Exit(1)
@@ -54,8 +66,15 @@ func run() error {
 	retention := flag.Int64("retention-bytes", 0, "keep about this many bytes of log, deleting the oldest segments (0: keep everything)")
 	producerExpiry := flag.Duration("producer-expiry", 24*time.Hour, "forget an idempotent producer after it writes nothing for this long (negative: never)")
 	logLevel := flag.String("log-level", "info", "debug, info, warn or error")
+	metricsListen := flag.String("metrics-listen", "", "address to serve /metrics, /healthz and /readyz on over HTTP (default: none)")
+	configFile := flag.String("config", "", "file of key = value lines, one per flag; flags on the command line win")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+	if *configFile != "" {
+		if err := loadConfig(flag.CommandLine, *configFile); err != nil {
+			return err
+		}
+	}
 	if *showVersion {
 		fmt.Println("samsa", versionString())
 		return nil
@@ -127,6 +146,19 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	context.AfterFunc(ctx, stop)
+	if *metricsListen != "" {
+		mln, err := net.Listen("tcp", *metricsListen)
+		if err != nil {
+			return fmt.Errorf("-metrics-listen: %w", err)
+		}
+		latest := &atomic.Pointer[published]{}
+		latest.Store(&published{m: broker.Metrics{NotReady: "starting"}, at: time.Now()})
+		loop.Every(publishEvery, func() { latest.Store(&published{m: node.Metrics(), at: time.Now()}) })
+		srv := &http.Server{Handler: metricsHandler(latest), ReadHeaderTimeout: 5 * time.Second}
+		go srv.Serve(mln) //nolint:errcheck // ends with the process
+		defer srv.Close() //nolint:errcheck // exiting
+		logger.Info("serving metrics", "address", mln.Addr().String())
+	}
 	logger.Info("listening", "address", ln.Addr().String(), "advertised", *advertise, "data", *dataDir, "sync", *syncMode)
 	return loop.Run(ctx, node)
 }
@@ -161,4 +193,40 @@ func parsePeers(text string) ([]broker.Peer, map[sys.NodeID]string, error) {
 		addrs[sys.NodeID(id)] = peer
 	}
 	return peers, addrs, nil
+}
+
+// loadConfig sets each flag named in file that the command line did not.
+// Lines are "key = value"; blank lines and lines starting with # are
+// skipped. An unknown key is an error: a typo must not run with a default.
+func loadConfig(fs *flag.FlagSet, file string) error {
+	b, err := os.ReadFile(file)
+	if err != nil {
+		return fmt.Errorf("-config: %w", err)
+	}
+	given, seen := map[string]bool{}, map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
+	for i, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
+		switch {
+		case !ok:
+			return fmt.Errorf("%s:%d: want key = value", file, i+1)
+		case fs.Lookup(key) == nil || key == "config":
+			return fmt.Errorf("%s:%d: unknown key %q", file, i+1, key)
+		case seen[key]:
+			return fmt.Errorf("%s:%d: %q is set twice", file, i+1, key)
+		}
+		seen[key] = true
+		if given[key] {
+			continue
+		}
+		if err := fs.Set(key, value); err != nil {
+			return fmt.Errorf("%s:%d: %s: %w", file, i+1, key, err)
+		}
+	}
+	return nil
 }
