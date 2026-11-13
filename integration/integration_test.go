@@ -42,6 +42,7 @@ type broker struct {
 	addr string
 	dir  string
 	args []string
+	bin  string // default: SAMSA_BIN, else ../bin/samsa
 	cmd  *exec.Cmd
 	mu   sync.Mutex
 	logs bytes.Buffer
@@ -82,7 +83,10 @@ func (b *broker) log() string {
 
 func (b *broker) start() {
 	b.t.Helper()
-	bin := os.Getenv("SAMSA_BIN")
+	bin := b.bin
+	if bin == "" {
+		bin = os.Getenv("SAMSA_BIN")
+	}
 	if bin == "" {
 		bin = "../bin/samsa"
 	}

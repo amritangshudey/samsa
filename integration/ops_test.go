@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -23,7 +24,8 @@ func samsaCheck(t *testing.T, dir string) (string, bool) {
 		bin = "../bin/samsa"
 	}
 	out, err := exec.Command(bin, "check", "-data", dir).CombinedOutput()
-	if _, exited := err.(*exec.ExitError); err != nil && !exited {
+	var exit *exec.ExitError
+	if err != nil && !errors.As(err, &exit) {
 		t.Fatal(err)
 	}
 	return string(out), err == nil
