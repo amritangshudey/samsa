@@ -144,7 +144,9 @@ fetch, metadata, offsets, topics) and [ADR 0008](docs/adr/0008-group-api-version
 Transactions (a transactional producer is refused with `INVALID_REQUEST`),
 log compaction, retention by time or per topic (only `-retention-bytes`, one
 bound for the whole log), changing configs (AlterConfigs), client quotas, topic ids, tiered storage,
-cluster membership changes, the KIP-848 group protocol, static membership,
+adding a node to a running cluster of real processes (the Raft and broker
+sides, AddRaftVoter and RemoveRaftVoter, are built and simulated; the binary
+cannot join yet), the KIP-848 group protocol, static membership,
 fetch sessions, more than one Raft
 group (all partitions share one log, [ADR 0010](docs/adr/0010-one-raft-group.md)),
 authentication between nodes. Limits of each phase are listed in
