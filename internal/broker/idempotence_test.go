@@ -361,8 +361,10 @@ func TestSnapshotV3ProducerIndex(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	b := s.encode()
-	b = b[:len(b)-8] // version 5's ACL list and version 6's credentials, empty here
+	b := s.encode() // version 4: the state holds nothing newer
+	if b[0] != 4 {
+		t.Fatalf("encoded as version %d, want 4", b[0])
+	}
 	field := binary.BigEndian.AppendUint16(binary.BigEndian.AppendUint64(nil, id), 0x0a0b)
 	at := bytes.Index(b, field)
 	if at < 0 || binary.BigEndian.Uint64(b[at+len(field):]) != 1 {

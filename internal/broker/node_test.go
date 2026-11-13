@@ -40,6 +40,7 @@ type fakeNet struct {
 	closed []sys.ConnID
 	peers  []peerMsg // what the node sent to other nodes, in order
 	addrs  map[sys.NodeID]string
+	drop   func(msg []byte) bool // peer messages it matches are lost
 }
 
 type peerMsg struct {
@@ -50,6 +51,9 @@ type peerMsg struct {
 func (n *fakeNet) Send(c sys.ConnID, p []byte) { n.sent[c] = append(n.sent[c], p...) }
 func (n *fakeNet) Close(c sys.ConnID)          { n.closed = append(n.closed, c) }
 func (n *fakeNet) SendPeer(to sys.NodeID, p []byte) {
+	if n.drop != nil && n.drop(p) {
+		return
+	}
 	n.peers = append(n.peers, peerMsg{to, append([]byte(nil), p...)})
 }
 
@@ -718,6 +722,7 @@ func TestSyncPolicies(t *testing.T) {
 	h.open(1)
 	corr := h.send(1, wire.KeyCreateTopics, 4, &wire.CreateTopicsRequest{Topics: []wire.CreateTopic{{Name: "t", NumPartitions: 1, ReplicationFactor: 1}}})
 	var ct wire.CreateTopicsResponse
+	delete(h.clock.timers, timerLevel) // armed at start, unrelated to syncing
 	if !h.recv(1, wire.KeyCreateTopics, 4, corr, &ct) || len(h.clock.timers) != 0 {
 		t.Fatal("SyncNever did not answer immediately")
 	}
@@ -733,10 +738,11 @@ func TestSyncPolicies(t *testing.T) {
 		t.Fatal("SyncInterval must answer before syncing")
 	}
 	h.advance(100 * time.Millisecond)
-	if h.node.raft.Durable() != 2 { // the leader's no-op and the command
+	if h.node.raft.Durable() != 3 { // the leader's no-op, the format level and the command
 		t.Fatal("SyncInterval timer did not sync")
 	}
 	h.advance(100 * time.Millisecond)
+	delete(h.clock.timers, timerLevel)
 	if len(h.clock.timers) != 1 {
 		t.Fatal("SyncInterval timer not re-armed")
 	}

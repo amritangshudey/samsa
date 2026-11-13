@@ -48,19 +48,24 @@ func runsOf(terms []int64, index int64) []termRun {
 
 func (s *snapshot) encode() []byte {
 	b := binary.BigEndian.AppendUint32(nil, snapshotMagic)
-	b = append(b, snapshotVersion)
+	// Version 1 when there is no configuration to store: an older build in
+	// the cluster during a rolling upgrade can install it (design G7).
+	version := byte(snapshotVersion)
+	if len(s.members) == 0 {
+		version = 1
+	}
+	b = append(b, version)
 	b = binary.BigEndian.AppendUint64(b, uint64(s.index))
 	b = binary.BigEndian.AppendUint32(b, uint32(len(s.runs)))
 	for _, r := range s.runs {
 		b = binary.BigEndian.AppendUint64(b, uint64(r.first))
 		b = binary.BigEndian.AppendUint64(b, uint64(r.term))
 	}
-	var conf []byte // none: the node runs on its bootstrap configuration
-	if len(s.members) > 0 {
-		conf = encodeMembers(s.members)
+	if version >= 2 {
+		conf := encodeMembers(s.members)
+		b = binary.BigEndian.AppendUint32(b, uint32(len(conf)))
+		b = append(b, conf...)
 	}
-	b = binary.BigEndian.AppendUint32(b, uint32(len(conf)))
-	b = append(b, conf...)
 	b = binary.BigEndian.AppendUint32(b, uint32(len(s.state)))
 	b = append(b, s.state...)
 	return binary.BigEndian.AppendUint32(b, crc32.Checksum(b, castagnoli))

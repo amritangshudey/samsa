@@ -23,8 +23,15 @@ func TestSnapshotEncoding(t *testing.T) {
 	}
 	b := s.encode()
 	got, err := decodeSnapshot(b)
-	if err != nil || !reflect.DeepEqual(got, s) {
-		t.Fatalf("round trip: %+v, %v", got, err)
+	if err != nil || !reflect.DeepEqual(got, s) || b[4] != 1 {
+		t.Fatalf("round trip: %+v, %v, version %d (want 1: no configuration, readable by v0.2.0)", got, err, b[4])
+	}
+	withConf := s
+	withConf.members = []Member{{ID: 1, Info: []byte("a")}, {ID: 2}}
+	if b2 := withConf.encode(); b2[4] != snapshotVersion {
+		t.Fatalf("with a configuration: version %d, want %d", b2[4], snapshotVersion)
+	} else if got, err := decodeSnapshot(b2); err != nil || len(got.members) != 2 || got.members[0].ID != 1 || string(got.members[0].Info) != "a" {
+		t.Fatalf("with a configuration: %+v, %v", got, err)
 	}
 	for name, mangle := range map[string]func([]byte) []byte{
 		"empty":       func([]byte) []byte { return nil },
