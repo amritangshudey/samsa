@@ -40,6 +40,9 @@ const (
 	// KeyDescribeClientQuotas answers kafka-configs.sh --describe; Samsa
 	// has no quotas, so always with none (C8b).
 	KeyDescribeClientQuotas int16 = 48
+	// KeyAddRaftVoter and KeyRemoveRaftVoter change the voters (C1).
+	KeyAddRaftVoter    int16 = 80
+	KeyRemoveRaftVoter int16 = 81
 )
 
 // Kafka error codes used by the broker, from Errors.java.
@@ -75,6 +78,10 @@ const (
 	ErrInvalidReplicaAssignment    int16 = 39
 	ErrNotController               int16 = 41
 	ErrInvalidRequest              int16 = 42
+	ErrRequestTimedOut             int16 = 7
+	ErrDuplicateVoter              int16 = 126
+	ErrInconsistentClusterID       int16 = 104
+	ErrVoterNotFound               int16 = 127
 	ErrUnsupportedForMessageFormat int16 = 43
 	ErrOutOfOrderSequenceNumber    int16 = 45
 	ErrInvalidProducerEpoch        int16 = 47
@@ -136,6 +143,8 @@ var APIs = []API{
 	{Key: KeyDescribeUserScramCredentials, Min: 0, Max: 0, AdvertisedMin: 0, FlexFrom: 0},
 	{Key: KeyAlterUserScramCredentials, Min: 0, Max: 0, AdvertisedMin: 0, FlexFrom: 0},
 	{Key: KeyDescribeClientQuotas, Min: 0, Max: 1, AdvertisedMin: 0, FlexFrom: 1},
+	{Key: KeyAddRaftVoter, Min: 0, Max: 1, AdvertisedMin: 0, FlexFrom: 0},
+	{Key: KeyRemoveRaftVoter, Min: 0, Max: 0, AdvertisedMin: 0, FlexFrom: 0},
 	{Key: KeyDescribeCluster, Min: 0, Max: 2, AdvertisedMin: 0, FlexFrom: 0},
 }
 

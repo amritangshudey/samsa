@@ -269,7 +269,7 @@ func (n *Node) describeCluster(_ *conn, req *wire.DescribeClusterRequest) *wire.
 	}
 	leader, _ := n.leader()
 	resp := &wire.DescribeClusterResponse{EndpointType: wire.EndpointBrokers, ClusterID: n.cfg.ClusterID, ControllerID: leader.ID}
-	for _, p := range n.cfg.Peers {
+	for _, p := range n.members() {
 		resp.Brokers = append(resp.Brokers, wire.Broker{NodeID: p.ID, Host: p.Host, Port: p.Port})
 	}
 	return resp
