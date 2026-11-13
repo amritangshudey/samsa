@@ -11,8 +11,8 @@ import (
 // an older snapshot apart.
 // Version 2 adds the log start and each partition's start offset; version 3
 // each partition's idempotent producers; version 4 each producer's last
-// log index.
-const snapshotVersion = 4
+// log index; version 5 the ACLs.
+const snapshotVersion = 5
 
 // encode returns the whole state machine as bytes, for a Raft snapshot
 // (docs/design/a1-snapshots.md). Maps are walked in sorted order, so equal
@@ -88,6 +88,10 @@ func (s *state) encode() []byte {
 				w.Int64(o.time)
 			}
 		}
+	}
+	w.ArrayLen(false, len(s.acls))
+	for _, a := range s.acls {
+		writeACL(&w, a)
 	}
 	return w.B
 }
@@ -189,6 +193,16 @@ func decodeState(b []byte) (*state, error) {
 		s.groups[name] = g
 		return struct{}{}
 	})
+	if v >= 5 {
+		wire.Array(r, false, func() struct{} {
+			a := readACL(r)
+			if r.Err() == nil && (validACL(a) != "" || slices.Contains(s.acls, a)) {
+				bad = true
+			}
+			s.acls = append(s.acls, a)
+			return struct{}{}
+		})
+	}
 	if r.Err() != nil || r.Len() != 0 || bad {
 		return nil, fmt.Errorf("%w: snapshot state: %w, %d bytes left, malformed %v", errBadCommand, r.Err(), r.Len(), bad)
 	}

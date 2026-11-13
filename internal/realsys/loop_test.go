@@ -38,9 +38,9 @@ func (s *script) events() []string {
 	return append([]string(nil), s.log...)
 }
 
-func (s *script) OnStart() error               { return nil }
-func (s *script) OnConnOpen(sys.ConnID) error  { s.note("open"); return nil }
-func (s *script) OnConnClose(sys.ConnID) error { s.note("close"); return nil }
+func (s *script) OnStart() error                      { return nil }
+func (s *script) OnConnOpen(sys.ConnID, string) error { s.note("open"); return nil }
+func (s *script) OnConnClose(sys.ConnID) error        { s.note("close"); return nil }
 func (s *script) OnPeerMessage(from sys.NodeID, p []byte) error {
 	s.note(fmt.Sprintf("peer %d %s", from, p))
 	return nil

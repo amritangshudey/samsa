@@ -12,8 +12,10 @@ import (
 // metadata describes the cluster and the requested topics. Every node
 // answers it, from its own applied state, which on a follower may be a
 // little behind. Every node holds every partition, and the leader of the
-// cluster leads them all.
-func (n *Node) metadata(req *wire.MetadataRequest) *wire.MetadataResponse {
+// cluster leads them all. A topic the client may not describe is refused
+// by name, and left out of an all-topics answer: its existence is not
+// disclosed (KafkaApis.handleTopicMetadataRequest).
+func (n *Node) metadata(c *conn, req *wire.MetadataRequest) *wire.MetadataResponse {
 	leader, known := n.leader()
 	resp := &wire.MetadataResponse{ClusterID: n.cfg.ClusterID, ControllerID: leader.ID}
 	var all []int32
@@ -27,6 +29,12 @@ func (n *Node) metadata(req *wire.MetadataRequest) *wire.MetadataResponse {
 	}
 	for _, name := range names {
 		t := n.st.topics[name]
+		if !n.may(c, opDescribe, resTopic, name) {
+			if !req.AllTopics {
+				resp.Topics = append(resp.Topics, wire.TopicMetadata{ErrorCode: wire.ErrTopicAuthorizationFailed, Name: name})
+			}
+			continue
+		}
 		if t == nil {
 			resp.Topics = append(resp.Topics, wire.TopicMetadata{ErrorCode: wire.ErrUnknownTopicOrPartition, Name: name})
 			continue
@@ -83,6 +91,8 @@ func (n *Node) createTopics(c *conn, h wire.RequestHeader, req *wire.CreateTopic
 			res.ErrorCode, res.ErrorMessage = wire.ErrInvalidTopic, "topic names are 1-249 characters of [a-zA-Z0-9._-]"
 		case seen[t.Name]:
 			res.ErrorCode, res.ErrorMessage = wire.ErrInvalidRequest, "topic appears twice in the request"
+		case !n.may(c, opCreate, resCluster, clusterName) && !n.may(c, opCreate, resTopic, t.Name):
+			res.ErrorCode, res.ErrorMessage = wire.ErrTopicAuthorizationFailed, "Authorization failed."
 		case t.HasAssignments:
 			res.ErrorCode, res.ErrorMessage = wire.ErrInvalidRequest, "manual replica assignment is not supported"
 		case parts < 1 || parts > n.cfg.MaxPartitions:
@@ -156,6 +166,8 @@ func (n *Node) produce(c *conn, h wire.RequestHeader, req *wire.ProduceRequest) 
 			switch {
 			case req.Acks < -1 || req.Acks > 1:
 				res.ErrorCode = wire.ErrInvalidRequiredAcks
+			case !n.may(c, opWrite, resTopic, t.Name):
+				res.ErrorCode = wire.ErrTopicAuthorizationFailed
 			case n.st.partition(t.Name, p.Index) == nil:
 				res.ErrorCode = wire.ErrUnknownTopicOrPartition
 			case len(p.Records) == 0:
@@ -194,13 +206,15 @@ func (n *Node) produce(c *conn, h wire.RequestHeader, req *wire.ProduceRequest) 
 	done()
 }
 
-func (n *Node) listOffsets(req *wire.ListOffsetsRequest) *wire.ListOffsetsResponse {
+func (n *Node) listOffsets(c *conn, req *wire.ListOffsetsRequest) *wire.ListOffsetsResponse {
 	resp := &wire.ListOffsetsResponse{}
 	for _, t := range req.Topics {
 		tr := wire.ListOffsetsTopicResponse{Name: t.Name}
 		for _, q := range t.Partitions {
 			pr := wire.ListOffsetsPartitionResponse{Index: q.Index, Timestamp: -1, Offset: -1}
 			switch p := n.st.partition(t.Name, q.Index); {
+			case !n.may(c, opDescribe, resTopic, t.Name):
+				pr.ErrorCode = wire.ErrTopicAuthorizationFailed
 			case p == nil:
 				pr.ErrorCode = wire.ErrUnknownTopicOrPartition
 			case q.Timestamp == wire.TimestampLatest:
@@ -239,7 +253,7 @@ type parkedFetch struct {
 }
 
 func (n *Node) fetch(c *conn, h wire.RequestHeader, req *wire.FetchRequest) {
-	resp, size, failed := n.buildFetch(req)
+	resp, size, failed := n.buildFetch(c, req)
 	if failed || size >= int(req.MinBytes) || req.MaxWaitMs <= 0 || n.fatal != nil {
 		n.respond(c, h, resp)
 		return
@@ -263,7 +277,7 @@ func (n *Node) completeFetch(f *parkedFetch) {
 		n.respond(f.c, f.h, refusal(f.req))
 		return
 	}
-	resp, _, _ := n.buildFetch(f.req)
+	resp, _, _ := n.buildFetch(f.c, f.req)
 	n.respond(f.c, f.h, resp)
 }
 
@@ -274,7 +288,7 @@ func (n *Node) wakeFetches() {
 			continue
 		}
 		if f.req.MinBytes > 1 {
-			if _, size, failed := n.buildFetch(f.req); !failed && size < int(f.req.MinBytes) {
+			if _, size, failed := n.buildFetch(f.c, f.req); !failed && size < int(f.req.MinBytes) {
 				continue
 			}
 		}
@@ -298,7 +312,7 @@ func (n *Node) hasNewData(req *wire.FetchRequest) bool {
 // buildFetch reads what req asks for from applied state. It returns the
 // response, the number of record bytes in it, and whether any partition
 // reported an error (in which case the response should not be delayed).
-func (n *Node) buildFetch(req *wire.FetchRequest) (resp *wire.FetchResponse, size int, failed bool) {
+func (n *Node) buildFetch(c *conn, req *wire.FetchRequest) (resp *wire.FetchResponse, size int, failed bool) {
 	resp = &wire.FetchResponse{}
 	budget := n.cfg.MaxFetchBytes
 	if req.MaxBytes > 0 && int(req.MaxBytes) < budget {
@@ -310,6 +324,8 @@ func (n *Node) buildFetch(req *wire.FetchRequest) (resp *wire.FetchResponse, siz
 			pr := wire.FetchPartitionResponse{Index: q.Index, HighWatermark: -1}
 			p := n.st.partition(t.Name, q.Index)
 			switch {
+			case !n.may(c, opRead, resTopic, t.Name):
+				pr.ErrorCode = wire.ErrTopicAuthorizationFailed
 			case p == nil:
 				pr.ErrorCode = wire.ErrUnknownTopicOrPartition
 			case q.Offset < p.start || q.Offset > p.next:

@@ -189,7 +189,7 @@ func (l *Loop) deliver(h sys.Handler, ev event) error {
 	switch ev.kind {
 	case evOpen:
 		l.conns[ev.conn.id] = ev.conn
-		return h.OnConnOpen(ev.conn.id)
+		return h.OnConnOpen(ev.conn.id, remoteHost(ev.conn.c))
 	case evData:
 		return h.OnConnData(ev.conn.id, ev.data)
 	case evClose:
@@ -366,4 +366,12 @@ func (l *Loop) CancelTimer(id sys.TimerID) {
 		}
 		delete(l.timers, id) // a firing already queued now fails the gen check
 	}
+}
+
+// remoteHost is the IP address of the client at the other end of c.
+func remoteHost(c net.Conn) string {
+	if a, ok := c.RemoteAddr().(*net.TCPAddr); ok {
+		return a.IP.String()
+	}
+	return c.RemoteAddr().String()
 }

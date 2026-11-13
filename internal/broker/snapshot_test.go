@@ -30,6 +30,11 @@ func sampleState(t *testing.T) *state {
 		encodeGroupGeneration("g", g),
 		encodeGroupAssignment("g", 1, []wire.MemberAssignment{{MemberID: "a", Assignment: []byte("x")}, {MemberID: "b", Assignment: []byte{}}}),
 		encodeOffsetCommit("g", 1, "a", 7, []offsetEntry{{"a", 0, committedOffset{offset: 3, leaderEpoch: 4}}, {"b", 1, committedOffset{offset: 1}}}),
+		encodeCreateACL(acl(resTopic, "a", patLiteral, "User:x", "*", opRead, permAllow)),
+		encodeCreateACL(acl(resGroup, "g", patPrefixed, "User:*", "10.0.0.0/8", opAll, permDeny)),
+		encodeCreateACL(acl(resTopic, "a", patLiteral, "User:x", "*", opRead, permAllow)), // again: no change
+		encodeCreateACL(acl(resCluster, clusterName, patLiteral, "User:y", "*", opAlter, permAllow)),
+		encodeDeleteACLs(wire.ACLFilter{ResourceType: resAny, PatternType: patAny, Principal: &userY, Operation: opAny, Permission: permAny}),
 	}
 	for i, cmd := range cmds {
 		if res, err := s.apply(int64(i), cmd); err != nil || res.errCode != 0 {
@@ -37,6 +42,29 @@ func sampleState(t *testing.T) *state {
 		}
 	}
 	return s
+}
+
+var userY = "User:y"
+
+// ACLs are created once however often they are asked for, and a delete
+// returns what it removed.
+func TestACLCommands(t *testing.T) {
+	s := sampleState(t)
+	if len(s.acls) != 2 || s.acls[0].Principal != "User:x" || s.acls[1].ResourceType != resGroup {
+		t.Fatalf("ACLs %+v", s.acls)
+	}
+	res, err := s.apply(100, encodeDeleteACLs(wire.ACLFilter{ResourceType: resTopic, PatternType: patMatch, ResourceName: new(string), Operation: opAny, Permission: permAny}))
+	if err != nil || len(res.acls) != 0 {
+		t.Fatalf("a filter for topic \"\" removed %+v, %v", res.acls, err)
+	}
+	a := "a"
+	res, _ = s.apply(101, encodeDeleteACLs(wire.ACLFilter{ResourceType: resTopic, PatternType: patMatch, ResourceName: &a, Operation: opAny, Permission: permAny}))
+	if len(res.acls) != 1 || len(s.acls) != 1 {
+		t.Fatalf("removed %+v, left %+v", res.acls, s.acls)
+	}
+	if _, err := s.apply(102, encodeCreateACL(acl(resTopic, "", patLiteral, "User:x", "*", opRead, permAllow))); err == nil {
+		t.Fatal("an invalid ACL in the log was applied")
+	}
 }
 
 func TestStateEncoding(t *testing.T) {

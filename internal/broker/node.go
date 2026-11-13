@@ -95,6 +95,9 @@ type Config struct {
 	// SASL, if set, makes every client connection authenticate first
 	// (sasl.go, ADR 0019).
 	SASL *SASL
+	// Authorization, if set, checks every request against the ACLs
+	// (acl.go, ADR 0020).
+	Authorization *Authorization
 	// Faults are injected into client answers on purpose, to test
 	// applications (faults.go). The zero value injects none.
 	Faults Faults
@@ -202,6 +205,7 @@ type conn struct {
 	// progress at a time, so one slot is enough.
 	onClose func()
 	auth    authState // SASL progress; see sasl.go
+	host    string    // the client's IP address, for ACLs
 }
 
 // waiter is a proposed command that is not yet applied.
@@ -370,8 +374,8 @@ func (n *Node) OnPeerMessage(from sys.NodeID, msg []byte) error {
 }
 
 // OnConnOpen implements sys.Handler.
-func (n *Node) OnConnOpen(id sys.ConnID) error {
-	n.conns[id] = &conn{id: id}
+func (n *Node) OnConnOpen(id sys.ConnID, host string) error {
+	n.conns[id] = &conn{id: id, host: host}
 	n.stats.conns++
 	return n.settle()
 }
@@ -797,7 +801,7 @@ func (n *Node) dispatch(c *conn, frame []byte) {
 		}
 	case wire.KeyMetadata:
 		m := &wire.MetadataRequest{}
-		req, handle = m, func() { n.respond(c, h, n.metadata(m)) }
+		req, handle = m, func() { n.respond(c, h, n.metadata(c, m)) }
 	case wire.KeyCreateTopics:
 		m := &wire.CreateTopicsRequest{}
 		req, handle = m, func() { n.createTopics(c, h, m) }
@@ -809,10 +813,10 @@ func (n *Node) dispatch(c *conn, frame []byte) {
 		req, handle = m, func() { n.fetch(c, h, m) }
 	case wire.KeyListOffsets:
 		m := &wire.ListOffsetsRequest{}
-		req, handle = m, func() { n.respond(c, h, n.listOffsets(m)) }
+		req, handle = m, func() { n.respond(c, h, n.listOffsets(c, m)) }
 	case wire.KeyFindCoord:
 		m := &wire.FindCoordinatorRequest{}
-		req, handle = m, func() { n.respond(c, h, n.findCoordinator(m)) }
+		req, handle = m, func() { n.respond(c, h, n.findCoordinator(c, m)) }
 	case wire.KeyJoinGroup:
 		m := &wire.JoinGroupRequest{}
 		req, handle = m, func() { n.joinGroup(c, h, m) }
@@ -821,7 +825,7 @@ func (n *Node) dispatch(c *conn, frame []byte) {
 		req, handle = m, func() { n.syncGroup(c, h, m) }
 	case wire.KeyHeartbeat:
 		m := &wire.HeartbeatRequest{}
-		req, handle = m, func() { n.respond(c, h, n.heartbeat(m)) }
+		req, handle = m, func() { n.respond(c, h, n.heartbeat(c, m)) }
 	case wire.KeyLeaveGroup:
 		m := &wire.LeaveGroupRequest{}
 		req, handle = m, func() { n.leaveGroup(c, h, m) }
@@ -830,10 +834,10 @@ func (n *Node) dispatch(c *conn, frame []byte) {
 		req, handle = m, func() { n.offsetCommit(c, h, m) }
 	case wire.KeyOffsetFetch:
 		m := &wire.OffsetFetchRequest{}
-		req, handle = m, func() { n.respond(c, h, n.offsetFetch(m)) }
+		req, handle = m, func() { n.respond(c, h, n.offsetFetch(c, m)) }
 	case wire.KeyInitProducerID:
 		m := &wire.InitProducerIDRequest{}
-		req, handle = m, func() { n.respond(c, h, n.initProducerID(m)) }
+		req, handle = m, func() { n.respond(c, h, n.initProducerID(c, m)) }
 	case wire.KeyDeleteTopics:
 		m := &wire.DeleteTopicsRequest{}
 		req, handle = m, func() { n.deleteTopics(c, h, m) }
@@ -845,13 +849,13 @@ func (n *Node) dispatch(c *conn, frame []byte) {
 		req, handle = m, func() { n.deleteRecords(c, h, m) }
 	case wire.KeyDescribeConfigs:
 		m := &wire.DescribeConfigsRequest{}
-		req, handle = m, func() { n.respond(c, h, n.describeConfigs(m)) }
+		req, handle = m, func() { n.respond(c, h, n.describeConfigs(c, m)) }
 	case wire.KeyListGroups:
 		m := &wire.ListGroupsRequest{}
-		req, handle = m, func() { n.respond(c, h, n.listGroups(m)) }
+		req, handle = m, func() { n.respond(c, h, n.listGroups(c, m)) }
 	case wire.KeyDescribeGroups:
 		m := &wire.DescribeGroupsRequest{}
-		req, handle = m, func() { n.respond(c, h, n.describeGroups(m)) }
+		req, handle = m, func() { n.respond(c, h, n.describeGroups(c, m)) }
 	case wire.KeySaslHandshake:
 		m := &wire.SaslHandshakeRequest{}
 		req, handle = m, func() { n.saslHandshake(c, h, m) }
@@ -860,7 +864,16 @@ func (n *Node) dispatch(c *conn, frame []byte) {
 		req, handle = m, func() { n.saslAuthenticate(c, h, m) }
 	case wire.KeyDescribeCluster:
 		m := &wire.DescribeClusterRequest{}
-		req, handle = m, func() { n.respond(c, h, n.describeCluster(m)) }
+		req, handle = m, func() { n.respond(c, h, n.describeCluster(c, m)) }
+	case wire.KeyDescribeAcls:
+		m := &wire.DescribeAclsRequest{}
+		req, handle = m, func() { n.respond(c, h, n.describeACLs(c, m)) }
+	case wire.KeyCreateAcls:
+		m := &wire.CreateAclsRequest{}
+		req, handle = m, func() { n.createACLs(c, h, m) }
+	case wire.KeyDeleteAcls:
+		m := &wire.DeleteAclsRequest{}
+		req, handle = m, func() { n.deleteACLs(c, h, m) }
 	default: // unreachable while wire.APIs and this switch agree
 		n.drop(c, fmt.Sprintf("no handler for key %d", h.Key))
 		return
