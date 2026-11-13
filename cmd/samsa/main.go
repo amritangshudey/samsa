@@ -22,6 +22,11 @@ import (
 	"github.com/amritangshudey/samsa/internal/sys"
 )
 
+// unsafeConfig switches on deliberate bugs; only builds with -tags unsafe
+// set it (unsafe.go).
+// It returns the switches it set, "" for none.
+var unsafeConfig func(*broker.Config) (string, error)
+
 // version is set by release builds: -ldflags "-X main.version=v0.1.0".
 var version string
 
@@ -136,10 +141,20 @@ func run() error {
 		}
 		loop.Peers(sys.NodeID(*nodeID), peerLn, addrs)
 	}
-	node := broker.New(broker.Config{
+	cfg := broker.Config{
 		NodeID: int32(*nodeID), Host: host, Port: int32(port), Peers: peers,
 		Sync: policy, SyncInterval: *syncInterval, Logger: logger, RetentionBytes: *retention, ProducerExpiry: *producerExpiry,
-	}, loop, loop, disk, realsys.Random{})
+	}
+	if unsafeConfig != nil {
+		on, err := unsafeConfig(&cfg)
+		if err != nil {
+			return err
+		}
+		if on != "" {
+			logger.Warn("deliberate bugs switched on: never run this in production", "unsafe", on)
+		}
+	}
+	node := broker.New(cfg, loop, loop, disk, realsys.Random{})
 
 	// The first signal starts a graceful stop (the node hands leadership
 	// over); a second one, once the handler is unregistered, kills at once.

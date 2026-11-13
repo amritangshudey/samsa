@@ -244,4 +244,12 @@ fetch sent after a topic's delete was acknowledged finds no topic (D1). `monitor
   The Figure 8 bug is caught by the Raft-level random schedules instead
   (`internal/raft/random_test.go`).
 
+**The real binary** ([design](design/a4-chaos.md)). `integration/chaos_test.go`
+runs three processes with a user-space TCP proxy on every client and peer
+link, applies faults from a seed (SIGKILL, SIGTERM, isolation, one-way
+cuts, delays, resets) and judges every franz-go answer with the same
+`sim.Model` (in `Rebatched` mode: a real client forms its own batches).
+A build with `-tags unsafe` exposes the broker's mutation switches through
+a hidden `-unsafe` flag, so the test can show it catches a broken build.
+
 Every bug found, in the broker or in the tests, is in [BUGS.md](BUGS.md).
