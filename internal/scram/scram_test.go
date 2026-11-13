@@ -187,3 +187,23 @@ func TestClientAgainstServer(t *testing.T) {
 		}
 	}
 }
+
+// A credential from a salted password, as AlterUserScramCredentials sends
+// it, is the one the password gives, and logs in.
+func TestFromSalted(t *testing.T) {
+	for _, m := range []string{SHA256, SHA512} {
+		want, err := NewCredential(m, "pw", []byte("salt"), 4096)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h, _ := hashFor(m)
+		salted, _ := pbkdf2Key(h, "pw", []byte("salt"), 4096)
+		got, err := FromSalted(m, []byte("salt"), salted, 4096)
+		if err != nil || got.String() != want.String() || !got.CheckPassword("pw") {
+			t.Fatalf("%s: %v, %v", m, got, err)
+		}
+		if _, err := FromSalted(m, []byte("salt"), salted[:5], 4096); err == nil {
+			t.Fatalf("%s: a short salted password accepted", m)
+		}
+	}
+}
