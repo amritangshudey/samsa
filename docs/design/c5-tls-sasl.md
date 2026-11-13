@@ -196,3 +196,7 @@ file, the same on every node:
    elected by a late vote answer, while a newer leader held its lease.
    Raft allows that; such a leader cannot commit or lease. S6 now compares
    terms. `docs/BUGS.md` M10.
+10. **The fuzzer found a null AuthBytes unstable.** Decoding a null (length
+    -1) gave nil, which encodes as empty, which decodes as empty: not the
+    same value twice. The field is not nullable, so a null is now read as
+    empty. The input is kept in `testdata/fuzz` as a regression.

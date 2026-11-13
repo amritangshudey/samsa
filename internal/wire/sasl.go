@@ -48,7 +48,7 @@ type SaslAuthenticateRequest struct{ AuthBytes []byte }
 // Decode implements Message.
 func (m *SaslAuthenticateRequest) Decode(r *Reader, v int16) {
 	flex := v >= 2
-	m.AuthBytes = r.Bytes(flex)
+	m.AuthBytes = nonNull(r.Bytes(flex)) // not nullable: a null on the wire is read as empty
 	r.Tags(flex)
 }
 
@@ -72,7 +72,7 @@ func (m *SaslAuthenticateResponse) Decode(r *Reader, v int16) {
 	flex := v >= 2
 	m.ErrorCode = r.Int16()
 	m.ErrorMessage, _ = r.NullableString(flex)
-	m.AuthBytes = r.Bytes(flex)
+	m.AuthBytes = nonNull(r.Bytes(flex)) // not nullable: a null on the wire is read as empty
 	if v >= 1 {
 		r.Int64() // SessionLifetimeMs
 	}
