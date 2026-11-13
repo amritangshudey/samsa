@@ -65,6 +65,10 @@ func (n *Node) completeForward(tag uint64, res result) {
 // onBrokerMessage handles a broker message from a peer. Peers are cluster
 // members, but their bytes are still checked like any input (rule 4).
 func (n *Node) onBrokerMessage(from sys.NodeID, msg []byte) {
+	if len(msg) >= 2 && msg[1] == msgLevel {
+		n.onLevelMessage(from, msg)
+		return
+	}
 	if len(msg) < 10 {
 		return
 	}
@@ -76,7 +80,7 @@ func (n *Node) onBrokerMessage(from sys.NodeID, msg []byte) {
 			n.log.Warn("dropped a malformed forwarded command", "from", uint64(from))
 			return
 		}
-		if !n.canRead() {
+		if !n.canRead() || n.levelRefused(1) != "" { // cmdForwarded is level 1
 			n.net.SendPeer(from, binary.BigEndian.AppendUint64([]byte{brokerMsg, msgForwardRefused}, tag))
 			return
 		}

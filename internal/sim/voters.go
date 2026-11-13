@@ -64,7 +64,9 @@ func (cl *client) changeVoters() {
 		if !ok {
 			return
 		}
-		allowed := []int16{wire.ErrNone, wire.ErrNotController, wire.ErrRequestTimedOut, wire.ErrDuplicateVoter, wire.ErrVoterNotFound, wire.ErrInvalidRequest}
+		// UNSUPPORTED_VERSION: the leader has not yet raised the cluster's
+		// format level (design G7); finalChecks shows that it does.
+		allowed := []int16{wire.ErrNone, wire.ErrNotController, wire.ErrRequestTimedOut, wire.ErrDuplicateVoter, wire.ErrVoterNotFound, wire.ErrInvalidRequest, wire.ErrUnsupportedVersion}
 		if !slices.Contains(allowed, resp.ErrorCode) {
 			w.fail("voter change of node %d (key %d): error %d %q", id, key, resp.ErrorCode, resp.ErrorMessage)
 			return

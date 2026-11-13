@@ -12,15 +12,25 @@ import (
 // an older snapshot apart.
 // Version 2 adds the log start and each partition's start offset; version 3
 // each partition's idempotent producers; version 4 each producer's last
-// log index; version 5 the ACLs; version 6 the SCRAM credentials.
-const snapshotVersion = 6
+// log index; version 5 the ACLs; version 6 the SCRAM credentials; version
+// 7 the format level. Each later field comes last, so the encoder writes
+// the oldest version that holds the state: an older build in the cluster
+// during a rolling upgrade can still read it (design G7).
+const snapshotVersion = 7
 
 // encode returns the whole state machine as bytes, for a Raft snapshot
 // (docs/design/a1-snapshots.md). Maps are walked in sorted order, so equal
 // states encode to equal bytes. Record data is not included: it stays in
 // the log, and batches are referred to by log index.
 func (s *state) encode() []byte {
-	w := wire.Writer{B: []byte{snapshotVersion}}
+	version := byte(4)
+	switch {
+	case s.level > 0:
+		version = 7
+	case len(s.acls) > 0 || len(s.creds) > 0:
+		version = 6
+	}
+	w := wire.Writer{B: []byte{version}}
 	w.Int64(s.logStart)
 	w.ArrayLen(false, len(s.names))
 	for _, name := range s.names {
@@ -90,6 +100,9 @@ func (s *state) encode() []byte {
 			}
 		}
 	}
+	if version < 5 {
+		return w.B
+	}
 	w.ArrayLen(false, len(s.acls))
 	for _, a := range s.acls {
 		writeACL(&w, a)
@@ -102,6 +115,9 @@ func (s *state) encode() []byte {
 		for _, c := range s.creds[user] {
 			w.String(false, c.String())
 		}
+	}
+	if version >= 7 {
+		w.Int8(int8(s.level))
 	}
 	return w.B
 }
@@ -229,6 +245,11 @@ func decodeState(b []byte) (*state, error) {
 			s.creds[user], last = cs, user
 			return struct{}{}
 		})
+	}
+	if v >= 7 {
+		level := r.Int8()
+		bad = bad || (r.Err() == nil && (level < 1 || level > formatLevel))
+		s.level = byte(level)
 	}
 	if r.Err() != nil || r.Len() != 0 || bad {
 		return nil, fmt.Errorf("%w: snapshot state: %w, %d bytes left, malformed %v", errBadCommand, r.Err(), r.Len(), bad)

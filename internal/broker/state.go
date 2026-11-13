@@ -36,7 +36,15 @@ const (
 	// The commands of docs/design/c8b-credentials-forwarding.md.
 	cmdAlterCredentials byte = 13
 	cmdForwarded        byte = 14
+	// The cluster's format level (docs/design/g7-rolling-upgrade.md).
+	cmdSetLevel byte = 15
 )
+
+// formatLevel is the highest cluster format level this build reads and
+// writes. Level 0 is v0.2.0's formats; level 1 adds the ACL, credential,
+// forwarding and level commands, and Raft configuration entries. Raise it
+// with every change to what the log or a snapshot may hold.
+const formatLevel = 1
 
 // errBadCommand marks a command in the log that cannot be decoded. The log
 // is checksummed, so this means a bug or a newer on-disk format, and the
@@ -214,6 +222,8 @@ type state struct {
 	// creds are the replicated SCRAM credentials: per user, one per
 	// mechanism, sorted by mechanism.
 	creds map[string][]scram.Credential
+	// level is the cluster's format level: nothing above it is written.
+	level byte
 	// noFencing is Config.UnsafeNoFencing, noSequences
 	// Config.UnsafeNoSequenceCheck: deliberate bugs.
 	noFencing, noSequences bool
@@ -659,6 +669,17 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 		res.origin, res.tag = origin, uint64(tag)
 		return res, err
 
+	case cmdSetLevel:
+		level := r.Int8()
+		switch {
+		case r.Err() != nil || r.Len() != 0 || level < 1:
+			return result{}, fmt.Errorf("%w: set level at index %d", errBadCommand, index)
+		case level > formatLevel:
+			return result{}, fmt.Errorf("the log at index %d requires format level %d, and this build reads at most %d: run a newer release", index, level, formatLevel)
+		}
+		s.level = max(s.level, byte(level))
+		return result{}, nil
+
 	case cmdExpireProducers:
 		before := r.Int64()
 		if r.Err() != nil || before < 0 || before > index {
@@ -786,6 +807,7 @@ func (s *state) hash() uint32 {
 		str(a.ResourceName, a.Principal, a.Host)
 		add(int64(a.ResourceType), int64(a.PatternType), int64(a.Operation), int64(a.Permission))
 	}
+	add(int64(s.level))
 	return sum
 }
 

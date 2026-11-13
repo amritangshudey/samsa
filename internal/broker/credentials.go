@@ -117,6 +117,8 @@ func (n *Node) alterCredentials(c *conn, h wire.RequestHeader, req *wire.AlterUs
 			refuse(user, wire.ErrUnsupportedSaslMechanism, "Unknown SCRAM mechanism")
 		case n.fileUser(user):
 			refuse(user, wire.ErrUnacceptableCredential, "user is defined in -sasl-users; change it there")
+		case n.levelRefused(1) != "":
+			refuse(user, wire.ErrUnsupportedVersion, n.levelRefused(1))
 		}
 	}
 	var dels [][2]string

@@ -299,6 +299,8 @@ func (n *Node) aclChangeRefused(c *conn) (int16, string) {
 		return wire.ErrSecurityDisabled, "No Authorizer is configured."
 	case !n.may(c, opAlter, resCluster, clusterName):
 		return wire.ErrClusterAuthorizationFailed, "needs ALTER permission on the cluster"
+	case n.levelRefused(1) != "" && n.knowsLeader():
+		return wire.ErrUnsupportedVersion, n.levelRefused(1)
 	}
 	return wire.ErrNone, ""
 }

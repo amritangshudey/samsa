@@ -135,6 +135,9 @@ type Config struct {
 	// UnsafeTrimResetsStart lets retention move a partition's start back
 	// to its first batch, undoing a DeleteRecords inside that batch.
 	UnsafeTrimResetsStart bool
+	// UnsafeRaiseLevelEarly raises the cluster's format level without
+	// waiting for every voter to support it (design G7).
+	UnsafeRaiseLevelEarly bool
 }
 
 func (c Config) withDefaults() Config {
@@ -194,6 +197,7 @@ const (
 	timerSync      sys.TimerID = 2
 	timerElection  sys.TimerID = 3
 	timerHeartbeat sys.TimerID = 4
+	timerLevel     sys.TimerID = 5
 
 	firstFreeTimer sys.TimerID = 16
 )
@@ -234,6 +238,12 @@ type Node struct {
 	log   *slog.Logger
 
 	raft    *raft.Raft
+	// levels are the format levels other nodes reported to this leader;
+	// levelProposed is set while a cmdSetLevel is in flight; reportedTo
+	// is the leader this node last reported its level to (level.go).
+	levels        map[sys.NodeID]levelReport
+	levelProposed bool
+	reportedTo    sys.NodeID
 	// confIndex is raft.ConfIndex when the transport was last told the
 	// voters' addresses (peerAddrs).
 	confIndex int64
@@ -285,6 +295,7 @@ func New(cfg Config, clock sys.Clock, net sys.Network, disk sys.Disk, rand sys.R
 		cfg: cfg, clock: clock, net: net, disk: disk, rand: rand, log: cfg.Logger,
 		trimmedAt: -1, conns: map[sys.ConnID]*conn{}, nextTimer: firstFreeTimer,
 		timers: map[sys.TimerID]func(){}, groups: map[string]*softGroup{}, forwards: map[uint64]*forward{},
+		levels: map[sys.NodeID]levelReport{},
 		faults: faulter{cfg: cfg.Faults, state: cfg.Faults.Seed},
 	}
 	if cfg.SASL != nil {
@@ -380,6 +391,7 @@ func (n *Node) OnStart() error {
 	if n.cfg.Sync == SyncInterval {
 		n.clock.SetTimer(timerSync, n.cfg.SyncInterval)
 	}
+	n.clock.SetTimer(timerLevel, levelEvery)
 	err := n.settle()
 	n.log.Info("started", "entries", n.raft.LastIndex()+1, "applied", n.applied, "topics", len(n.st.names), "groups", len(n.st.groups))
 	return err
@@ -454,6 +466,8 @@ func (n *Node) OnTimer(id sys.TimerID) error {
 		n.raft.OnTimer(raft.TimerElection)
 	case timerHeartbeat:
 		n.raft.OnTimer(raft.TimerHeartbeat)
+	case timerLevel:
+		n.onLevelTimer()
 	default:
 		if fn := n.timers[id]; fn != nil {
 			delete(n.timers, id)
@@ -539,6 +553,11 @@ func (n *Node) lead() {
 		n.expirySamples = nil
 		n.startGroups()
 		n.log.Info("serving as leader", "term", term, "applied", n.applied)
+		n.levelProposed = false
+		n.raiseLevel()
+	}
+	if l, ok := n.raft.Leader(); ok && l != n.reportedTo && n.st.level < formatLevel {
+		n.reportLevel() // a new leader hears at once, not after levelEvery
 	}
 }
 
@@ -954,6 +973,10 @@ func advertised() []wire.APIRange {
 
 // Serving reports whether the node is answering clients as leader.
 func (n *Node) Serving() bool { return n.serving }
+
+// Level returns the cluster's format level as this node has applied it,
+// and the highest this build supports (design G7).
+func (n *Node) Level() (cluster, build int) { return int(n.st.level), formatLevel }
 
 // Raft exposes the node's consensus state to the simulator's monitor,
 // which only reads it. Nil before OnStart.

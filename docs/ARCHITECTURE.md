@@ -136,6 +136,15 @@ a broken peer. Three additions from [B3](design/b3-raft-hardening.md):
   exempt from the lease rule, because the only lease involved has just
   been given up.
 
+**Format level** (`broker/level.go`,
+[ADR 0024](adr/0024-format-level.md)). The cluster's format level is in
+the state machine. Each node reports the highest level its build supports
+to the leader, which raises the cluster's level with `cmdSetLevel` once
+every voter has reported it. Requests that would write a newer format are
+refused below that level. Snapshots are written in the oldest version
+that holds their content. Together these keep a rolling upgrade's old
+nodes from meeting anything they cannot read.
+
 **Membership changes** (`raft/membership.go`, `broker/membership.go`,
 [ADR 0022](adr/0022-membership-changes.md)). One voter is added or removed
 at a time. A configuration is a log entry, in force as soon as it is in a

@@ -22,6 +22,7 @@ func init() {
 		"no-check-quorum":   func(c *broker.Config) { c.UnsafeRaft |= raft.MutNoCheckQuorum },
 		"no-pre-vote":       func(c *broker.Config) { c.UnsafeRaft |= raft.MutNoPreVote },
 		"no-sequence-check": func(c *broker.Config) { c.UnsafeNoSequenceCheck = true },
+		"raise-level-early": func(c *broker.Config) { c.UnsafeRaiseLevelEarly = true },
 	}
 	names := flag.String("unsafe", "", "comma-separated deliberate bugs to switch on (test builds only)")
 	unsafeConfig = func(c *broker.Config) (string, error) {

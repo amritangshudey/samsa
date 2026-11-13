@@ -169,6 +169,7 @@ type voterChange struct {
 	c       *conn
 	h       wire.RequestHeader
 	members []raft.Member // the configuration to propose
+	adding  sys.NodeID    // the voter to add; 0 for a removal
 	index   int64         // of its entry; -1 until appended
 	timer   sys.TimerID
 	poll    sys.TimerID // retries ChangeMembers while the cluster is idle
@@ -191,7 +192,7 @@ func (n *Node) checkVoterChange(c *conn, clusterID string) *wire.VoterChangeResp
 	case n.change != nil:
 		return voterChangeRefusal(wire.ErrRequestTimedOut, "a previous voter change is in progress")
 	}
-	return nil
+	return n.voterLevelRefused()
 }
 
 func (n *Node) addVoter(c *conn, h wire.RequestHeader, req *wire.AddRaftVoterRequest) {
@@ -219,7 +220,7 @@ func (n *Node) addVoter(c *conn, h wire.RequestHeader, req *wire.AddRaftVoterReq
 	}
 	ms := append(n.described(), raft.Member{ID: id, Info: encodeMemberInfo(req.Listeners)})
 	slices.SortFunc(ms, func(a, b raft.Member) int { return int(a.ID) - int(b.ID) })
-	n.startVoterChange(c, h, ms, req.TimeoutMs)
+	n.startVoterChange(c, h, ms, id, req.TimeoutMs)
 }
 
 func (n *Node) removeVoter(c *conn, h wire.RequestHeader, req *wire.RemoveRaftVoterRequest) {
@@ -237,15 +238,15 @@ func (n *Node) removeVoter(c *conn, h wire.RequestHeader, req *wire.RemoveRaftVo
 		n.respond(c, h, voterChangeRefusal(wire.ErrInvalidRequest, "cannot remove the last voter"))
 		return
 	}
-	n.startVoterChange(c, h, slices.Delete(ms, i, i+1), 0)
+	n.startVoterChange(c, h, slices.Delete(ms, i, i+1), 0, 0)
 }
 
-func (n *Node) startVoterChange(c *conn, h wire.RequestHeader, conf []raft.Member, timeoutMs int32) {
+func (n *Node) startVoterChange(c *conn, h wire.RequestHeader, conf []raft.Member, adding sys.NodeID, timeoutMs int32) {
 	d := voterChangeDefault
 	if timeoutMs > 0 {
 		d = min(ms(timeoutMs), voterChangeMaxDelay)
 	}
-	vc := &voterChange{c: c, h: h, members: conf, index: -1}
+	vc := &voterChange{c: c, h: h, members: conf, adding: adding, index: -1}
 	vc.timer = n.after(d, func() {
 		vc.timer = 0
 		n.finishVoterChange(wire.ErrRequestTimedOut, "the change did not complete in time")
@@ -263,7 +264,13 @@ func (n *Node) stepVoterChange() {
 		return
 	}
 	if vc.index < 0 {
-		index, err := n.raft.ChangeMembers(vc.members)
+		var err error
+		index := int64(-1)
+		if vc.adding != 0 && n.levelOf(vc.adding) < n.st.level {
+			err = raft.ErrNotCaughtUp // it must report a level that reads the log first
+		} else {
+			index, err = n.raft.ChangeMembers(vc.members)
+		}
 		switch {
 		case errors.Is(err, raft.ErrNotCaughtUp), errors.Is(err, raft.ErrChangePending):
 			// Retried after the next apply, or soon if nothing applies.

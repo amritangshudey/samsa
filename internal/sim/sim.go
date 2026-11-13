@@ -276,6 +276,16 @@ func (w *world) finalChecks() {
 	if leader == nil || !w.writable(leader) {
 		return
 	}
+	// U1: with every node on one build, the cluster reaches its format
+	// level once settled (design G7: reports every second, fresh for 3 s).
+	atLevel := func() bool { c, b := leader.inc.n.Level(); return c == b }
+	if w.runUntil(w.now+sys.Instant(5*time.Second), atLevel); w.err != nil {
+		return
+	}
+	if c, b := leader.inc.n.Level(); c != b {
+		w.fail("U1: the settled cluster is at format level %d, below its build's %d", c, b)
+		return
+	}
 	var tps []TP
 	for _, t := range catalogue {
 		for p := range t.max {
