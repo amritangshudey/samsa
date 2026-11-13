@@ -77,6 +77,7 @@ func writeMetrics(w io.Writer, m broker.Metrics) {
 	metric("samsa_sent_bytes_total", "counter", "Response bytes sent to clients.", m.BytesOut)
 	metric("samsa_connections_total", "counter", "Client connections accepted.", m.Connections)
 	metric("samsa_connections_dropped_total", "counter", "Client connections closed by the node for bad input or limits.", m.Dropped)
+	metric("samsa_faults_injected_total", "counter", "Faults injected on purpose (-faults).", m.Faults)
 	metric("samsa_connections", "gauge", "Client connections open.", m.Open)
 	metric("samsa_raft_leader", "gauge", "1 if this node is the Raft leader.", b(m.Leader))
 	metric("samsa_serving", "gauge", "1 if this node serves as leader.", b(m.Serving))
