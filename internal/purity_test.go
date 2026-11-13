@@ -21,9 +21,18 @@ const corePrefix = "github.com/amritangshudey/samsa/internal/"
 // source, except time, which is restricted further by allowedTime.
 // Adding to this list is an architecture decision, not a convenience.
 var allowedImports = map[string]bool{
-	"bytes":           true,
-	"cmp":             true,
-	"container/heap":  true,
+	"bytes":          true,
+	"cmp":            true,
+	"container/heap": true,
+	// Deterministic hashing for SASL (ADR 0019); never crypto/rand, which
+	// reads the operating system's randomness.
+	"crypto/hmac":     true,
+	"crypto/pbkdf2":   true,
+	"crypto/sha256":   true,
+	"crypto/sha512":   true,
+	"crypto/subtle":   true,
+	"encoding/base64": true,
+	"hash":            true,
 	"encoding/binary": true,
 	"errors":          true,
 	"fmt":             true,
