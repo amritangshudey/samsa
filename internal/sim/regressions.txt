@@ -20,3 +20,4 @@
 875  # S7, B3: snapshot chunks multiplied until the run stalled
 1946 # S6, C5: a stale leader of an older term (monitor false positive)
 2496 # S6, C5: as above
+1219 # S6, C8b: a late TimeoutNow after an abandoned transfer

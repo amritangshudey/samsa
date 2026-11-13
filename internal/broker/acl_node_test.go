@@ -402,10 +402,73 @@ func TestACLsReplicate(t *testing.T) {
 	if md := follower.metadata(1); len(md.Topics) != 0 {
 		t.Fatalf("the follower still lists t after the DENY: %+v", md.Topics)
 	}
-	if r := follower.createACLs(1, deny); r[0].ErrorCode != wire.ErrNotController {
-		t.Fatalf("CreateAcls on a follower: %+v", r)
-	}
 	if d := follower.describeACLs(1, anyACL); d.ErrorCode != 0 || len(d.Resources) != 1 {
 		t.Fatalf("DescribeAcls on a follower: %+v", d)
+	}
+
+	// A follower forwards an ACL change to the leader and answers its
+	// client once the command applies there too, with its own result.
+	more := acl(resGroup, "g", patLiteral, "User:ANONYMOUS", "*", opRead, permAllow)
+	corr = follower.send(1, wire.KeyCreateAcls, 3, &wire.CreateAclsRequest{Creations: []wire.ACL{more}})
+	follower.run()
+	tr.deliver(1, 2, 3)
+	lead.must(lead.node.OnTimer(timerHeartbeat))
+	tr.deliver(1, 2, 3)
+	if !follower.recv(1, wire.KeyCreateAcls, 3, corr, &ca) || ca.Results[0].ErrorCode != 0 {
+		t.Fatalf("CreateAcls through a follower: %+v", ca)
+	}
+	for id, h := range tr.h {
+		if len(h.node.st.acls) != 2 {
+			t.Fatalf("node %d has ACLs %+v", id, h.node.st.acls)
+		}
+	}
+	x := "g"
+	corr = follower.send(1, wire.KeyDeleteAcls, 3, &wire.DeleteAclsRequest{Filters: []wire.ACLFilter{{ResourceType: resGroup, ResourceName: &x, PatternType: patMatch, Operation: opAny, Permission: permAny}}})
+	follower.run()
+	tr.deliver(1, 2, 3)
+	lead.must(lead.node.OnTimer(timerHeartbeat))
+	tr.deliver(1, 2, 3)
+	var da wire.DeleteAclsResponse
+	if !follower.recv(1, wire.KeyDeleteAcls, 3, corr, &da) || da.Results[0].ErrorCode != 0 || len(da.Results[0].Matching) != 1 || da.Results[0].Matching[0].ResourceName != "g" {
+		t.Fatalf("DeleteAcls through a follower: %+v", da)
+	}
+
+	// The leader is cut off: the forward is never answered, and after the
+	// timeout the follower says NOT_CONTROLLER. Nothing else is pending.
+	corr = follower.send(1, wire.KeyCreateAcls, 3, &wire.CreateAclsRequest{Creations: []wire.ACL{more}})
+	follower.run()
+	tr.deliver(2, 3)
+	if follower.recv(1, wire.KeyCreateAcls, 3, corr, &ca) {
+		t.Fatal("answered before the timeout")
+	}
+	follower.advance(forwardTimeout)
+	if !follower.recv(1, wire.KeyCreateAcls, 3, corr, &ca) || ca.Results[0].ErrorCode != wire.ErrNotController || len(follower.node.forwards) != 0 {
+		t.Fatalf("after the timeout: %+v, %d forwards left", ca, len(follower.node.forwards))
+	}
+}
+
+// A node that knows no leader answers NOT_CONTROLLER at once; a node that
+// is asked to propose but does not serve refuses the forward.
+func TestForwardRefused(t *testing.T) {
+	tr := newTrio(t)
+	for _, h := range tr.h {
+		h.cfg.Authorization = &Authorization{AllowIfNoACL: true}
+		h.start()
+		h.open(1)
+	}
+	if r := tr.h[2].createACLs(1, allowAlice(resTopic, "t", opRead)); r[0].ErrorCode != wire.ErrNotController {
+		t.Fatalf("no leader: %+v", r)
+	}
+	n := tr.h[3]
+	n.must(n.node.OnPeerMessage(2, append([]byte{brokerMsg, msgForward, 0, 0, 0, 0, 0, 0, 0, 9}, encodeCreateACL(allowAlice(resTopic, "t", opRead))...)))
+	if len(n.net.peers) != 1 || n.net.peers[0].to != 2 || n.net.peers[0].msg[1] != msgForwardRefused {
+		t.Fatalf("a node that does not serve answered %+v", n.net.peers)
+	}
+	for _, bad := range [][]byte{{brokerMsg}, {brokerMsg, msgForward, 1, 2}, append([]byte{brokerMsg, msgForward, 0, 0, 0, 0, 0, 0, 0, 9}, encodeCreateTopic("t", 1)...)} {
+		n.net.peers = nil
+		n.must(n.node.OnPeerMessage(2, bad))
+		if len(n.net.peers) != 0 {
+			t.Fatalf("a malformed forward %x was answered", bad)
+		}
 	}
 }

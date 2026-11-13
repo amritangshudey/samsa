@@ -12,6 +12,7 @@ import (
 	"slices"
 	"sort"
 
+	"github.com/amritangshudey/samsa/internal/scram"
 	"github.com/amritangshudey/samsa/internal/wire"
 )
 
@@ -32,6 +33,9 @@ const (
 	// The ACL commands of docs/design/c8-acls.md.
 	cmdCreateACL  byte = 11
 	cmdDeleteACLs byte = 12
+	// The commands of docs/design/c8b-credentials-forwarding.md.
+	cmdAlterCredentials byte = 13
+	cmdForwarded        byte = 14
 )
 
 // errBadCommand marks a command in the log that cannot be decoded. The log
@@ -207,6 +211,9 @@ type state struct {
 	groups   map[string]*group
 	// acls are the ACLs in the order they were created, without duplicates.
 	acls []wire.ACL
+	// creds are the replicated SCRAM credentials: per user, one per
+	// mechanism, sorted by mechanism.
+	creds map[string][]scram.Credential
 	// noFencing is Config.UnsafeNoFencing, noSequences
 	// Config.UnsafeNoSequenceCheck: deliberate bugs.
 	noFencing, noSequences bool
@@ -218,7 +225,9 @@ type state struct {
 	expired int
 }
 
-func newState() *state { return &state{topics: map[string]*topic{}, groups: map[string]*group{}} }
+func newState() *state {
+	return &state{topics: map[string]*topic{}, groups: map[string]*group{}, creds: map[string][]scram.Credential{}}
+}
 
 // member is one consumer in a group generation.
 type member struct {
@@ -387,6 +396,10 @@ type result struct {
 	errCode    int16
 	baseOffset int64      // Append: offset assigned to the batch's first record; DeleteRecords: the new start
 	acls       []wire.ACL // DeleteAcls: the ACLs removed
+	// origin and tag are set for a forwarded command: the node that is
+	// waiting for this result, and how it knows its request.
+	origin int32
+	tag    uint64
 }
 
 // apply executes the command stored at log index. The error is non-nil only
@@ -608,6 +621,44 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 		})
 		return result{acls: gone}, nil
 
+	case cmdAlterCredentials:
+		var dels [][2]string
+		wire.Array(r, false, func() struct{} { dels = append(dels, [2]string{r.String(false), r.String(false)}); return struct{}{} })
+		var ups []upsert
+		bad := false
+		wire.Array(r, false, func() struct{} {
+			name, text := r.String(false), r.String(false)
+			c, err := scram.ParseCredential(text)
+			bad = bad || (err != nil && r.Err() == nil)
+			ups = append(ups, upsert{name, c})
+			return struct{}{}
+		})
+		if r.Err() != nil || r.Len() != 0 || bad {
+			return result{}, fmt.Errorf("%w: alter credentials at index %d", errBadCommand, index)
+		}
+		for _, d := range dels {
+			s.creds[d[0]] = slices.DeleteFunc(s.creds[d[0]], func(c scram.Credential) bool { return c.Mechanism == d[1] })
+			if len(s.creds[d[0]]) == 0 {
+				delete(s.creds, d[0])
+			}
+		}
+		for _, u := range ups {
+			cs := slices.DeleteFunc(s.creds[u.name], func(c scram.Credential) bool { return c.Mechanism == u.cred.Mechanism })
+			cs = append(cs, u.cred)
+			slices.SortFunc(cs, func(a, b scram.Credential) int { return cmp.Compare(a.Mechanism, b.Mechanism) })
+			s.creds[u.name] = cs
+		}
+		return result{}, nil
+
+	case cmdForwarded:
+		origin, tag, inner := r.Int32(), r.Int64(), r.Rest()
+		if r.Err() != nil || len(inner) == 0 || (inner[0] != cmdCreateACL && inner[0] != cmdDeleteACLs) {
+			return result{}, fmt.Errorf("%w: forwarded command at index %d", errBadCommand, index)
+		}
+		res, err := s.apply(index, inner)
+		res.origin, res.tag = origin, uint64(tag)
+		return res, err
+
 	case cmdExpireProducers:
 		before := r.Int64()
 		if r.Err() != nil || before < 0 || before > index {
@@ -724,6 +775,12 @@ func (s *state) hash() uint32 {
 			}
 		}
 	}
+	for _, user := range sortedKeys(s.creds) {
+		str(user)
+		for _, c := range s.creds[user] {
+			str(c.String())
+		}
+	}
 	add(int64(len(s.acls)))
 	for _, a := range s.acls {
 		str(a.ResourceName, a.Principal, a.Host)
@@ -785,4 +842,39 @@ func writeACL(w *wire.Writer, a wire.ACL) {
 func readACL(r *wire.Reader) wire.ACL {
 	return wire.ACL{ResourceType: r.Int8(), ResourceName: r.String(false), PatternType: r.Int8(),
 		Principal: r.String(false), Host: r.String(false), Operation: r.Int8(), Permission: r.Int8()}
+}
+
+// upsert is one credential set by an AlterCredentials command.
+type upsert struct {
+	name string
+	cred scram.Credential
+}
+
+// encodeAlterCredentials holds the valid changes of one
+// AlterUserScramCredentials request, applied together. Deletions name a
+// user and a mechanism; upsertions carry the derived credential, never
+// the salted password.
+func encodeAlterCredentials(dels [][2]string, ups []upsert) []byte {
+	w := wire.Writer{B: []byte{cmdAlterCredentials}}
+	w.ArrayLen(false, len(dels))
+	for _, d := range dels {
+		w.String(false, d[0])
+		w.String(false, d[1])
+	}
+	w.ArrayLen(false, len(ups))
+	for _, u := range ups {
+		w.String(false, u.name)
+		w.String(false, u.cred.String())
+	}
+	return w.B
+}
+
+// encodeForwarded wraps a command a follower asked the leader to propose
+// (section 3 of the design). Only ACL commands are forwarded: they are
+// idempotent, so a forward that times out and is retried is harmless.
+func encodeForwarded(origin int32, tag uint64, cmd []byte) []byte {
+	w := wire.Writer{B: []byte{cmdForwarded}}
+	w.Int32(origin)
+	w.Int64(int64(tag))
+	return append(w.B, cmd...)
 }
