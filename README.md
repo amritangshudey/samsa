@@ -80,6 +80,11 @@ kills at once.
   `samsa user add -file users -name alice` (the password is read on stdin;
   only SCRAM credentials are stored, never the password). Changing users
   needs a restart. Details and limits: [docs/design/c5-tls-sasl.md](docs/design/c5-tls-sasl.md).
+- **ACLs.** `-acl -super-users User:admin` checks every request against
+  ACLs, managed with the Kafka ACL APIs (`kafka-acls.sh`). A resource
+  without ACLs is denied unless `-allow-if-no-acl`. Send ACL changes to
+  the leader: a follower refuses them. Details and limits:
+  [docs/design/c8-acls.md](docs/design/c8-acls.md).
 - **Testing your application under faults.** `-faults seed=42` makes the
   broker lose produce acknowledgements, refuse requests as a non-leader
   and force rebalances, from a seed. `samsa verdict -data DIR -in T -out
@@ -117,6 +122,7 @@ unmodified client library or tool, against the built binary, over TCP.
 | Three real processes under SIGKILL, graceful restarts, partitions, one-way cuts, slow links and connection resets, every franz-go answer judged by the simulator's own checker; a build with stale reads switched on is caught, and the same scenario passes on the real build | [`TestChaos`](integration/chaos_test.go), [`TestChaosCatchesBrokenBuild`](integration/chaos_test.go) |
 | An application that commits before it processes is reported as losing records under forced rebalances, with the seed; the same application committing after processing passes under all three fault kinds | [`TestVerdictCatchesCommitBeforeProcess`](integration/apps_test.go), [`TestJudge`](internal/broker/verdict_test.go), [`TestFaultLostAck`](internal/broker/faults_test.go) |
 | TLS for clients and between nodes; SCRAM-SHA-256, SCRAM-SHA-512 and PLAIN with franz-go, the Java client and kcat; wrong passwords, unknown users, plaintext, untrusted brokers and certificates from another CA refused | [`TestTLSAndSASL`](integration/security_test.go), [`TestTLSAndSASLOtherClients`](integration/security_test.go), [`TestPeerTLS`](integration/security_test.go), [`TestRFC7677Example`](internal/scram/scram_test.go) |
+| ACLs with Kafka's rules on every API, default deny; managed with franz-go and `kafka-acls.sh`, enforced against franz-go, the Java client and kcat; replicated to every node | [`TestEveryAPIAllowedAndDenied`](internal/broker/acl_node_test.go), [`TestACLsReplicate`](internal/broker/acl_node_test.go), [`TestACLsFranzGo`](integration/acl_test.go), [`TestACLsOtherClients`](integration/acl_test.go) |
 | Replication with Raft; a three-process cluster survives two leader kills with no record lost | [`TestClusterSurvivesLeaderKill`](integration/cluster_test.go) |
 | Acknowledged writes survive power loss (fsync before ack, torn writes, failed fsyncs) | [`TestCrashRecoveryProperty`](internal/storage/crash_test.go), the simulator |
 | Every produce and fetch answer checked against an exact model of each partition, under crashes and partitions, 1–5 nodes ([ADR 0007](docs/adr/0007-history-checking.md)) | [`TestSim`](internal/sim/sim_test.go), [`TestRegressions`](internal/sim/sim_test.go) |
@@ -132,7 +138,7 @@ fetch, metadata, offsets, topics) and [ADR 0008](docs/adr/0008-group-api-version
 
 Transactions (a transactional producer is refused with `INVALID_REQUEST`),
 log compaction, retention by time or per topic (only `-retention-bytes`, one
-bound for the whole log), changing configs (AlterConfigs), topic ids, ACLs, SASL, TLS, tiered storage,
+bound for the whole log), changing configs (AlterConfigs), topic ids, changing SASL users without a restart, tiered storage,
 cluster membership changes, the KIP-848 group protocol, static membership,
 fetch sessions, more than one Raft
 group (all partitions share one log, [ADR 0010](docs/adr/0010-one-raft-group.md)),
