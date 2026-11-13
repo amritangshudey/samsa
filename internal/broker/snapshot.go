@@ -116,7 +116,9 @@ func decodeState(b []byte) (*state, error) {
 			p.batches = wire.Array(r, false, func() batchRef {
 				return batchRef{base: r.Int64(), logIndex: r.Int64(), maxTimestamp: r.Int64()}
 			})
-			if p.start < 0 || p.start > p.next || len(p.batches) > 0 && (p.batches[0].base != p.start || p.batches[0].logIndex < s.logStart) {
+			// The first batch holds the start: DeleteRecords can put it inside.
+			if p.start < 0 || p.start > p.next || len(p.batches) > 0 && (p.batches[0].base > p.start || p.start == p.next ||
+				len(p.batches) > 1 && p.batches[1].base <= p.start || p.batches[0].logIndex < s.logStart) {
 				bad = true
 			}
 			if v >= 3 {

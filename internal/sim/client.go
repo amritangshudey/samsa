@@ -9,13 +9,14 @@ import (
 	"github.com/amritangshudey/samsa/internal/wire"
 )
 
-// The topics clients use. Each has a fixed partition count, so that two
-// clients racing to create one agree on what it looks like. Nobody ever
-// creates ghostTopic.
+// The topics clients use. Each is created with a fixed partition count, so
+// that two clients racing to create one agree on what it looks like; an
+// admin may grow it to max with CreatePartitions. Nobody ever creates
+// ghostTopic.
 var catalogue = []struct {
-	name  string
-	parts int32
-}{{"t0", 1}, {"t1", 2}, {"t2", 3}}
+	name       string
+	parts, max int32
+}{{"t0", 1, 1}, {"t1", 2, 2}, {"t2", 3, 5}}
 
 const ghostTopic = "ghost"
 
@@ -24,7 +25,7 @@ const ghostTopic = "ghost"
 func inCatalogue(tp TP) bool {
 	for _, t := range catalogue {
 		if t.name == tp.Topic {
-			return tp.Part >= 0 && tp.Part < t.parts
+			return tp.Part >= 0 && tp.Part < t.max
 		}
 	}
 	return false
@@ -63,6 +64,7 @@ type client struct {
 	pin      *simNode      // if set, the only node this client connects to
 	fetchMin int16         // lowest Fetch version to use
 	idem     *idemProducer // idempotent producers: the session
+	adm      *adminState   // admin clients: doomedTopic's life (admin.go)
 }
 
 // tick is the client's heartbeat: connect, misbehave, or issue a request.
@@ -240,7 +242,7 @@ func (cl *client) randomTP() TP {
 		return TP{ghostTopic, 0}
 	}
 	t := catalogue[cl.rng.Intn(len(catalogue))]
-	return TP{t.name, int32(cl.rng.Intn(int(t.parts) + 1))} // one past the end sometimes
+	return TP{t.name, int32(cl.rng.Intn(int(t.max) + 1))} // one past the end sometimes
 }
 
 // distinctTPs picks up to n different partitions.
@@ -289,7 +291,7 @@ func (cl *client) misc() {
 				continue
 			}
 			found = true
-			if !m.possible(TP{t.Name, int32(len(t.Partitions)) - 1}) || m.possible(TP{t.Name, int32(len(t.Partitions))}) {
+			if least, most := m.PartitionRange(t.Name); int32(len(t.Partitions)) < least || int32(len(t.Partitions)) > most {
 				cl.w.fail("I4: metadata reports topic %q with %d partitions", t.Name, len(t.Partitions))
 			}
 		}

@@ -45,6 +45,34 @@ func TestModel(t *testing.T) {
 		run    func(w world) error
 		want   string // substring of the error; "" means the history is fine
 	}{
+		{"DeleteRecords: a later read below its low watermark", true, func(w world) error {
+			if err := w.m.RecordsDeleted(tp, 1, 1, w.m.Floor(tp), w.m.Start(tp), w.m.Epoch()); err != nil {
+				return err
+			}
+			return readAt(w, 0, 0, 2, wire.ErrNone, batchAt(w.a, 2, 0))
+		}, "R1"},
+		{"DeleteRecords: low watermark below the offset asked for", true, func(w world) error {
+			return w.m.RecordsDeleted(tp, 2, 1, w.m.Floor(tp), w.m.Start(tp), w.m.Epoch())
+		}, "R1"},
+		{"DeleteRecords: at the end, answered below what was acknowledged", true, func(w world) error {
+			return w.m.RecordsDeleted(tp, -1, 1, w.m.Floor(tp), w.m.Start(tp), w.m.Epoch())
+		}, "I1"},
+		{"DeleteTopics: the topic is found after the delete was acknowledged", true, func(w world) error {
+			w.m.TopicDeleteAttempted("t")
+			w.m.TopicDeleted("t", w.m.Epoch())
+			_, err := w.m.Fetched(Fetch{TP: tp, Floor: w.m.Floor(tp), Epoch: w.m.Epoch(), Known: w.m.Known(tp), Deleted: w.m.Deleted("t"),
+				HW: 2, LogStart: -1, Records: batchAt(w.a, 2, 0)})
+			return err
+		}, "D1"},
+		{"DeleteTopics: unknown after the delete, and the records need not survive", true, func(w world) error {
+			w.m.TopicDeleteAttempted("t")
+			w.m.TopicDeleted("t", w.m.Epoch())
+			if _, err := w.m.Fetched(Fetch{TP: tp, Epoch: w.m.Epoch(), Known: w.m.Known(tp), Deleted: true, Err: wire.ErrUnknownTopicOrPartition}); err != nil {
+				return err
+			}
+			w.m.BeginFinal()
+			return w.m.CheckFinal()
+		}, ""},
 		{"retention: below the start is out of range", true, func(w world) error {
 			return readAt(w, 0, 2, 2, wire.ErrOffsetOutOfRange, nil)
 		}, ""},

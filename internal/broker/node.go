@@ -112,6 +112,12 @@ type Config struct {
 	// UnsafeNoFencing breaks zombie fencing on purpose: an offset commit
 	// from a member is accepted whatever generation it carries.
 	UnsafeNoFencing bool
+	// UnsafeKeepOffsetsOnDelete keeps a deleted topic's committed offsets,
+	// for a topic created later under the same name to find.
+	UnsafeKeepOffsetsOnDelete bool
+	// UnsafeTrimResetsStart lets retention move a partition's start back
+	// to its first batch, undoing a DeleteRecords inside that batch.
+	UnsafeTrimResetsStart bool
 }
 
 func (c Config) withDefaults() Config {
@@ -258,6 +264,7 @@ func New(cfg Config, clock sys.Clock, net sys.Network, disk sys.Disk, rand sys.R
 // configuration, not state: they are set again on whatever state arrives.
 func (n *Node) adopt(st *state) {
 	st.noFencing, st.noSequences = n.cfg.UnsafeNoFencing, n.cfg.UnsafeNoSequenceCheck
+	st.keepOffsetsOnDelete, st.trimResetsStart = n.cfg.UnsafeKeepOffsetsOnDelete, n.cfg.UnsafeTrimResetsStart
 	n.st = st
 }
 
@@ -797,6 +804,27 @@ func (n *Node) dispatch(c *conn, frame []byte) {
 	case wire.KeyInitProducerID:
 		m := &wire.InitProducerIDRequest{}
 		req, handle = m, func() { n.respond(c, h, n.initProducerID(m)) }
+	case wire.KeyDeleteTopics:
+		m := &wire.DeleteTopicsRequest{}
+		req, handle = m, func() { n.deleteTopics(c, h, m) }
+	case wire.KeyCreatePartitions:
+		m := &wire.CreatePartitionsRequest{}
+		req, handle = m, func() { n.createPartitions(c, h, m) }
+	case wire.KeyDeleteRecords:
+		m := &wire.DeleteRecordsRequest{}
+		req, handle = m, func() { n.deleteRecords(c, h, m) }
+	case wire.KeyDescribeConfigs:
+		m := &wire.DescribeConfigsRequest{}
+		req, handle = m, func() { n.respond(c, h, n.describeConfigs(m)) }
+	case wire.KeyListGroups:
+		m := &wire.ListGroupsRequest{}
+		req, handle = m, func() { n.respond(c, h, n.listGroups(m)) }
+	case wire.KeyDescribeGroups:
+		m := &wire.DescribeGroupsRequest{}
+		req, handle = m, func() { n.respond(c, h, n.describeGroups(m)) }
+	case wire.KeyDescribeCluster:
+		m := &wire.DescribeClusterRequest{}
+		req, handle = m, func() { n.respond(c, h, n.describeCluster(m)) }
 	default: // unreachable while wire.APIs and this switch agree
 		n.drop(c, fmt.Sprintf("no handler for key %d", h.Key))
 		return

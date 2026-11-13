@@ -26,7 +26,10 @@ derived from the applied prefix.
 
 The commands (`internal/broker/state.go`): create topic, append a record
 batch to a partition, commit an offset, set a group's generation, set a
-group's assignment. Each starts with a type byte; an unknown type stops the
+group's assignment, and the admin commands (B4): delete a topic (with its
+producer state and every group's offsets for it, in one command; topics
+are named by name only, [ADR 0016](adr/0016-admin-api-versions.md)), grow
+a topic's partitions, and delete a partition's records below an offset. Each starts with a type byte; an unknown type stops the
 node rather than being skipped. Raft adds a no-op entry at the start of
 each leader's term.
 
@@ -55,7 +58,8 @@ that the log cannot back stops the node.
 exceeds `RetentionBytes`, the leader proposes `Trim(C)`, C a segment base
 at or below the commit index. Applying it, on every replica, drops batch
 references below C and moves each partition's start; fetches below it
-answer `OFFSET_OUT_OF_RANGE`. The node then snapshots, and deletes
+answer `OFFSET_OUT_OF_RANGE`. A start moved by DeleteRecords may sit inside
+a batch, and a trim never moves a start back (`max`). The node then snapshots, and deletes
 segments only below its newest snapshot's log start
 (`raft.Compact`). A follower whose next entry was deleted gets the
 leader's snapshot by InstallSnapshot (`raft/snapshot.go`), in chunks,
@@ -212,7 +216,10 @@ virtual time, all randomness from one seed ([ADR 0007](adr/0007-history-checking
   invariants (generations only move forward and all members of one hear
   the same thing; each member gets what the leader assigned and no slot
   goes to two members; no commit accepted from an older generation;
-  acknowledged commits are what an offset fetch returns, across crashes). `monitor.go` checks Raft: one leader per term, a term that never goes
+  acknowledged commits are what an offset fetch returns, across crashes).
+The model also follows the admin client (`admin.go`): a partition's start
+only goes forward (R1), DeleteRecords answers the start it set, and a
+fetch sent after a topic's delete was acknowledged finds no topic (D1). `monitor.go` checks Raft: one leader per term, a term that never goes
   back and a vote that is never forgotten across restarts, committed entries
   never replaced, replicas that applied the same prefix having equal state
   hashes, and no node elected while another holds a lease. A failure prints the seed and the command that replays it.
@@ -224,7 +231,7 @@ virtual time, all randomness from one seed ([ADR 0007](adr/0007-history-checking
   acknowledge before sync, serve before applying the term's entry, read
   without the lease, no fencing, snapshot before sync, delete segments
   early, no sequence check, expire producers at once, keep the lease
-  during a leadership transfer) and requires each to be caught, then
+  during a leadership transfer, let retention move a start back) and requires each to be caught, then
   replays the catching seed without the bug to confirm the system is clean.
   The Figure 8 bug is caught by the Raft-level random schedules instead
   (`internal/raft/random_test.go`).

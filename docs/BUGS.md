@@ -340,3 +340,20 @@ would happen against Kafka too (not tested against Kafka).
   marked lost (`Model.place`). A unit test holds the two-crash history.
 - **Lesson:** the same as M1. 81 of the first 200 seeds failed, and 79 of
   those were the checker.
+
+### M9. The checker judged DeleteRecords answers by the state at answer time (B4a)
+
+- **Seeds:** 73, 79, 83, 99, 121 (300-seed run), then 3012, 3359, 3743 and
+  4650 (5000-seed run) after a first, partial fix.
+- **Reported as:** R1, "the log start went back", and I1, "a DeleteRecords
+  to the high watermark answered below an acknowledged record".
+- **Root cause:** `RecordsDeleted` compared the answered low watermark with
+  the model's floor (first fix: with its start) as they were when the
+  answer arrived. A trim or another DeleteRecords applied after this one,
+  but answered first, had already moved them. The broker was right: its
+  answer is the start at apply time.
+- **Fix:** the client captures the floor and the start when it sends the
+  request and the check uses those (causality rule: what the request could
+  have seen). Unit cases in `history_test.go`.
+- **Lesson:** the same as M1 and M3. Every answer is judged against what
+  was known when the request was sent, never when it returned.

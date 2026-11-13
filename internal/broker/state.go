@@ -25,6 +25,10 @@ const (
 	cmdGroupAssignment byte = 5
 	cmdTrim            byte = 6
 	cmdExpireProducers byte = 7
+	// The admin commands of docs/design/b4-operations.md, section 3.
+	cmdDeleteTopic      byte = 8
+	cmdCreatePartitions byte = 9
+	cmdDeleteRecords    byte = 10
 )
 
 // errBadCommand marks a command in the log that cannot be decoded. The log
@@ -36,6 +40,29 @@ func encodeCreateTopic(name string, partitions int32) []byte {
 	w := wire.Writer{B: []byte{cmdCreateTopic}}
 	w.String(false, name)
 	w.Int32(partitions)
+	return w.B
+}
+
+func encodeDeleteTopic(name string) []byte {
+	w := wire.Writer{B: []byte{cmdDeleteTopic}}
+	w.String(false, name)
+	return w.B
+}
+
+func encodeCreatePartitions(name string, count int32) []byte {
+	w := wire.Writer{B: []byte{cmdCreatePartitions}}
+	w.String(false, name)
+	w.Int32(count)
+	return w.B
+}
+
+// encodeDeleteRecords deletes a partition's records below offset; -1 means
+// the high watermark at apply, so that the answer and every replica agree.
+func encodeDeleteRecords(name string, partition int32, offset int64) []byte {
+	w := wire.Writer{B: []byte{cmdDeleteRecords}}
+	w.String(false, name)
+	w.Int32(partition)
+	w.Int64(offset)
 	return w.B
 }
 
@@ -178,6 +205,9 @@ type state struct {
 	// noFencing is Config.UnsafeNoFencing, noSequences
 	// Config.UnsafeNoSequenceCheck: deliberate bugs.
 	noFencing, noSequences bool
+	// keepOffsetsOnDelete and trimResetsStart are Config.UnsafeKeepOffsets-
+	// OnDelete and Config.UnsafeTrimResetsStart: deliberate bugs.
+	keepOffsetsOnDelete, trimResetsStart bool
 	// expired counts the producers this replica forgot since it started or
 	// restored a snapshot. Diagnostic only: not hashed, not in snapshots.
 	expired int
@@ -350,7 +380,7 @@ func (s *state) partition(name string, index int32) *partition {
 // proposed it.
 type result struct {
 	errCode    int16
-	baseOffset int64 // Append: offset assigned to the batch's first record
+	baseOffset int64 // Append: offset assigned to the batch's first record; DeleteRecords: the new start
 }
 
 // apply executes the command stored at log index. The error is non-nil only
@@ -424,6 +454,12 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 		}
 		g := s.forWrite(name)
 		for _, e := range entries {
+			// Checked when proposed, but a DeleteTopic may have been
+			// applied since: an offset kept for it would reappear on a
+			// topic created later under the same name.
+			if s.partition(e.topic, e.partition) == nil && !s.keepOffsetsOnDelete {
+				continue
+			}
 			if g.offsets[e.topic] == nil {
 				g.offsets[e.topic] = map[int32]committedOffset{}
 			}
@@ -467,13 +503,79 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 			for _, p := range s.topics[name].parts {
 				keep := sort.Search(len(p.batches), func(i int) bool { return p.batches[i].logIndex >= cut })
 				p.batches = slices.Delete(p.batches, 0, keep)
-				p.start = p.next
+				// Only up: a DeleteRecords may have put it inside the first batch.
+				start := p.next
 				if len(p.batches) > 0 {
-					p.start = p.batches[0].base
+					start = p.batches[0].base
+				}
+				if s.trimResetsStart {
+					p.start = start
+				} else {
+					p.start = max(p.start, start)
 				}
 			}
 		}
 		return result{}, nil
+
+	case cmdDeleteTopic:
+		name := r.String(false)
+		if r.Err() != nil {
+			return result{}, fmt.Errorf("%w: delete topic at index %d", errBadCommand, index)
+		}
+		if s.topics[name] == nil {
+			return result{errCode: wire.ErrUnknownTopicOrPartition}, nil // two deletes raced
+		}
+		delete(s.topics, name)
+		at := sort.SearchStrings(s.names, name)
+		s.names = slices.Delete(s.names, at, at+1)
+		if !s.keepOffsetsOnDelete {
+			for _, g := range sortedKeys(s.groups) {
+				delete(s.groups[g].offsets, name)
+			}
+		}
+		return result{}, nil
+
+	case cmdCreatePartitions:
+		name, count := r.String(false), r.Int32()
+		if r.Err() != nil {
+			return result{}, fmt.Errorf("%w: create partitions at index %d", errBadCommand, index)
+		}
+		t := s.topics[name]
+		switch {
+		case t == nil:
+			return result{errCode: wire.ErrUnknownTopicOrPartition}, nil
+		case int(count) <= len(t.parts):
+			return result{errCode: wire.ErrInvalidPartitions}, nil // another request grew it first
+		}
+		for len(t.parts) < int(count) {
+			t.parts = append(t.parts, &partition{})
+		}
+		return result{}, nil
+
+	case cmdDeleteRecords:
+		name, part, offset := r.String(false), r.Int32(), r.Int64()
+		if r.Err() != nil {
+			return result{}, fmt.Errorf("%w: delete records at index %d", errBadCommand, index)
+		}
+		p := s.partition(name, part)
+		if p == nil {
+			return result{errCode: wire.ErrUnknownTopicOrPartition, baseOffset: -1}, nil
+		}
+		if offset == -1 {
+			offset = p.next
+		}
+		if offset < 0 || offset > p.next {
+			return result{errCode: wire.ErrOffsetOutOfRange, baseOffset: -1}, nil
+		}
+		p.start = max(p.start, offset)
+		// Drop every batch that ends at or below the start: the one after
+		// it begins there, or there is none.
+		keep := sort.Search(len(p.batches), func(i int) bool { return p.batches[i].base > p.start }) - 1
+		if keep >= 0 && p.start == p.next {
+			keep = len(p.batches)
+		}
+		p.batches = slices.Delete(p.batches, 0, max(keep, 0))
+		return result{baseOffset: p.start}, nil
 
 	case cmdExpireProducers:
 		before := r.Int64()

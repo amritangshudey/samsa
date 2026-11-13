@@ -4,6 +4,13 @@ KAFKA_CLIENTS_VERSION ?= 4.4.0
 SLF4J_VERSION ?= 2.0.17
 MAVEN := https://repo1.maven.org/maven2
 JARS := integration/.cache/kafka-clients-$(KAFKA_CLIENTS_VERSION).jar integration/.cache/slf4j-api-$(SLF4J_VERSION).jar
+# The Kafka distribution, for its CLI tools (kafka-topics.sh and the rest),
+# test-only. The SHA-512 is pinned here, copied from archive.apache.org's
+# .sha512 file on 2026-11-13, so a changed download fails whichever mirror
+# served it.
+KAFKA_DIST_VERSION ?= 4.4.0
+KAFKA_DIST_SHA512 := f5ceba8a265ab6bb2d68362b1f6859a95e15d60ef92ba83b43fdf065b557dc18e98d6383c15b9977320e25b3a2c8b6f11decb17b0fa6c0f163423793a0eb95cb
+KAFKA_DIST := integration/.cache/kafka_2.13-$(KAFKA_DIST_VERSION)
 
 SEEDS ?= 1000
 
@@ -58,7 +65,7 @@ endif
 
 # Real clients (franz-go, kcat, the Java client) against the built binary.
 # Needs kcat and a JDK; set SAMSA_REQUIRE_CLIENTS=1 to fail when one is missing.
-integration: build $(JARS)
+integration: build $(JARS) $(KAFKA_DIST)
 	cd integration && SAMSA_BIN=$(CURDIR)/bin/samsa go test -count=1 -v ./...
 
 # Throughput and latency of the built binary; method in docs/design/phase-7.md.
@@ -68,6 +75,13 @@ bench: build
 
 integration/.cache/kafka-clients-%.jar:
 	mkdir -p $(@D) && curl -sfL -o $@ $(MAVEN)/org/apache/kafka/kafka-clients/$*/kafka-clients-$*.jar
+
+$(KAFKA_DIST):
+	mkdir -p $(@D)/dl
+	curl -sfL -o $(@D)/dl/kafka.tgz https://dlcdn.apache.org/kafka/$(KAFKA_DIST_VERSION)/kafka_2.13-$(KAFKA_DIST_VERSION).tgz || \
+		curl -sfL -o $(@D)/dl/kafka.tgz https://archive.apache.org/dist/kafka/$(KAFKA_DIST_VERSION)/kafka_2.13-$(KAFKA_DIST_VERSION).tgz
+	echo "$(KAFKA_DIST_SHA512)  $(@D)/dl/kafka.tgz" | shasum -a 512 -c -
+	tar -xzf $(@D)/dl/kafka.tgz -C $(@D) && rm $(@D)/dl/kafka.tgz
 
 integration/.cache/slf4j-api-%.jar:
 	mkdir -p $(@D) && curl -sfL -o $@ $(MAVEN)/org/slf4j/slf4j-api/$*/slf4j-api-$*.jar

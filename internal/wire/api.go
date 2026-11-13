@@ -13,8 +13,16 @@ const (
 	KeyHeartbeat    int16 = 12
 	KeyLeaveGroup   int16 = 13
 	KeySyncGroup    int16 = 14
-	KeyAPIVersions  int16 = 18
-	KeyCreateTopics int16 = 19
+	// KeyDescribeGroups and the keys below are the admin APIs of B4.
+	KeyDescribeGroups   int16 = 15
+	KeyListGroups       int16 = 16
+	KeyDeleteTopics     int16 = 20
+	KeyDeleteRecords    int16 = 21
+	KeyDescribeConfigs  int16 = 32
+	KeyCreatePartitions int16 = 37
+	KeyDescribeCluster  int16 = 60
+	KeyAPIVersions      int16 = 18
+	KeyCreateTopics     int16 = 19
 	// KeyInitProducerID is how an idempotent producer gets its id.
 	KeyInitProducerID int16 = 22
 )
@@ -44,6 +52,7 @@ const (
 	ErrTopicAlreadyExists          int16 = 36
 	ErrInvalidPartitions           int16 = 37
 	ErrInvalidReplicationFactor    int16 = 38
+	ErrInvalidReplicaAssignment    int16 = 39
 	ErrNotController               int16 = 41
 	ErrInvalidRequest              int16 = 42
 	ErrUnsupportedForMessageFormat int16 = 43
@@ -52,6 +61,8 @@ const (
 	ErrMemberIDRequired            int16 = 79
 	ErrGroupMaxSizeReached         int16 = 81
 	ErrInvalidRecord               int16 = 87
+	ErrUnknownTopicID              int16 = 100
+	ErrUnsupportedEndpointType     int16 = 115
 )
 
 // API describes the versions of one API that the broker speaks.
@@ -82,9 +93,16 @@ var APIs = []API{
 	{Key: KeyHeartbeat, Min: 0, Max: 3, AdvertisedMin: 0, FlexFrom: 4},
 	{Key: KeyLeaveGroup, Min: 0, Max: 3, AdvertisedMin: 0, FlexFrom: 4},
 	{Key: KeySyncGroup, Min: 0, Max: 3, AdvertisedMin: 0, FlexFrom: 4},
+	{Key: KeyDescribeGroups, Min: 0, Max: 6, AdvertisedMin: 0, FlexFrom: 5},
+	{Key: KeyListGroups, Min: 0, Max: 5, AdvertisedMin: 0, FlexFrom: 3},
 	{Key: KeyAPIVersions, Min: 0, Max: 4, AdvertisedMin: 0, FlexFrom: 3},
 	{Key: KeyCreateTopics, Min: 2, Max: 4, AdvertisedMin: 2, FlexFrom: 5},
+	{Key: KeyDeleteTopics, Min: 1, Max: 6, AdvertisedMin: 1, FlexFrom: 4},
+	{Key: KeyDeleteRecords, Min: 0, Max: 2, AdvertisedMin: 0, FlexFrom: 2},
 	{Key: KeyInitProducerID, Min: 0, Max: 4, AdvertisedMin: 0, FlexFrom: 2},
+	{Key: KeyDescribeConfigs, Min: 1, Max: 4, AdvertisedMin: 1, FlexFrom: 4},
+	{Key: KeyCreatePartitions, Min: 0, Max: 3, AdvertisedMin: 0, FlexFrom: 2},
+	{Key: KeyDescribeCluster, Min: 0, Max: 2, AdvertisedMin: 0, FlexFrom: 0},
 }
 
 // LookupAPI returns the entry for key.

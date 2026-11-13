@@ -101,7 +101,7 @@ CI, report. Each milestone is a tagged release.
 | # | Item | Roadmap | Must show |
 |---|---|---|---|
 | 4 | Black-box chaos test of the real binary | A4 | shared checkers pass on real histories; a deliberately broken build is caught |
-| 5 | Simulator tools: seed shrinking, HTML timeline, fault coverage, mutation score in CI | A3 | a seed from BUGS.md shrinks to a readable schedule; the suite reports how many seeds catch each deliberate bug, not only the first (BUGS.md M9) |
+| 5 | Simulator tools: seed shrinking, HTML timeline, fault coverage, mutation score in CI | A3 | a seed from BUGS.md shrinks to a readable schedule; the suite reports how many seeds catch each deliberate bug, not only the first |
 | 5b | **Application fault testing**: `-faults` mode and the pipeline verdict (section 2) | new | a sample consumer with a commit-before-process bug is reported as losing records, with the seed; the fixed one passes; a guide for JUnit, Go and Python tests |
 | 6 | Soak and resource bounds: 24 h run, memory and disk tracked; start-up re-measured with retention | G5 | flat memory, bounded disk, numbers in the repo |
 
@@ -153,4 +153,5 @@ Blockers are written to `docs/QUESTIONS.md` as they arrive.
 |---|---|
 | 1 Idempotent producer | part (a) done (`docs/reports/a2-idempotent-part-a.md`). Part (b), expiry: done (`docs/reports/a2-idempotent-part-b.md`) |
 | 2 Raft hardening | done (`docs/reports/b3-raft-hardening.md`) |
-| 3–17 | not started |
+| 3 Operations | part (a), admin APIs: done (`docs/reports/b4a-admin-apis.md`). Part (b), metrics, health, `samsa check`, config file: in progress |
+| 4–17 | not started |
