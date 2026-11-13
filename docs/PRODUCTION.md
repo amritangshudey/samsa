@@ -154,4 +154,5 @@ Blockers are written to `docs/QUESTIONS.md` as they arrive.
 | 1 Idempotent producer | part (a) done (`docs/reports/a2-idempotent-part-a.md`). Part (b), expiry: done (`docs/reports/a2-idempotent-part-b.md`) |
 | 2 Raft hardening | done (`docs/reports/b3-raft-hardening.md`) |
 | 3 Operations | part (a), admin APIs: done (`docs/reports/b4a-admin-apis.md`). Part (b), metrics, health, `samsa check`, config file: done (`docs/reports/b4b-operations.md`) |
-| 4–17 | not started |
+| 4 Black-box chaos test | done (`docs/reports/a4-chaos.md`) |
+| 5–17 | not started |

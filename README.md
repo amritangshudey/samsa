@@ -98,6 +98,7 @@ unmodified client library or tool, against the built binary, over TCP.
 | A node returning from a partition does not depose the leader (PreVote); a leader cut off from its majority steps down (CheckQuorum) | [`TestReturningNodeDoesNotDepose`](internal/raft/hardening_test.go), [`TestCheckQuorumLetsTheMajorityElect`](internal/raft/hardening_test.go) |
 | Admin with the standard Kafka 4.4 CLI tools: `kafka-topics` (create, list, describe, alter partitions, delete), `kafka-configs --describe` (read-only), `kafka-delete-records`, `kafka-consumer-groups` (list, describe, state), `kafka-get-offsets`, `kafka-cluster cluster-id`, on a three-node cluster | [`TestKafkaCLI`](integration/cli_test.go), [`admin_test.go`](internal/broker/admin_test.go), the simulator (R1, D1) |
 | Config file, Prometheus metrics, `/healthz`, `/readyz`; `samsa check` passes clean data and reports a torn tail, a flipped byte, a cut snapshot and a corrupt hard state; a locked data directory | [`TestOperations`](integration/ops_test.go), [`TestCheckFindsCorruption`](internal/broker/check_test.go), [`TestLoadConfig`](cmd/samsa/main_test.go) |
+| Three real processes under SIGKILL, graceful restarts, partitions, one-way cuts, slow links and connection resets, every franz-go answer judged by the simulator's own checker; a build with stale reads switched on is caught, and the same scenario passes on the real build | [`TestChaos`](integration/chaos_test.go), [`TestChaosCatchesBrokenBuild`](integration/chaos_test.go) |
 | Replication with Raft; a three-process cluster survives two leader kills with no record lost | [`TestClusterSurvivesLeaderKill`](integration/cluster_test.go) |
 | Acknowledged writes survive power loss (fsync before ack, torn writes, failed fsyncs) | [`TestCrashRecoveryProperty`](internal/storage/crash_test.go), the simulator |
 | Every produce and fetch answer checked against an exact model of each partition, under crashes and partitions, 1–5 nodes ([ADR 0007](docs/adr/0007-history-checking.md)) | [`TestSim`](internal/sim/sim_test.go), [`TestRegressions`](internal/sim/sim_test.go) |
@@ -173,11 +174,12 @@ comparison with Kafka has been made.
 
 | Command | Does |
 |---|---|
-| `make build` | the static binary, `bin/samsa` (`-version` prints the commit) |
+| `make build` | the static binary, `bin/samsa` (`-version` prints the commit), and `bin/samsa-unsafe`, a test build with deliberate bugs behind a hidden flag |
 | `make test` | vet, unit tests, purity check, mutation suite, regression seeds |
 | `make race` | tests with the race detector |
 | `make fuzz` | every fuzz target for `FUZZTIME` each |
 | `make integration` | real clients against the binary (needs kcat and a JDK) |
+| `make chaos` | the chaos test alone for `CHAOS_DURATION` (default 10m); `CHAOS_SEED=n` replays a scenario |
 | `make bench` | throughput and latency, about 15 minutes |
 | `make release VERSION=v0.1.0` | binaries for macOS and Linux, arm64 and amd64, with checksums |
 
