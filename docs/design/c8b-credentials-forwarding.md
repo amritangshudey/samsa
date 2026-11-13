@@ -176,3 +176,22 @@ Why this is safe:
    same peer channel. It is tested on three nodes in the unit harness,
    with dropped messages and a lost leader, and on three real processes.
    Recorded.
+
+## 6. Found while testing
+
+1. **`kafka-configs.sh --describe --entity-type users` also sends
+   DescribeClientQuotas (key 48).** `ConfigCommand.describeClientQuotaAndUserScramCredentialConfigs`
+   asks for quotas first, then credentials, and fails on the first error.
+   Samsa has no quotas. It now answers key 48 (versions 0–1, flexible from
+   1, per `DescribeClientQuotas{Request,Response}.json`, trunk, read
+   2026-11-14) with an empty list. Authorization is Kafka's: DESCRIBE_CONFIGS
+   on the cluster, or CLUSTER_AUTHORIZATION_FAILED (`KafkaApis.handleDescribeClientQuotasRequest`).
+   An empty list is the true answer, since no quota exists. AlterClientQuotas
+   is not added: setting a quota Samsa would not enforce would be a lie.
+2. **The 3000-seed run found a Raft bug in leadership transfer** (BUGS.md
+   S8), unrelated to this item: the new APIs only moved the seeds. A
+   leader that abandoned a transfer took its lease back while its
+   TimeoutNow could still arrive. Fixed in `internal/raft`, with a
+   mutation switch and a unit test; the B3 design is corrected. Only seed
+   1219 of 2000 catches the mutation in the simulator, so the unit test is
+   its guard.

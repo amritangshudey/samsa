@@ -78,12 +78,16 @@ kills at once.
   the nodes talk mutual TLS. `-sasl-mechanisms SCRAM-SHA-512,PLAIN
   -sasl-users users` requires a login. Create the users file with
   `samsa user add -file users -name alice` (the password is read on stdin;
-  only SCRAM credentials are stored, never the password). Changing users
-  needs a restart. Details and limits: [docs/design/c5-tls-sasl.md](docs/design/c5-tls-sasl.md).
+  only SCRAM credentials are stored, never the password). Users in that
+  file change only with a restart. Users created with `kafka-configs.sh
+  --alter --add-config 'SCRAM-SHA-256=[password=...]' --entity-type users`
+  are replicated and take effect on every node at once. Details and limits:
+  [docs/design/c5-tls-sasl.md](docs/design/c5-tls-sasl.md),
+  [docs/design/c8b-credentials-forwarding.md](docs/design/c8b-credentials-forwarding.md).
 - **ACLs.** `-acl -super-users User:admin` checks every request against
   ACLs, managed with the Kafka ACL APIs (`kafka-acls.sh`). A resource
-  without ACLs is denied unless `-allow-if-no-acl`. Send ACL changes to
-  the leader: a follower refuses them. Details and limits:
+  without ACLs is denied unless `-allow-if-no-acl`. Any node accepts ACL
+  changes: a follower forwards them to the leader. Details and limits:
   [docs/design/c8-acls.md](docs/design/c8-acls.md).
 - **Testing your application under faults.** `-faults seed=42` makes the
   broker lose produce acknowledgements, refuse requests as a non-leader
@@ -122,6 +126,7 @@ unmodified client library or tool, against the built binary, over TCP.
 | Three real processes under SIGKILL, graceful restarts, partitions, one-way cuts, slow links and connection resets, every franz-go answer judged by the simulator's own checker; a build with stale reads switched on is caught, and the same scenario passes on the real build | [`TestChaos`](integration/chaos_test.go), [`TestChaosCatchesBrokenBuild`](integration/chaos_test.go) |
 | An application that commits before it processes is reported as losing records under forced rebalances, with the seed; the same application committing after processing passes under all three fault kinds | [`TestVerdictCatchesCommitBeforeProcess`](integration/apps_test.go), [`TestJudge`](internal/broker/verdict_test.go), [`TestFaultLostAck`](internal/broker/faults_test.go) |
 | TLS for clients and between nodes; SCRAM-SHA-256, SCRAM-SHA-512 and PLAIN with franz-go, the Java client and kcat; wrong passwords, unknown users, plaintext, untrusted brokers and certificates from another CA refused | [`TestTLSAndSASL`](integration/security_test.go), [`TestTLSAndSASLOtherClients`](integration/security_test.go), [`TestPeerTLS`](integration/security_test.go), [`TestRFC7677Example`](internal/scram/scram_test.go) |
+| SCRAM users created, described and deleted with `kafka-configs.sh`, effective on every node without a restart; `kafka-acls.sh` against a follower | [`TestCredentialsAndForwarding`](integration/credentials_test.go), [`TestCredentialsReplicate`](internal/broker/credentials_test.go), [`TestACLsReplicate`](internal/broker/acl_node_test.go) |
 | ACLs with Kafka's rules on every API, default deny; managed with franz-go and `kafka-acls.sh`, enforced against franz-go, the Java client and kcat; replicated to every node | [`TestEveryAPIAllowedAndDenied`](internal/broker/acl_node_test.go), [`TestACLsReplicate`](internal/broker/acl_node_test.go), [`TestACLsFranzGo`](integration/acl_test.go), [`TestACLsOtherClients`](integration/acl_test.go) |
 | Replication with Raft; a three-process cluster survives two leader kills with no record lost | [`TestClusterSurvivesLeaderKill`](integration/cluster_test.go) |
 | Acknowledged writes survive power loss (fsync before ack, torn writes, failed fsyncs) | [`TestCrashRecoveryProperty`](internal/storage/crash_test.go), the simulator |
@@ -138,7 +143,7 @@ fetch, metadata, offsets, topics) and [ADR 0008](docs/adr/0008-group-api-version
 
 Transactions (a transactional producer is refused with `INVALID_REQUEST`),
 log compaction, retention by time or per topic (only `-retention-bytes`, one
-bound for the whole log), changing configs (AlterConfigs), topic ids, changing SASL users without a restart, tiered storage,
+bound for the whole log), changing configs (AlterConfigs), client quotas, topic ids, tiered storage,
 cluster membership changes, the KIP-848 group protocol, static membership,
 fetch sessions, more than one Raft
 group (all partitions share one log, [ADR 0010](docs/adr/0010-one-raft-group.md)),

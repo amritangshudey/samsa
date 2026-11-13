@@ -192,7 +192,10 @@ streams. SASL is the core's: each `conn` carries an `authState`; until it
 holds a user, dispatch accepts only ApiVersions, SaslHandshake and
 SaslAuthenticate and closes the connection on anything else. SCRAM is the
 pure package `internal/scram`; the node supplies nonces from `sys.Random`.
-Credentials come from a users file loaded at start.
+Credentials come from a users file loaded at start and from replicated
+state: `cmdAlterCredentials` holds stored and server keys, which the
+leader derives before proposing ([design](design/c8b-credentials-forwarding.md),
+[ADR 0021](adr/0021-credentials-and-forwarding.md)).
 
 **ACLs** ([design](design/c8-acls.md), [ADR 0020](adr/0020-acls.md)).
 ACLs are applied state: `cmdCreateACL` and `cmdDeleteACLs` in the log, a
@@ -202,6 +205,10 @@ of that slice, the configuration, the connection's principal and host,
 the operation and the resource, with `StandardAuthorizerData`'s rules.
 Each handler asks `n.may(c, op, resource, name)` where KafkaApis checks.
 The host comes from `OnConnOpen`, which carries the client's IP address.
+A follower forwards CreateAcls and DeleteAcls (`forward.go`): it sends the
+encoded command to the leader on the peer channel (broker messages start
+with 0xB0, Raft's with version 1), the leader proposes `cmdForwarded`, and
+the follower completes its waiting request from its own apply of it.
 
 **Application faults** ([design](design/a5b-app-faults.md),
 [ADR 0018](adr/0018-application-faults.md)). `Config.Faults` gives the node
