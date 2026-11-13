@@ -163,7 +163,10 @@ func (r *Raft) SaveSnapshot(index int64, state []byte) {
 			return
 		}
 	}
-	s := snapshot{index: index, runs: runsOf(r.terms, index), members: r.confAsOf(index).members, state: state}
+	s := snapshot{index: index, runs: runsOf(r.terms, index), state: state}
+	if c := r.confAsOf(index); !c.boot { // the bootstrap one stays implicit, and so stays bootstrap (BUGS.md S9)
+		s.members = c.members
+	}
 	b := s.encode()
 	if err := writeAtomic(r.disk, r.cfg.Dir, snapshotName, b, false, false); err != nil {
 		r.fail(err)

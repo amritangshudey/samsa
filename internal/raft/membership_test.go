@@ -308,3 +308,29 @@ func TestErratumCounterexample(t *testing.T) {
 		t.Fatal("mutated: node 1 overwrote nothing: the counterexample did not play out")
 	}
 }
+
+// BUGS.md S9: a node left the only voter by a change must not lead the
+// moment it starts. The leader that removed itself counts this node's
+// acknowledgements for its lease until the removal commits; the node
+// promised to ignore candidates, itself included, for an election timeout.
+// A node alone in its bootstrap configuration still leads at once.
+func TestAloneByChangeWaits(t *testing.T) {
+	c := newCluster(t, 2, nil)
+	c.startAll()
+	c.elect(1)
+	c.run(nil)
+	c.tick(0, nil)
+	if _, err := c.r(1).ChangeMembers(members(2)); err != nil {
+		t.Fatal(err)
+	}
+	c.settle(c.nodes[1])
+	c.run(nil) // node 2 has {2}; node 1 still leads until it hears the ack
+	c.crash(2)
+	if r := c.start(2); r.Role() == Leader {
+		t.Fatal("node 2, alone by an uncommitted change, led at once on restart")
+	}
+	single := newCluster(t, 1, nil)
+	if r := single.start(1); r.Role() != Leader {
+		t.Fatal("a node alone in its bootstrap configuration did not lead at once")
+	}
+}

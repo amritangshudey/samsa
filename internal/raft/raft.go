@@ -229,7 +229,7 @@ func (r *Raft) Start() error {
 	if (len(r.cfg.Peers) > 0 && !slices.Contains(r.cfg.Peers, r.cfg.ID)) || r.cfg.ID <= 0 {
 		return fmt.Errorf("raft: node %d is not in its own peer list %v", r.cfg.ID, r.cfg.Peers)
 	}
-	r.base = confAt{index: -1, members: r.bootstrap()}
+	r.base = confAt{index: -1, members: r.bootstrap(), boot: true}
 	log, err := storage.Open(r.disk, r.cfg.Dir, r.cfg.Log)
 	if err != nil {
 		return fmt.Errorf("open raft log: %w", err)
@@ -295,7 +295,12 @@ func (r *Raft) Start() error {
 		return fmt.Errorf("%w: log holds term %d, hard state says %d", errBadHardState, last, r.hard.term)
 	}
 	r.maybePromote()
-	if r.alone() {
+	// A node that is the only voter of its bootstrap configuration may
+	// lead at once: no other node ever led it. One left alone by a
+	// change must wait an election timeout like any voter, because a
+	// leader that removed itself may still hold a lease on this node's
+	// promise to ignore candidates (BUGS.md S9).
+	if c := r.conf(); r.alone() && c.boot {
 		r.campaign(false)
 	} else {
 		r.armElection()
@@ -318,11 +323,11 @@ func (r *Raft) bootstrap() []Member {
 // a snapshot written before membership existed has none, and the bootstrap
 // configuration stays.
 func (r *Raft) setBase(s snapshot) {
-	ms := s.members
-	if ms == nil {
+	ms, boot := s.members, s.members == nil
+	if boot {
 		ms = r.bootstrap()
 	}
-	r.base = confAt{index: s.index, members: ms}
+	r.base = confAt{index: s.index, members: ms, boot: boot}
 	r.confs = slices.DeleteFunc(r.confs, func(c confAt) bool { return c.index <= s.index })
 }
 

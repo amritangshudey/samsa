@@ -264,6 +264,9 @@ changes, because it faults harder than the world does.
     voter campaigned to term 70 while the leader stayed in term 9.
     **Fix:** the heartbeat starts when a leader gains its first peer, and
     a lone node still sets no timer.
+12. **Found by the simulator, seed 2287 (BUGS.md S9): a node alone by a
+    change led at start.** The single-node shortcut in `Start` now
+    applies only to the bootstrap configuration.
 9. **Scope check.** 9a changes Raft's majority arithmetic everywhere. The
    existing tests (random schedules, the simulator, S1–S6) run unchanged
    on a static configuration first, and only then is membership switched

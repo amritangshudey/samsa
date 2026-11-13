@@ -48,6 +48,7 @@ var (
 type confAt struct {
 	index   int64
 	members []Member
+	boot    bool // the bootstrap configuration: no entry ever changed it
 }
 
 func encodeMembers(ms []Member) []byte {
@@ -172,7 +173,7 @@ func (r *Raft) noteEntry(index int64, kind byte, cmd []byte) error {
 	if err != nil {
 		return fmt.Errorf("raft entry %d: %w", index, err)
 	}
-	r.confs = append(r.confs, confAt{index, ms})
+	r.confs = append(r.confs, confAt{index: index, members: ms})
 	r.confChanged()
 	return nil
 }

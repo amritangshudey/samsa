@@ -178,6 +178,31 @@ for how much that is worth.
   leader it could depose asked for it" was true when the request was sent,
   not when it arrived.
 
+### S9. A node left alone by a change led the moment it restarted (C1)
+
+- **Seed:** 2287, on branch `membership`, before the code was merged.
+  Three nodes and two spares, 30% message drops, graceful stops.
+- **Reported as:** S6, "node 2 became leader of term 8 while node 3 held
+  a lease in term 7".
+- **Root cause:** leader 3 removed itself. The configuration {2} reached
+  node 2, and node 3 went on leading (thesis 4.2.2), counting node 2's
+  acknowledgements for its lease. Then node 2 was stopped and restarted.
+  `Start` let a node that is the only voter campaign at once, a shortcut
+  for single-node clusters. Node 2 was alone in {2}, so it led term 8
+  immediately. That broke its promise to ignore candidates for an election
+  timeout after acknowledging node 3. The shortcut assumed nobody else
+  could ever have led its configuration, which is true only of the
+  bootstrap one.
+- **Fix:** only a node alone in its bootstrap configuration campaigns at
+  start. One left alone by a change waits for its election timer, like any
+  voter. A snapshot keeps the bootstrap configuration implicit, so a
+  single-node cluster still leads at once after a restart.
+  `TestAloneByChangeWaits` fails without the fix.
+- **Lesson:** a shortcut justified by "nobody else can exist" must be
+  checked again when something makes others possible. Membership changes
+  made a cluster of one a state the cluster can pass through, not only
+  start in.
+
 ## Bugs found by real clients
 
 ### C1. Null record set in a fetch response broke librdkafka (Phase 2)
