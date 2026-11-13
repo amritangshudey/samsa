@@ -96,7 +96,7 @@ allowlist of standard packages, may use nothing from `time` except
 ## 3. The parts
 
 ```
-cmd/samsa/            flags; wires realsys into the broker
+cmd/samsa/            flags, config file, metrics HTTP, `check`; wires realsys into the broker
 internal/sys/         the interfaces
 internal/storage/     the log: checksummed frames, segments, an offset index,
                       recovery that truncates a torn tail (ADR 0002)
@@ -175,6 +175,14 @@ fire timers, and a channel serialises their events into handler calls.
 Peers connect over TCP with a hello naming the node id, length-prefixed
 frames, at most 16 MiB a message, and a bounded queue that drops when full
 (Raft tolerates loss). A connection that stops reading is closed.
+
+**Operations** ([ADR 0017](adr/0017-operations-interfaces.md)). Every 250 ms
+the loop calls a hook on its own goroutine (`Loop.Every`); `cmd/samsa`
+uses it to store `node.Metrics()` behind an atomic pointer, which the HTTP
+handlers for `/metrics`, `/healthz` and `/readyz` read. Nothing else
+touches the node from another goroutine. `samsa check` runs the node's own
+recovery (`broker.Check`) on a disk wrapper that records writes instead
+of making them. `OpenDisk` holds a `flock` on the data directory's `LOCK`.
 
 **Idempotent producer** ([design](design/a2-idempotent-producer.md),
 [ADR 0015](adr/0015-producer-ids.md)). Any node answers InitProducerId

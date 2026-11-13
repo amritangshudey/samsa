@@ -35,6 +35,10 @@ type Loop struct {
 	start     time.Time // carries a monotonic reading
 	startWall int64
 
+	// Set by Every before Run.
+	everyD time.Duration
+	everyF func()
+
 	// Set by Peers before Run; see peer.go.
 	self     sys.NodeID
 	peerLn   net.Listener
@@ -96,6 +100,10 @@ func NewLoop(ln net.Listener, maxOutBytes int) *Loop {
 	}
 }
 
+// Every makes Run call f on its own goroutine, where the handler may be
+// read, every d (and once at start). Call it before Run.
+func (l *Loop) Every(d time.Duration, f func()) { l.everyD, l.everyF = d, f }
+
 // stopLimit bounds a graceful stop: a handler that has not stopped by then
 // is abandoned.
 const stopLimit = 10 * time.Second
@@ -114,6 +122,13 @@ func (l *Loop) Run(ctx context.Context, h sys.Handler) error {
 	go l.accept()
 	l.startPeers()
 
+	var tick <-chan time.Time
+	if l.everyF != nil {
+		t := time.NewTicker(l.everyD)
+		defer t.Stop()
+		tick = t.C
+		l.everyF()
+	}
 	cancelled := ctx.Done()
 	var stopper sys.Stopper
 	var limit <-chan time.Time
@@ -149,6 +164,9 @@ func (l *Loop) Run(ctx context.Context, h sys.Handler) error {
 				continue
 			case <-limit:
 				return nil
+			case <-tick:
+				l.everyF()
+				continue
 			}
 		}
 		if err := l.deliver(h, ev); err != nil {
