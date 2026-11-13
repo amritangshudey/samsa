@@ -2,6 +2,7 @@ package realsys
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"sync"
@@ -42,6 +43,7 @@ type Loop struct {
 	// Set by Peers before Run; see peer.go.
 	self     sys.NodeID
 	peerLn   net.Listener
+	peerTLS  *tls.Config // nil: peer connections are plain TCP
 	peerOut  map[sys.NodeID]chan []byte
 	peerMu   sync.Mutex
 	peerIn   map[net.Conn]struct{} // inbound peer connections, closed at shutdown

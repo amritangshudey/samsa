@@ -3,6 +3,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -45,8 +47,9 @@ func versionString() string {
 }
 
 func main() {
-	if len(os.Args) > 1 && (os.Args[1] == "check" || os.Args[1] == "verdict") {
-		sub := map[string]func([]string, io.Writer) (bool, error){"check": runCheck, "verdict": runVerdict}[os.Args[1]]
+	if len(os.Args) > 1 && (os.Args[1] == "check" || os.Args[1] == "verdict" || os.Args[1] == "user") {
+		sub := map[string]func([]string, io.Writer) (bool, error){"check": runCheck, "verdict": runVerdict,
+			"user": func(a []string, w io.Writer) (bool, error) { return runUser(a, os.Stdin, w) }}[os.Args[1]]
 		ok, err := sub(os.Args[2:], os.Stdout)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "samsa %s: %v\n", os.Args[1], err)
@@ -75,6 +78,14 @@ func run() error {
 	producerExpiry := flag.Duration("producer-expiry", 24*time.Hour, "forget an idempotent producer after it writes nothing for this long (negative: never)")
 	logLevel := flag.String("log-level", "info", "debug, info, warn or error")
 	metricsListen := flag.String("metrics-listen", "", "address to serve /metrics, /healthz and /readyz on over HTTP (default: none)")
+	tlsCert := flag.String("tls-cert", "", "PEM certificate for the client listener; with -tls-key, clients must use TLS")
+	tlsKey := flag.String("tls-key", "", "PEM private key for -tls-cert")
+	tlsClientCA := flag.String("tls-client-ca", "", "PEM CA: clients must present a certificate it signed (mutual TLS)")
+	peerCert := flag.String("peer-tls-cert", "", "PEM certificate for peer connections; with -peer-tls-key and -peer-tls-ca, nodes talk mutual TLS")
+	peerKey := flag.String("peer-tls-key", "", "PEM private key for -peer-tls-cert")
+	peerCA := flag.String("peer-tls-ca", "", "PEM CA that signed every node's peer certificate")
+	saslMechs := flag.String("sasl-mechanisms", "", "require SASL authentication with these mechanisms: PLAIN, SCRAM-SHA-256, SCRAM-SHA-512 (comma-separated)")
+	saslUsers := flag.String("sasl-users", "", "users file for -sasl-mechanisms, written by `samsa user add`")
 	faultsSpec := flag.String("faults", "", "inject Kafka-level faults to test applications: seed=N[,rate=R][,kinds=lostack+notleader+rebalance] (see docs/guides/testing-applications.md)")
 	configFile := flag.String("config", "", "file of key = value lines, one per flag; flags on the command line win")
 	showVersion := flag.Bool("version", false, "print the version and exit")
@@ -102,9 +113,42 @@ func run() error {
 		return fmt.Errorf("-sync: unknown policy %q", *syncMode)
 	}
 
+	var (
+		sasl *broker.SASL
+		err  error
+	)
+	if *saslMechs != "" {
+		if sasl, err = loadSASL(*saslMechs, *saslUsers); err != nil {
+			return err
+		}
+	} else if *saslUsers != "" {
+		return errors.New("-sasl-users needs -sasl-mechanisms")
+	}
+	var clientTLS *tls.Config
+	if *tlsCert != "" || *tlsKey != "" || *tlsClientCA != "" {
+		if *tlsCert == "" || *tlsKey == "" {
+			return errors.New("-tls-cert and -tls-key go together")
+		}
+		if clientTLS, err = serverTLS(*tlsCert, *tlsKey, *tlsClientCA); err != nil {
+			return fmt.Errorf("-tls-cert: %w", err)
+		}
+	}
+	peerFlags := 0
+	for _, f := range []string{*peerCert, *peerKey, *peerCA} {
+		if f != "" {
+			peerFlags++
+		}
+	}
+	if peerFlags != 0 && peerFlags != 3 {
+		return errors.New("-peer-tls-cert, -peer-tls-key and -peer-tls-ca go together")
+	}
+
 	ln, err := net.Listen("tcp", *listen)
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
+	}
+	if clientTLS != nil {
+		ln = tls.NewListener(ln, clientTLS)
 	}
 	if *advertise == "" {
 		*advertise = ln.Addr().String() // resolves a ":0" port
@@ -153,12 +197,23 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("listen for peers: %w", err)
 		}
+		if peerFlags == 3 {
+			listenCfg, dialCfg, err := peerTLS(*peerCert, *peerKey, *peerCA)
+			if err != nil {
+				return fmt.Errorf("-peer-tls-cert: %w", err)
+			}
+			peerLn = tls.NewListener(peerLn, listenCfg)
+			loop.PeerTLS(dialCfg)
+		}
 		loop.Peers(sys.NodeID(*nodeID), peerLn, addrs)
 	}
 	cfg := broker.Config{
 		NodeID: int32(*nodeID), Host: host, Port: int32(port), Peers: peers,
 		Sync: policy, SyncInterval: *syncInterval, Logger: logger, RetentionBytes: *retention, ProducerExpiry: *producerExpiry,
-		Faults: faults,
+		Faults: faults, SASL: sasl,
+	}
+	if sasl != nil && clientTLS == nil {
+		logger.Warn("SASL without TLS: credentials and data cross the network readable; PLAIN sends the password itself", "mechanisms", sasl.Mechanisms)
 	}
 	if unsafeConfig != nil {
 		on, err := unsafeConfig(&cfg)
