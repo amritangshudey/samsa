@@ -108,6 +108,18 @@ func (n *Node) createTopics(c *conn, h wire.RequestHeader, req *wire.CreateTopic
 	done()
 }
 
+// wroteAny reports whether a produce response acknowledges any write.
+func wroteAny(resp *wire.ProduceResponse) bool {
+	for _, t := range resp.Topics {
+		for _, p := range t.Partitions {
+			if p.ErrorCode == wire.ErrNone {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (n *Node) produce(c *conn, h wire.RequestHeader, req *wire.ProduceRequest) {
 	resp := &wire.ProduceResponse{Topics: make([]wire.ProduceTopicResponse, len(req.Topics))}
 	// acks 0 means the client wants no response at all. -1 and 1 are both
@@ -119,9 +131,16 @@ func (n *Node) produce(c *conn, h wire.RequestHeader, req *wire.ProduceRequest) 
 		if pending--; pending > 0 {
 			return
 		}
-		if req.Acks == 0 {
+		switch {
+		case req.Acks == 0:
 			n.finish(c)
-		} else {
+		case wroteAny(resp) && n.faults.inject(FaultLostAck):
+			n.log.Info("fault injected", "kind", FaultLostAck, "fault", n.faults.count)
+			if !c.closed { // not drop: Dropped counts bad input, not faults
+				c.closed = true
+				n.net.Close(c.id)
+			}
+		default:
 			n.respond(c, h, resp)
 		}
 	}
