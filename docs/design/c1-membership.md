@@ -88,10 +88,13 @@ Read on 2026-11-14.
   dissertation says. Whom to accept is a question for the transport,
   which authenticates peers (mutual TLS, C5). Raft still drops a message
   whose sender id is its own.
-- **A node that is not a voter in its own configuration never starts an
-  election or PreVote.** It is a new node that has not yet received the
-  entry adding it, or a removed node that has received its removal. It
-  still answers AppendEntries and votes.
+- **A node that is not a voter in its own configuration still stands for
+  election, unless its committed configuration also leaves it out,** and
+  it does not count its own vote (thesis 4.2.2: "it might
+  still be needed until the C_new entry is committed"). The first draft
+  said it never stands. The random-schedule test found the deadlock that
+  causes (section 6, finding 10). A node with no configuration at all has
+  nobody to ask, so its elections go nowhere.
 
 ## 3. Raft: the leader's rules for a change
 
@@ -220,7 +223,8 @@ changes, because it faults harder than the world does.
    forever (harmless, because voters ignore them while they hear from a
    leader, but noisy). **Decision:** the leader keeps replicating to a
    removed node, without counting it, until the removal commits. After
-   that it stops. A removed node that has the entry never campaigns.
+   that it stops. A removed node still times out and sends PreVotes, which
+   voters that hear from a leader ignore (finding 10).
 5. **A removed node that missed its removal cannot win.** It needs votes
    from a majority of the old configuration. That majority overlaps the
    majority of the new configuration that committed the removal, and a
@@ -238,6 +242,28 @@ changes, because it faults harder than the world does.
 8. **Mixed versions.** An older node fails on the new entry kind: it
    stops with an error and does not misread the entry. Rolling upgrades
    are item 10, which must order this. Recorded.
+10. **Found by the random-schedule test, seed 31: non-voters must stand.**
+    Node 1 led {1, 3} and appended a configuration {1} that removed node
+    3, followed by more entries. They reached node 3 and were never synced
+    on node 1, which lost power. Node 1 came back with configuration
+    {1, 3} and needs node 3's vote. Node 3 refuses it, because its own log
+    is longer. Node 3, under the uncommitted {1}, believed it was no voter
+    and never stood. Nobody could win. The dissertation says such a node
+    must still stand; the first draft of section 2 had dropped that.
+    Fixed before any commit. Seed 31 stays in the random test.
+    The opposite extreme failed too (seed 174). A node whose removal had
+    committed kept winning elections with the vote of the only voter, and
+    stepped down at once each time, so no voter ever led. **Rule:** a node
+    stands unless both the configuration in force and its committed one
+    leave it out. Once a removal commits, the remaining voters can always
+    elect a leader among themselves (thesis 4.2.2).
+11. **Found by the random-schedule test, seed 181: a leader elected
+    alone had no heartbeat.** A leader that is the only voter set no
+    heartbeat timer, because nobody needed one. After it added a learner
+    and then a voter, a lost AppendEntries was never sent again. The new
+    voter campaigned to term 70 while the leader stayed in term 9.
+    **Fix:** the heartbeat starts when a leader gains its first peer, and
+    a lone node still sets no timer.
 9. **Scope check.** 9a changes Raft's majority arithmetic everywhere. The
    existing tests (random schedules, the simulator, S1–S6) run unchanged
    on a static configuration first, and only then is membership switched

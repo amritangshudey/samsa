@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"path"
 	"slices"
 	"time"
@@ -118,6 +119,12 @@ const (
 	// MutAbandonKeepsLeading lets a leader whose TimeoutNow went out keep
 	// leading, lease included, when it abandons the transfer.
 	MutAbandonKeepsLeading
+	// MutTwoChanges lets a leader append a configuration while another is
+	// still uncommitted: "two changes at once".
+	MutTwoChanges
+	// MutChangeBeforeCommit lets a leader append a configuration before an
+	// entry of its own term has committed (Ongaro's 2015 erratum).
+	MutChangeBeforeCommit
 )
 
 // ErrTransferring is returned by TransferLeadership when it cannot start.
@@ -186,6 +193,13 @@ type Raft struct {
 	pendingBytes []byte
 	inst         *transfer
 
+	// Membership (membership.go): the configuration below the log (the
+	// snapshot's, or bootstrap), the configuration entries in the log in
+	// index order, and a leader's learners, sorted.
+	base     confAt
+	confs    []confAt
+	learners []sys.NodeID
+
 	err error
 }
 
@@ -212,9 +226,10 @@ func New(cfg Config, env Env, disk sys.Disk) *Raft {
 // follower. A node that is alone in its cluster stands for election at
 // once, since nobody else can.
 func (r *Raft) Start() error {
-	if !slices.Contains(r.cfg.Peers, r.cfg.ID) || r.cfg.ID < 0 {
+	if (len(r.cfg.Peers) > 0 && !slices.Contains(r.cfg.Peers, r.cfg.ID)) || r.cfg.ID <= 0 {
 		return fmt.Errorf("raft: node %d is not in its own peer list %v", r.cfg.ID, r.cfg.Peers)
 	}
+	r.base = confAt{index: -1, members: r.bootstrap()}
 	log, err := storage.Open(r.disk, r.cfg.Dir, r.cfg.Log)
 	if err != nil {
 		return fmt.Errorf("open raft log: %w", err)
@@ -252,6 +267,7 @@ func (r *Raft) Start() error {
 		}
 		r.terms, from = s.expand(), s.index+1
 		r.commit = s.index // the caller applied it, so it was committed
+		r.setBase(s)
 	} else if marker == nil && log.StartOffset() > 0 {
 		return fmt.Errorf("%w: log starts at %d and there is no snapshot", errBadSnapshot, log.StartOffset())
 	}
@@ -265,6 +281,9 @@ func (r *Raft) Start() error {
 				return fmt.Errorf("%w: raft log entry %d has no header", storage.ErrCorrupt, b.Base)
 			}
 			r.terms = append(r.terms, int64(binary.BigEndian.Uint64(b.Payload)))
+			if err := r.noteEntry(b.Base, b.Payload[8], b.Payload[entryHeader:]); err != nil {
+				return fmt.Errorf("%w: %w", storage.ErrCorrupt, err)
+			}
 			off = b.Base + 1
 		}
 	}
@@ -276,12 +295,41 @@ func (r *Raft) Start() error {
 		return fmt.Errorf("%w: log holds term %d, hard state says %d", errBadHardState, last, r.hard.term)
 	}
 	r.maybePromote()
-	if len(r.cfg.Peers) == 1 {
+	if r.alone() {
 		r.campaign(false)
 	} else {
 		r.armElection()
 	}
 	return r.err
+}
+
+// bootstrap returns the configuration that Config.Peers describes, or none
+// for a node that joins an existing cluster.
+func (r *Raft) bootstrap() []Member {
+	var ms []Member
+	for _, id := range r.cfg.Peers {
+		ms = append(ms, Member{ID: id})
+	}
+	slices.SortFunc(ms, func(a, b Member) int { return int(a.ID) - int(b.ID) })
+	return ms
+}
+
+// setBase takes the configuration of snapshot s as the one below the log;
+// a snapshot written before membership existed has none, and the bootstrap
+// configuration stays.
+func (r *Raft) setBase(s snapshot) {
+	ms := s.members
+	if ms == nil {
+		ms = r.bootstrap()
+	}
+	r.base = confAt{index: s.index, members: ms}
+	r.confs = slices.DeleteFunc(r.confs, func(c confAt) bool { return c.index <= s.index })
+}
+
+// alone reports whether this node is the only voter: it needs nobody.
+func (r *Raft) alone() bool {
+	vs := r.voters()
+	return len(vs) == 1 && vs[0] == r.cfg.ID
 }
 
 // checkSnapshot refuses a snapshot that the log cannot back: one that
@@ -336,14 +384,7 @@ func (r *Raft) Lease() bool {
 		return false
 	}
 	now := r.env.Now()
-	times := []sys.Instant{now}
-	for _, id := range r.cfg.Peers {
-		if p := r.peers[id]; p != nil {
-			times = append(times, p.acked)
-		}
-	}
-	slices.Sort(times)
-	held := times[len(times)-1-len(r.cfg.Peers)/2] // the majority-th most recent
+	held := majority(r, now, sys.Instant(math.MinInt64/2), func(p *progress) sys.Instant { return p.acked }) // the majority-th most recent
 	return now < held+sys.Instant(r.cfg.ElectionTimeout*3/4)
 }
 
@@ -421,7 +462,7 @@ func (r *Raft) follow(term int64) {
 	r.preVotes = nil
 	if r.role != Follower {
 		r.role = Follower
-		r.votes, r.peers, r.transferee = nil, nil, noVote
+		r.votes, r.peers, r.transferee, r.learners = nil, nil, noVote, nil
 		r.env.CancelTimer(TimerHeartbeat)
 		r.armElection()
 	}
@@ -432,7 +473,7 @@ func (r *Raft) follow(term int64) {
 func (r *Raft) preCampaign() {
 	r.preVotes = map[sys.NodeID]bool{r.cfg.ID: true}
 	r.armElection()
-	for _, p := range r.cfg.Peers {
+	for _, p := range r.voters() {
 		if p != r.cfg.ID {
 			r.sendAs(p, message{typ: msgPreVote, lastIndex: r.LastIndex(), lastTerm: r.lastTerm()}, r.hard.term+1)
 		}
@@ -477,13 +518,13 @@ func (r *Raft) TransferLeadership(to sys.NodeID) error {
 	}
 	if to == 0 {
 		best := int64(-2)
-		for _, id := range r.cfg.Peers { // configured order: ties go to the first
+		for _, id := range r.voters() { // id order: ties go to the first
 			if p := r.peers[id]; p != nil && p.match > best {
 				to, best = id, p.match
 			}
 		}
 	}
-	if r.peers[to] == nil {
+	if r.peers[to] == nil || !r.isVoter(to) {
 		return ErrTransferring
 	}
 	r.transferee, r.transferUntil, r.timeoutSent = to, r.env.Now()+sys.Instant(r.cfg.ElectionTimeout), false
@@ -507,13 +548,13 @@ func (r *Raft) maybeTimeoutNow() {
 // quorumActive reports whether a majority, this node included, answered
 // within an election timeout; a follower's clock starts at the election.
 func (r *Raft) quorumActive() bool {
-	now, n := r.env.Now(), 1
-	for _, id := range r.cfg.Peers {
-		if p := r.peers[id]; p != nil && now < max(p.acked, r.leaderSince)+sys.Instant(r.cfg.ElectionTimeout) {
-			n++
+	now, active := r.env.Now(), map[sys.NodeID]bool{r.cfg.ID: true}
+	for id, p := range r.peers { // order does not matter: only counted
+		if now < max(p.acked, r.leaderSince)+sys.Instant(r.cfg.ElectionTimeout) {
+			active[id] = true
 		}
 	}
-	return n > len(r.cfg.Peers)/2
+	return r.counted(active)
 }
 
 // campaign starts an election in a new term; transfer marks one that a
@@ -527,7 +568,7 @@ func (r *Raft) campaign(transfer bool) {
 	if transfer {
 		typ = msgTransferVote
 	}
-	for _, p := range r.cfg.Peers {
+	for _, p := range r.voters() {
 		if p != r.cfg.ID {
 			r.send(p, message{typ: typ, lastIndex: r.LastIndex(), lastTerm: r.lastTerm()})
 		}
@@ -536,19 +577,19 @@ func (r *Raft) campaign(transfer bool) {
 }
 
 func (r *Raft) maybeLead() {
-	if r.role != Candidate || len(r.votes) <= len(r.cfg.Peers)/2 || r.err != nil {
+	if r.role != Candidate || !r.counted(r.votes) || r.err != nil {
 		return
 	}
 	r.role, r.leader, r.votes = Leader, r.cfg.ID, nil
-	r.leaderSince, r.transferee = r.env.Now(), noVote
+	r.leaderSince, r.transferee, r.learners = r.env.Now(), noVote, nil
 	r.peers = map[sys.NodeID]*progress{}
-	for _, p := range r.cfg.Peers {
+	for _, p := range r.voters() {
 		if p != r.cfg.ID {
 			r.peers[p] = &progress{next: r.LastIndex() + 1, match: -1}
 		}
 	}
 	r.env.CancelTimer(TimerElection)
-	if len(r.peers) > 0 { // alone, there is nobody to tell
+	if len(r.peers) > 0 { // alone, there is nobody to tell; addPeer arms it later
 		r.env.SetTimer(TimerHeartbeat, r.cfg.HeartbeatInterval)
 	}
 	// An entry of this term: until it commits, nothing from earlier terms
@@ -576,6 +617,10 @@ func (r *Raft) append(e entry) (int64, error) {
 	}
 	r.terms = append(r.terms, e.term)
 	r.dirty = true
+	if err := r.noteEntry(index, e.kind, e.cmd); err != nil {
+		r.fail(err)
+		return 0, err
+	}
 	return index, nil
 }
 
@@ -599,7 +644,8 @@ func (r *Raft) Propose(cmd []byte) (int64, error) {
 }
 
 // Read returns the command of the entry at index, which must be at most
-// LastIndex. noop is set for an entry that carries no command.
+// LastIndex. noop is set for an entry that carries no command: a new
+// leader's no-op or a configuration (see Members).
 func (r *Raft) Read(index int64) (cmd []byte, noop bool, err error) {
 	batches, err := r.log.Read(index, 0)
 	if err != nil {
@@ -609,7 +655,7 @@ func (r *Raft) Read(index int64) (cmd []byte, noop bool, err error) {
 		return nil, false, fmt.Errorf("%w: no raft entry at index %d", storage.ErrCorrupt, index)
 	}
 	p := batches[0].Payload
-	return p[entryHeader:], p[8] == kindNoop, nil
+	return p[entryHeader:], p[8] != kindCommand, nil
 }
 
 // Sync makes the log durable without anything else happening: for callers
@@ -650,7 +696,7 @@ func (r *Raft) sendAck() {
 // broadcast sends AppendEntries to every follower that is not waiting for
 // a response, or to all of them if force is set.
 func (r *Raft) broadcast(force bool) {
-	for _, id := range r.cfg.Peers { // the configured order, never the map's
+	for _, id := range r.targets() { // id order, never the map's
 		if p := r.peers[id]; p != nil && (force || !p.inflight) {
 			r.replicate(id, p)
 		}
@@ -691,20 +737,14 @@ func (r *Raft) advanceCommit() {
 	if r.role != Leader || r.err != nil {
 		return
 	}
-	held := []int64{r.stable()}
-	for _, id := range r.cfg.Peers {
-		if p := r.peers[id]; p != nil {
-			held = append(held, p.match)
-		}
-	}
-	slices.Sort(held)
-	n := held[len(held)-1-len(r.cfg.Peers)/2] // the majority-th highest
+	n := majority(r, r.stable(), -1, func(p *progress) int64 { return p.match }) // the majority-th highest
 	// Only an entry of the current term is committed by counting. An
 	// older one that is on a majority can still be overwritten by a
 	// leader that never saw it (Figure 8); it commits along with the
 	// first current-term entry after it.
 	if n > r.commit && (r.terms[n] == r.hard.term || r.mut(MutCommitAnyTerm)) {
 		r.commit = n
+		r.pruneAfterCommit()
 	}
 }
 
@@ -712,8 +752,10 @@ func (r *Raft) advanceCommit() {
 func (r *Raft) OnTimer(t Timer) {
 	switch {
 	case r.err != nil:
+	case t == TimerElection && r.role != Leader && !r.mayStand():
+		r.armElection() // removed, and it knows the removal committed
 	case t == TimerElection && r.role != Leader:
-		if len(r.cfg.Peers) == 1 || r.mut(MutNoPreVote) {
+		if r.alone() || r.mut(MutNoPreVote) {
 			r.campaign(false)
 		} else {
 			r.preCampaign()
@@ -746,7 +788,9 @@ func (r *Raft) OnTimer(t Timer) {
 // Step handles one message from a peer. Malformed messages and messages
 // from outside the cluster are dropped.
 func (r *Raft) Step(from sys.NodeID, raw []byte) {
-	if r.err != nil || from == r.cfg.ID || !slices.Contains(r.cfg.Peers, from) {
+	// Any node may send: the configuration decides only what counts
+	// (thesis 4.1), and the transport decides who may talk.
+	if r.err != nil || from == r.cfg.ID || from <= 0 {
 		return
 	}
 	m, err := decodeMessage(raw, r.cfg.Log.MaxPayloadBytes-entryHeader)
@@ -770,7 +814,7 @@ func (r *Raft) Step(from sys.NodeID, raw []byte) {
 		case r.preVotes == nil || r.role == Leader:
 		case m.ok && m.term == r.hard.term+1:
 			r.preVotes[from] = true
-			if len(r.preVotes) > len(r.cfg.Peers)/2 {
+			if r.counted(r.preVotes) {
 				r.campaign(false)
 			}
 		case !m.ok && m.term > r.hard.term:
@@ -801,7 +845,7 @@ func (r *Raft) Step(from sys.NodeID, raw []byte) {
 	case msgRequestVote, msgTransferVote:
 		r.onRequestVote(from, m, stale)
 	case msgTimeoutNow:
-		if !stale && r.role == Follower && from == r.leader {
+		if !stale && r.role == Follower && from == r.leader && r.isVoter(r.cfg.ID) {
 			r.campaign(true)
 		}
 	case msgVoteResponse:
@@ -882,6 +926,7 @@ func (r *Raft) onAppendEntries(from sys.NodeID, m message) {
 				return
 			}
 			r.terms = r.terms[:index]
+			r.dropConfsFrom(index)
 		}
 		if _, err := r.append(e); err != nil {
 			r.fail(fmt.Errorf("append raft entry %d: %w", index, err))
@@ -895,6 +940,7 @@ func (r *Raft) onAppendEntries(from sys.NodeID, m message) {
 			return
 		}
 		r.terms = r.terms[:confirmed+1]
+		r.dropConfsFrom(confirmed + 1)
 	}
 	// Only up to the last entry this message vouched for: anything beyond
 	// it in our log may be a stale suffix.
@@ -909,6 +955,9 @@ func (r *Raft) onAppendEntries(from sys.NodeID, m message) {
 
 func (r *Raft) onAppendResponse(from sys.NodeID, m message) {
 	p := r.peers[from]
+	if p == nil {
+		return // a node this leader no longer replicates to
+	}
 	// Refusals count too: the follower heard us. A stamp from the future
 	// can only come from a broken peer; it buys nothing.
 	p.acked = max(p.acked, min(sys.Instant(m.stamp), r.env.Now()))

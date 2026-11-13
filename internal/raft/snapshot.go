@@ -14,9 +14,10 @@ import (
 // terms of those entries, and the state the caller had after applying them.
 // The entries themselves stay in the log. See docs/design/a1-snapshots.md.
 type snapshot struct {
-	index int64     // last entry included; -1 for none
-	runs  []termRun // terms of entries 0..index, ascending by first
-	state []byte    // the caller's, uninterpreted
+	index   int64     // last entry included; -1 for none
+	runs    []termRun // terms of entries 0..index, ascending by first
+	members []Member  // the configuration after index; nil in version 1
+	state   []byte    // the caller's, uninterpreted
 }
 
 // termRun says that entries from first up to the next run's first have term.
@@ -24,7 +25,7 @@ type termRun struct{ first, term int64 }
 
 const (
 	snapshotMagic   = 0x5341534e // "SASN"
-	snapshotVersion = 1
+	snapshotVersion = 2          // 2 adds the configuration; 1 is still read
 	snapshotName    = "snapshot"
 )
 
@@ -54,6 +55,12 @@ func (s *snapshot) encode() []byte {
 		b = binary.BigEndian.AppendUint64(b, uint64(r.first))
 		b = binary.BigEndian.AppendUint64(b, uint64(r.term))
 	}
+	var conf []byte // none: the node runs on its bootstrap configuration
+	if len(s.members) > 0 {
+		conf = encodeMembers(s.members)
+	}
+	b = binary.BigEndian.AppendUint32(b, uint32(len(conf)))
+	b = append(b, conf...)
 	b = binary.BigEndian.AppendUint32(b, uint32(len(s.state)))
 	b = append(b, s.state...)
 	return binary.BigEndian.AppendUint32(b, crc32.Checksum(b, castagnoli))
@@ -66,7 +73,8 @@ func decodeSnapshot(b []byte) (snapshot, error) {
 		return snapshot{}, fmt.Errorf("%w: bad length or checksum", errBadSnapshot)
 	}
 	body := b[:len(b)-4]
-	if binary.BigEndian.Uint32(body) != snapshotMagic || body[4] != snapshotVersion {
+	version := body[4]
+	if binary.BigEndian.Uint32(body) != snapshotMagic || version < 1 || version > snapshotVersion {
 		return snapshot{}, fmt.Errorf("%w: bad magic or version", errBadSnapshot)
 	}
 	s := snapshot{index: int64(binary.BigEndian.Uint64(body[5:]))}
@@ -83,6 +91,20 @@ func decodeSnapshot(b []byte) (snapshot, error) {
 			return snapshot{}, fmt.Errorf("%w: term runs out of order", errBadSnapshot)
 		}
 		s.runs = append(s.runs, r)
+	}
+	if version >= 2 {
+		if len(rest) < 4 || uint64(binary.BigEndian.Uint32(rest)) > uint64(len(rest)-4) {
+			return snapshot{}, fmt.Errorf("%w: configuration length", errBadSnapshot)
+		}
+		n := binary.BigEndian.Uint32(rest)
+		if n > 0 {
+			ms, err := decodeMembers(rest[4 : 4+n])
+			if err != nil {
+				return snapshot{}, fmt.Errorf("%w: %w", errBadSnapshot, err)
+			}
+			s.members = ms
+		}
+		rest = rest[4+n:]
 	}
 	if len(rest) < 4 || uint64(binary.BigEndian.Uint32(rest)) != uint64(len(rest)-4) {
 		return snapshot{}, fmt.Errorf("%w: state length", errBadSnapshot)
@@ -141,13 +163,14 @@ func (r *Raft) SaveSnapshot(index int64, state []byte) {
 			return
 		}
 	}
-	s := snapshot{index: index, runs: runsOf(r.terms, index), state: state}
+	s := snapshot{index: index, runs: runsOf(r.terms, index), members: r.confAsOf(index).members, state: state}
 	b := s.encode()
 	if err := writeAtomic(r.disk, r.cfg.Dir, snapshotName, b, false, false); err != nil {
 		r.fail(err)
 		return
 	}
 	r.latest, r.latestBytes = s, b
+	r.setBase(s)
 }
 
 // Snapshot returns the index and state of the newest snapshot: the one
@@ -245,6 +268,8 @@ func (r *Raft) beginInstall(cut int64, s snapshot, raw []byte) error {
 	}
 	r.terms = s.expand()[:cut]
 	r.commit = max(r.commit, cut-1)
+	r.dropConfsFrom(cut)
+	r.setBase(s)
 	r.pending, r.pendingBytes = &s, raw
 	return nil
 }
@@ -351,6 +376,9 @@ func (r *Raft) onInstallSnapshot(from sys.NodeID, m message) {
 
 func (r *Raft) onInstallResponse(from sys.NodeID, m message) {
 	p := r.peers[from]
+	if p == nil {
+		return // a node this leader no longer replicates to
+	}
 	p.acked = max(p.acked, min(sys.Instant(m.stamp), r.env.Now()))
 	if p.next >= r.log.StartOffset() {
 		return // no install under way: a late copy

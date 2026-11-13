@@ -32,6 +32,7 @@ const (
 const (
 	kindCommand byte = 0
 	kindNoop    byte = 1 // appended by a new leader; carries nothing
+	kindConfig  byte = 2 // a configuration: the voters (membership.go)
 )
 
 // entryHeader is what precedes a command in a stored entry: term and kind.
@@ -175,9 +176,13 @@ func decodeMessage(b []byte, maxCmd int) (message, error) {
 		for ; n > 0 && !bad; n-- {
 			e := entry{term: i64(), kind: take(1)[0]}
 			size := int(binary.BigEndian.Uint32(take(4)))
-			bad = bad || size > maxCmd || e.kind > kindNoop || e.term < 0 || e.term > m.term
+			bad = bad || size > maxCmd || e.kind > kindConfig || e.term < 0 || e.term > m.term
 			if !bad {
 				e.cmd = take(size)
+				if e.kind == kindConfig {
+					_, err := decodeMembers(e.cmd)
+					bad = bad || err != nil
+				}
 				m.entries = append(m.entries, e)
 			}
 		}
