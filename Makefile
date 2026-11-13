@@ -19,10 +19,12 @@ VERSION ?=
 LDFLAGS := -ldflags "-X main.version=$(VERSION)"
 PLATFORMS := darwin/arm64 darwin/amd64 linux/arm64 linux/amd64
 
-.PHONY: build test race lint fuzz integration sim bench release
+.PHONY: build test race lint fuzz integration chaos sim bench release
 
 build:
 	CGO_ENABLED=0 go build -trimpath $(LDFLAGS) -o bin/samsa ./cmd/samsa
+	# With deliberate bugs behind a hidden -unsafe flag, for the chaos test only.
+	CGO_ENABLED=0 go build -trimpath -tags unsafe -o bin/samsa-unsafe ./cmd/samsa
 
 # Static binaries for every platform in dist/, with SHA256SUMS. CI runs this
 # on a version tag; see .github/workflows/release.yml.
@@ -67,6 +69,12 @@ endif
 # Needs kcat and a JDK; set SAMSA_REQUIRE_CLIENTS=1 to fail when one is missing.
 integration: build $(JARS) $(KAFKA_DIST)
 	cd integration && SAMSA_BIN=$(CURDIR)/bin/samsa go test -count=1 -v ./...
+
+# The chaos test alone, for CHAOS_DURATION (default here 10m); CHAOS_SEED
+# replays a scenario. Design: docs/design/a4-chaos.md.
+CHAOS_DURATION ?= 10m
+chaos: build
+	cd integration && SAMSA_BIN=$(CURDIR)/bin/samsa CHAOS_DURATION=$(CHAOS_DURATION) go test -count=1 -v -timeout 2h -run '^TestChaos$$' .
 
 # Throughput and latency of the built binary; method in docs/design/phase-7.md.
 # Takes about 15 minutes. Results go to bench.md.
