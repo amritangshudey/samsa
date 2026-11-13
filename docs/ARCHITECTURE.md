@@ -244,6 +244,15 @@ fetch sent after a topic's delete was acknowledged finds no topic (D1). `monitor
   The Figure 8 bug is caught by the Raft-level random schedules instead
   (`internal/raft/random_test.go`).
 
+**Tools** ([design](design/a3-sim-tools.md)). Faults are numbered as they
+happen (`Result.Faults`). `Config.Skip` skips some of them while still
+making the draws that chose them, so a run that skips nothing is the
+original run. `Shrink` uses this for delta debugging over the faults. A
+timeline (`Config.Timeline`) records node spans, leaders, faults, client
+acks and reads and peer messages, with no effect on the run, and renders
+them as HTML. The mutation suite reports a score: how many of 200 seeds
+catch each bug.
+
 **The real binary** ([design](design/a4-chaos.md)). `integration/chaos_test.go`
 runs three processes with a user-space TCP proxy on every client and peer
 link, applies faults from a seed (SIGKILL, SIGTERM, isolation, one-way
