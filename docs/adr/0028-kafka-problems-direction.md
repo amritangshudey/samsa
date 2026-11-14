@@ -12,24 +12,30 @@ by one, which makes Samsa a smaller Kafka, not a better answer to what
 Kafka users struggle with. The developer asked for the plan to target
 those struggles instead.
 
-The problems below are from knowledge up to mid-2026, not a fresh survey.
-Each item's design doc must check its problem and the Kafka proposal it
-cites (KIP) against the official text (CLAUDE.md rule 5) before building.
+The problems below are from knowledge up to mid-2026, not a user survey.
+The KIP facts were checked against the KIP pages and
+kafka.apache.org/protocol on 2026-11-15 (see "Review"). Each item's
+design doc still verifies its wire formats before building (CLAUDE.md
+rule 5).
 
 1. **Cost in the cloud.** Each record is copied to three brokers in
    different zones; cross-zone traffic is billed, and for busy clusters
    often costs more than the machines. Fast local disks are expensive.
-   Kafka's answers in progress: tiered storage (KIP-405), fetch from the
-   nearest replica (KIP-392), diskless topics (KIP-1150). Other systems
-   (WarpStream, AutoMQ, Bufstream) write to object storage directly.
+   Kafka's answers: fetch from the nearest replica (KIP-392, since 2.4),
+   tiered storage (KIP-405, production-ready since 3.9), diskless topics
+   (KIP-1150, accepted; its parts, KIP-1163 and 1164, still in design).
+   Other systems (WarpStream, AutoMQ, Bufstream) write to object storage
+   directly.
 2. **Slow scaling.** Brokers own data on disk, so adding or replacing one
    copies partitions for hours.
 3. **Hard to operate.** Hundreds of settings, JVM tuning, the move off
    ZooKeeper (KRaft only from 4.0).
-4. **Rebalances stop whole consumer groups.** The new protocol (KIP-848)
-   makes them incremental and server-driven.
+4. **Rebalances stop whole consumer groups.** The new protocol (KIP-848,
+   GA in 4.0) makes them incremental and server-driven; many deployed
+   clients still use the classic one.
 5. **No queue semantics.** No per-record acknowledgement, at most one
-   consumer per partition in a group. Share groups (KIP-932) add them.
+   consumer per partition in a group. Share groups (KIP-932, accepted)
+   add them.
 6. **Exactly-once is hard.** Transaction bugs (KIP-890) and, more often,
    application bugs: committing before processing, retries that write
    twice.
@@ -46,22 +52,17 @@ cites (KIP) against the official text (CLAUDE.md rule 5) before building.
 - **Finish what is open first:** the soak re-run (6), compaction (12b),
   storage faults (13). They are correctness, and the new items depend on
   them.
-- **New items, in this order** (numbers continue from 17; the order is
-  the plan's, not the numbers'):
-  - 18 the consumer group protocol of KIP-848 (problem 4);
-  - 19 fetch from the nearest replica, KIP-392 (problem 1, consumer
-    traffic);
-  - 20 tiered segments in object storage (problems 1 and 2);
-  - 21 diskless topics, decided by ADR after a prototype (problem 1,
-    producer traffic, and 7);
-  - 22 share groups, KIP-932 (problem 5);
-  - 23 fault testing for the new semantics, and the open fault kinds of
-    item 5b (problems 6 and 8);
-  - 24 one-page configuration: profiles and `samsa doctor` (problem 3).
-- **Items 14–17 stay,** reordered: transactions (15) before share groups;
-  sharding (14) is decided after item 21, because diskless topics put
-  only metadata through Raft and may remove the reason for it; 16 and 17
-  last, and 17's benchmark adds cost per GB and node-replacement time.
+- **Be plain about what is catching up.** Kafka has fixed or is fixing
+  problems 1, 2, 4, 5 and part of 6 itself. Implementing its answers
+  makes Samsa equal there, later. Samsa adds two things Kafka lacks:
+  every feature under the simulator with a mutation that must be caught,
+  and `-faults` verdicts for applications (problem 8). The plan marks
+  each row "same" or "more".
+- **New items and their order** are in `docs/PRODUCTION.md`, section 7:
+  23a and 19 first (cheap, and 23a is the unique part), topic ids (18a)
+  and KIP-848 (18), configuration (24), object storage (20, 21),
+  transactions (15), share groups (22), their fault testing (23b), then
+  sharding (14, decided after 21), 16 and 17.
 - **Object storage through the S3 API with the standard library only**
   (request signing is HMAC-SHA256, in `crypto`). Tests use an in-process
   fake with faults; a real S3-compatible server for integration tests is
@@ -69,6 +70,39 @@ cites (KIP) against the official text (CLAUDE.md rule 5) before building.
   still runs only locally (CLAUDE.md), against fakes or a local server.
 - **Tiered storage leaves the non-goals** (CLAUDE.md), as the developer's
   request covers it.
+
+## Review of the first draft (2026-11-15)
+
+The developer asked for a review. Checked against the KIP pages and the
+protocol's API key table; found and changed:
+
+1. **Topic ids were missing.** KIP-848 "works only with topic ids", and
+   share-group state is keyed by topic id. Samsa has none (Metadata stops
+   at v8). Added item 18a before 18.
+2. **Share groups build on KIP-848's coordinator.** Item 22 now depends
+   on 18. Its API keys are 75–78, not as first remembered.
+3. **The draft called tiered storage "in progress".** It is
+   production-ready since Kafka 3.9. The draft so overstated how far
+   ahead these items put Samsa; the plan now says "same" or "more" per
+   row.
+4. **Tiering conflicts with the copy-forward cleaner (ADR 0026):** the
+   cleaner rewrites live batches at the tail, which would upload them
+   again. Tiered and diskless storage also overlap. Item 20 now starts
+   with one design doc and prototype for both, and may conclude that
+   only one mechanism is built.
+5. **Fault testing came last, though it is the only row where Kafka has
+   nothing.** Split: the fault kinds open since 5b come first (23a), the
+   ones for new semantics after them (23b).
+6. **KIP-392 detail:** a follower must answer OFFSET_NOT_AVAILABLE above
+   what it knows is committed; the estimate rose, and a mutation was
+   added.
+7. **No gates for the new aims.** Added G10 (cost and scaling measured)
+   and G11 (new protocols under the simulator).
+8. **Samsa's own ceiling was understated:** every write goes through one
+   Raft leader. The table now says so next to "partitions are cheap".
+
+Not verified: the release where share groups left preview; KIP-1163
+(HTTP 404 that day); the later parts of the long KIP pages.
 
 ## Alternatives
 
@@ -85,7 +119,7 @@ cites (KIP) against the official text (CLAUDE.md rule 5) before building.
 
 ## Consequences
 
-- The plan grows by about seven items, roughly 6–9 weeks of work
+- The plan grows by about seven items, roughly 8–11 weeks of work
   (`docs/PRODUCTION.md`, section 7, has the estimates). v1.0 moves out.
 - Diskless topics trade latency for cost: a write is acknowledged after
   the object store has it, typically hundreds of milliseconds. They must

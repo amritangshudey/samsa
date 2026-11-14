@@ -22,6 +22,7 @@ gates. v1.0 is tagged when every gate is met and linked to its test.
 | G7 Changeable while running | add, remove and replace nodes without downtime; rolling upgrade between two releases tested in CI; on-disk formats versioned |
 | G8 Honest numbers | benchmark method, hardware and raw results in the repo; a comparison with Apache Kafka on the same machine, same method |
 | G9 Standard tools work | `kafka-topics`, `kafka-consumer-groups`, `kafka-configs`, kcat and one web UI run their common commands; compatibility table generated from test results |
+| G10, G11 | cost and scaling measured; new protocols under the simulator (section 7) |
 
 What is **not** promised even at v1.0, and is said so in the README: scale
 beyond what one Raft group gives until sharding (item 14) or diskless
@@ -145,10 +146,8 @@ CI, report. Each milestone is a tagged release.
 - Item 17's comparison needs Apache Kafka installed locally.
 - Item 14 may be judged too large; that is decided in its ADR, with the
   developer, after item 21.
-- Item 20 needs an S3-compatible server for integration tests (a
-  dependency: ask first). Unit and simulator tests use an in-process fake.
-- Items 18 and 22 need a Java client of 4.0 or later for its new
-  consumers (the integration Java tests use an older one: ask first).
+- Items 18, 20 and 22 need test-only dependencies (section 7,
+  "Blockers to settle early").
 
 Blockers are written to `docs/QUESTIONS.md` as they arrive.
 
@@ -171,51 +170,85 @@ Blockers are written to `docs/QUESTIONS.md` as they arrive.
 | 11 Exhaustive checking | done (`docs/reports/b2-exhaustive.md`, ADR 0025): three Raft nodes, breadth-first, every schedule up to depth 10 (`go test`) and 12 (CI, with one power loss or loss per node), both configurations; no violation. `AckBeforeSync` found with its shortest counterexample, 11 events. A one-node reduction and a vacuous bound found and removed (BUGS.md M11). Bounds are short; no sound reduction yet |
 | 12 Retention and compaction | part (a), per-topic retention: done (`docs/reports/c2-retention-part-a.md`, ADR 0026, ADR 0027). `retention.ms` and `retention.bytes` per topic, set with CreateTopics or `kafka-configs.sh --alter`; live batches copied forward out of the head segment; R9 in the simulator catches `UnsafeTrimLive`. Part (b), compaction: not started |
 | 13–17 | not started |
-| 18–24 | planned (section 7, ADR 0028) |
+| 18–24, 18a, 23a, 23b | planned (section 7, ADR 0028) |
 
 ## 7. Kafka's problems, and the plan's answer to each
 
 Asked for on 2026-11-15: "make the future development plans of samsa in
 such a way that it solves the problems of kafka". ADR 0028 records the
-decision and its reasons. The problems are from knowledge up to mid-2026;
-each item's design doc checks its problem and the KIP it cites against
-the official text first.
+decision, its reasons, and the review of the first draft (checked
+against the KIP pages and kafka.apache.org/protocol on 2026-11-15).
 
-| Kafka problem | Samsa's answer | Item |
-|---|---|---|
-| Cross-zone replication and disks cost more than the machines | consumers read from a node in their own zone; old segments in object storage; then topics written to object storage directly | 19, 20, 21 |
-| Adding or replacing a broker copies data for hours | with segments in object storage, a new node copies only the recent tail and the snapshot | 20 |
-| Hundreds of settings, JVM, ZooKeeper migration | already one binary with Raft built in; add profiles and `samsa doctor`, which explains every setting in use | 24 |
-| A rebalance stops the whole consumer group | the KIP-848 group protocol: the broker assigns partitions incrementally | 18 |
-| No queues: no per-record acks, one consumer per partition | share groups (KIP-932) | 22 |
-| Exactly-once is hard; applications lose or duplicate records | transactions under the simulator (15); `-faults` and the verdict for transactions and share groups (23) | 15, 23 |
-| Partitions are expensive | already cheap: a partition is a reference in state, not files. Measured in 17 | 17 |
-| Applications are never tested against broker faults | `-faults` mode (done in 5b), extended to the open fault kinds | 23 |
+**What the review changed, in short.** Kafka is fixing most of these
+problems itself: tiered storage is production-ready since 3.9, the new
+group protocol since 4.0, fetch from the nearest replica since 2.4;
+share groups and diskless topics are accepted. So implementing them is
+catching up, not overtaking. What Samsa can add that Kafka does not
+have is the same as in section 3: each of these features run under the
+simulator with a mutation that must be caught, and `-faults` verdicts
+for applications that use them. The plan below says which rows are
+"same as Kafka" and which are "more than Kafka".
+
+| Kafka problem | Kafka's own answer | Samsa's answer | Compared with Kafka | Item |
+|---|---|---|---|---|
+| Cross-zone traffic and disks cost more than the machines | KIP-392 (done), tiered storage (done), diskless topics (accepted, being designed) | the same three steps; one design doc for object storage decides how many mechanisms are built | same, later; simpler if one mechanism serves both | 19, 20, 21 |
+| Adding or replacing a broker copies data for hours | tiered storage shortens it | a new node copies the snapshot and the local tail only | same; measured | 20 |
+| Hundreds of settings, JVM, ZooKeeper migration | KRaft only since 4.0 | one binary, Raft built in; profiles and `samsa doctor` | more: already simpler | 24 |
+| A rebalance stops the whole consumer group | KIP-848 (done) | the same protocol, under the simulator | same protocol; more evidence | 18a, 18 |
+| No queues | share groups, KIP-932 (accepted) | the same protocol, state in the one Raft log, under the simulator | same protocol; more evidence | 22 |
+| Applications lose or duplicate records; they are never tested against broker faults | none | `-faults` and the verdict, for every fault kind and every consumer type | **more: Kafka has nothing here** | 23a, 23b |
+| Exactly-once is hard in the broker too | KIP-890 (approved) | transactions built to the protocol current clients negotiate, under the simulator | same protocol; more evidence | 15 |
+| Partitions are expensive | none | a partition is a reference in state, not files. **But every write goes through one leader** until item 21 or 14 | more for partition count, less for write throughput; both measured | 17 |
+
+### New gates (added to section 1)
+
+| Gate | Evidence required |
+|---|---|
+| G10 Cost and scaling are measured | bytes between racks per byte produced and consumed; local disk per GB retained; time to replace a node; each before and after, and against Kafka in item 17. Measured locally: object-store latency and prices are not real ones, and the report says so |
+| G11 New protocols are held to the old standard | every new group or storage mechanism has a simulator invariant, a mutation that is caught, and a real client test |
 
 ### New items
 
 | # | Item | Must show | Estimate |
 |---|---|---|---|
-| 18 | KIP-848 consumer groups (ConsumerGroupHeartbeat, ConsumerGroupDescribe) next to the classic protocol | a Java consumer with `group.protocol=consumer` works; a member joining does not pause the others' fetching (measured); simulator invariant "no partition owned by two members of one group epoch"; mutation "assign before revoke" caught | 4–6 days |
-| 19 | Fetch from the nearest replica (KIP-392): `-rack` per node, followers serve fetches up to their commit point | a consumer with `client.rack` reads only from its own rack's node; no record visible before it commits (simulator); bytes across racks measured | 1–2 days |
-| 20 | Tiered segments: closed segments uploaded to object storage (S3 API, standard library only), read back on fetch, deleted locally after upload | simulator with a faulty object store (lost, slow, duplicated writes): no committed record lost or changed; node replacement time and local disk measured before and after; mutation "delete locally before the upload is confirmed" caught | 1–2 weeks |
-| 21 | Diskless topics: a per-topic choice; brokers write batches to object storage and Raft orders only references to them | ADR with a prototype and measured latency, cost per GB and metadata throughput first; then R-invariants unchanged in the simulator; cross-zone bytes per produced byte measured; latency stated plainly | 1–3 weeks, ADR first |
-| 22 | Share groups (KIP-932): ShareFetch, ShareAcknowledge, record locks with timeout and redelivery | Java share consumer works; simulator invariant "every record is acknowledged once or delivered again"; mutation "drop a lock without redelivery" caught | 5–8 days |
-| 23 | Fault testing, extended: session expiry, slow and empty fetches, retention cuts (open from 5b), aborted transactions, share-group redelivery; verdicts for each | a sample application with each class of bug is caught with its seed; the fixed one passes; the guide updated | 3–4 days |
-| 24 | Configuration: `-profile dev|test|prod` sets safe defaults; `samsa doctor` lists every setting in use, its source and its risk | every flag documented with its default and when to change it; a prod node needs at most five settings | 1–2 days |
+| 23a | Fault testing, the open kinds from 5b: session expiry, slow and empty fetches, offsets cut by retention (possible since 12a) | a sample application with each bug is caught with its seed; the fixed one passes; guide updated | 2–3 days |
+| 19 | Fetch from the nearest replica (KIP-392): `-rack` per node; the leader names a preferred read replica (Fetch v11, already offered); a follower serves only what it knows is committed and answers OFFSET_NOT_AVAILABLE above that | a consumer with `client.rack` reads from its own rack's node; simulator: no uncommitted record ever served by a follower; mutation "follower serves its whole log" caught; bytes between racks measured. Also takes read load off the one leader | 2–3 days |
+| 18a | Topic ids: a UUID per topic in state; Metadata v10–12, Fetch v12–13, CreateTopics v5–7, DeleteTopics by id. **Needed by 18 and 22** ("the new consumer rebalance protocol works only with topic ids") | a topic deleted and recreated gets a new id and a client with the old id is refused; current Java and franz-go clients negotiate the new versions; snapshot and format level raised | 3–4 days |
+| 18 | KIP-848 consumer groups: ConsumerGroupHeartbeat (68), ConsumerGroupDescribe (69), server-side range and uniform assignors, next to the classic protocol | a Java consumer with `group.protocol=consumer` works; a member joining does not pause the others' fetching (measured against the classic protocol); invariant "no partition owned by two members at once"; mutation "assign before the old owner revoked" caught | 5–7 days |
+| 24 | Configuration: `-profile dev|test|prod`; `samsa doctor` lists every setting in use, its source and its risk | every flag documented with its default and when to change it; a prod node needs at most five settings | 1–2 days |
+| 20 | Object storage, design first: **one design doc and prototype for tiered and diskless together.** Open questions it must answer: (1) the copy-forward cleaner (12a) rewrites live batches, which would re-upload them: retention for stored objects must delete or rewrite objects, not copy through Raft; (2) a lagging follower or new node must read old entries from objects, so snapshots must reference them; (3) is tiering worth building if diskless references do the same job. Then the build: closed data in object storage (S3 API, standard library only), read back on fetch | simulator with a faulty object store (lost, slow, duplicated, torn writes): no committed record lost or changed; node replacement time and local disk measured before and after; mutation "delete locally before the upload is confirmed" caught | 1 week design and prototype, 1–2 weeks build |
+| 21 | Diskless topics, if item 20's measurements hold: a per-topic choice; brokers write batches to object storage and Raft orders only references. Kafka's design (KIP-1150, 1163, 1164) adds a separate coordinator for the ordering; here the Raft log already is one | latency, metadata throughput and bytes between racks measured and stated plainly; R-invariants unchanged in the simulator; any broker accepts a produce for a diskless topic | 1–3 weeks |
+| 15 | Transactions (was in the plan): built to the versions current clients negotiate, including KIP-890's epoch bump | as before: read-committed consumers never see aborted data, under faults | 4–7 days |
+| 22 | Share groups (KIP-932), after 18: ShareGroupHeartbeat (75), ShareGroupDescribe (76), ShareFetch (77), ShareAcknowledge (78); record locks, timeout, redelivery, delivery count. Share state is commands in the Raft log, so Kafka's inter-broker share-state APIs are not needed | Java share consumer works; invariant "every record is acknowledged once or delivered again"; mutation "drop a lock without redelivery" caught | 6–9 days |
+| 23b | Fault testing for transactions, KIP-848 groups and share groups: verdicts for each | a sample application with each class of bug is caught with its seed | 2–3 days |
 
-### Order from here
+### Milestones from here
 
-1. Finish: 6 (re-soak on the fixed build), 12b compaction, 13 storage
-   faults.
-2. Cheap wins on Kafka's pain: 19, 18, 24.
-3. Cost and scaling: 20, then 21's ADR and prototype; build 21 if the
-   measurements hold.
-4. Semantics: 15 transactions, 22 share groups, 23 fault testing.
-5. 14 sharding, decided by ADR after 21; then 16 and 17. Item 17's
-   benchmark adds cost per GB stored and moved, and node replacement
-   time, next to throughput.
+| Release | Items, in order | Why this order |
+|---|---|---|
+| v0.6 | 6 re-soak, 12b compaction, 13 storage faults | open work; correctness that the rest stands on |
+| v0.7 — modern clients | 23a, 19, 18a, 18, 24 | 23a is the one thing Kafka lacks, and cheap; 19 is small and needs nothing new; topic ids unlock the rest |
+| v0.8 — object storage | 20, 21 | the largest saving and the largest risk; design and measure before building |
+| v0.9 — semantics | 15, 22, 23b | queues need 18; fault testing follows what it tests |
+| v1.0 | 14 sharding (decided by ADR after 21), 16, 17 | 17's benchmark covers G10 against Kafka |
 
-The new items add roughly 6–9 weeks to the 4–6 left before; the
-estimates are guesses from items 1–12a and usually miss by the bugs the
-simulator finds.
+### Blockers to settle early
+
+- **A Kafka Java client of 4.1 or later** for the integration tests of
+  18 and 22 (test-only dependency: ask first). The release where share
+  groups left preview was not verified; item 22's design doc checks it.
+- **An S3-compatible server** for item 20's integration tests (ask
+  first). Unit and simulator tests use an in-process fake.
+
+### What is weak in this plan
+
+- Everything is measured on one laptop. "Cross-zone cost" is bytes
+  between nodes with different `-rack`, not a bill. Object-store latency
+  against a local server is far below a real one.
+- The problem list is from knowledge up to mid-2026 plus the KIP pages,
+  not from a user survey.
+- The new items add roughly 8–11 weeks to the 4–6 left before. The
+  estimates are guesses from items 1–12a, and miss by the bugs the
+  simulator finds.
+- KIP-1163 (the diskless write path) could not be read on 2026-11-15
+  (HTTP 404); item 20's design doc must read it.
