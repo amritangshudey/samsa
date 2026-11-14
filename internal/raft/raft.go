@@ -604,6 +604,10 @@ func (r *Raft) maybeLead() {
 	r.advanceCommit()
 }
 
+// EntryBytes returns the bytes an entry holding a command of cmd bytes
+// takes in the log on disk.
+func EntryBytes(cmd int) int64 { return storage.FrameBytes(entryHeader + cmd) }
+
 // append stores one entry at the end of the log.
 func (r *Raft) append(e entry) (int64, error) {
 	payload := make([]byte, entryHeader, entryHeader+len(e.cmd))

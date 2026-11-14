@@ -359,6 +359,13 @@ func (w *world) finalChecks() {
 	// Under the strict policy the same holds across a power loss, since
 	// everything applied was synced first. Every node is restarted at
 	// once; the cluster must come back to the state it had.
+	// The leader proposes on its own (retention, the cleaner): wait until
+	// nothing it proposed is still unapplied, or it would apply after the
+	// restart and change the state. Nodes go down in this same instant.
+	w.runUntil(w.now+sys.Instant(10*answerBound), func() bool {
+		m := leader.inc.n.Metrics()
+		return m.Applied == m.LastIndex+1
+	})
 	_, hash := leader.inc.n.StateHash()
 	w.stats.ProducersExpired += leader.inc.n.ExpiredProducers()
 	w.stats.BytesRelocated += int(leader.inc.n.Metrics().RelocatedBytes)

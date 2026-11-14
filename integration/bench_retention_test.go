@@ -20,16 +20,16 @@ import (
 // (docs/design/c2-retention-compaction.md, review question 4): a single
 // node, 90% of 1 KiB records to a topic kept 10 s and 10% to one kept
 // forever, against the same load with both kept forever. It runs only with
-// SAMSA_BENCH_RETENTION=1, for SAMSA_BENCH_RETENTION_FOR (default 2 min).
+// SAMSA_BENCH_RETENTION=1, for SAMSA_BENCH_RETENTION_FOR (default 1 min).
 func TestBenchRetention(t *testing.T) {
 	if os.Getenv("SAMSA_BENCH_RETENTION") == "" {
 		t.Skip("set SAMSA_BENCH_RETENTION=1 to run the retention benchmark")
 	}
-	d := envDuration(t, "SAMSA_BENCH_RETENTION_FOR", 2*time.Minute)
+	d := envDuration(t, "SAMSA_BENCH_RETENTION_FOR", time.Minute)
 	for _, mixed := range []bool{false, true} {
 		metrics := freeAddr(t)
 		b := startBroker(t, "-sync", "always", "-log-level", "warn", "-metrics-listen", metrics)
-		cl := franz(t, b, kgo.MaxBufferedRecords(10000))
+		cl := franz(t, b, kgo.MaxBufferedRecords(10000), kgo.ProducerBatchCompression(kgo.NoCompression())) // bytes written are bytes stored
 		short := "-1"
 		if mixed {
 			short = "10000"

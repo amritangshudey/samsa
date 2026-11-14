@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 
+	"github.com/amritangshudey/samsa/internal/raft"
 	"github.com/amritangshudey/samsa/internal/scram"
 	"github.com/amritangshudey/samsa/internal/wire"
 )
@@ -196,8 +197,9 @@ type batchRef struct {
 	base         int64 // partition offset of the batch's first record
 	logIndex     int64 // index of the Append or Relocate command holding the batch
 	maxTimestamp int64
-	// size is the batch's length in bytes, for the cleaner. It is not
-	// hashed; 0 means unknown, after a snapshot older than version 8.
+	// size is the bytes its log entry takes on disk, framing included, for
+	// the cleaner. It is not hashed; 0 means unknown, after a snapshot
+	// older than version 8.
 	size int32
 }
 
@@ -576,7 +578,7 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 			}
 		}
 		base := p.next
-		p.batches = append(p.batches, batchRef{base: base, logIndex: index, maxTimestamp: info.MaxTimestamp, size: int32(info.Size)})
+		p.batches = append(p.batches, batchRef{base: base, logIndex: index, maxTimestamp: info.MaxTimestamp, size: int32(raft.EntryBytes(len(cmd)))})
 		p.next += int64(info.Count)
 		if idempotent {
 			p.remember(info, base, index)
@@ -835,7 +837,7 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 				return result{}, fmt.Errorf("%w: relocate of %d records over offsets %d to %d at index %d", errBadCommand, info.Count, base, end, index)
 			}
 			if found && p.batches[i].logIndex == from {
-				p.batches[i].logIndex, p.batches[i].size = index, int32(info.Size)
+				p.batches[i].logIndex, p.batches[i].size = index, int32(raft.EntryBytes(len(cmd)))
 			}
 		}
 		return result{}, nil

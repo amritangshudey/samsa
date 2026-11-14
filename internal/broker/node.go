@@ -274,10 +274,14 @@ type Node struct {
 	// trimmedAt is the index of the last Trim applied (-1: none since the
 	// last restore); trimProposed the highest cut this node proposed.
 	trimmedAt, trimProposed int64
+	// snapStart is the log start of the newest snapshot on disk: the log
+	// must keep every entry from there (compactTo).
+	snapStart int64
 	// expiring and cleaning count the retention proposals in flight;
 	// retainAt is when the leader next looks at retention (retain.go).
 	expiring, cleaning int
 	retainAt           sys.Instant
+	cleanActive        bool // the cleaner had work at its last round
 	// expirySamples are (time, applied index) pairs the serving leader
 	// wrote down, oldest first: soft state, so a new leader starts empty
 	// and expiry is only ever late.
@@ -333,6 +337,7 @@ func (n *Node) adopt(st *state) {
 	st.noFencing, st.noSequences = n.cfg.UnsafeNoFencing, n.cfg.UnsafeNoSequenceCheck
 	st.keepOffsetsOnDelete, st.trimResetsStart = n.cfg.UnsafeKeepOffsetsOnDelete, n.cfg.UnsafeTrimResetsStart
 	n.st = st
+	n.snapStart = st.logStart // every state adopted is a snapshot's
 	// A snapshot older than version 8 has no batch sizes; the cleaner's
 	// sum of live bytes needs them. A failed read leaves 0: fetch reports
 	// a read failure of committed data itself.
@@ -343,13 +348,23 @@ func (n *Node) adopt(st *state) {
 					continue
 				}
 				if cmd, _, err := n.raft.Read(b.logIndex); err == nil {
-					if info, ok := wire.PeekBatch(appendBatch(cmd)); ok {
-						p.batches[i].size = int32(info.Size)
-					}
+					p.batches[i].size = int32(raft.EntryBytes(len(cmd)))
 				}
 			}
 		}
 	}
+}
+
+// compactTo returns where the log may be cut: below the log start of the
+// newest snapshot on disk, not below the state's. After a Trim the state's
+// start is ahead of the snapshot's until the next snapshot is saved; a
+// crash before then restarts from the older snapshot, which still needs
+// those entries (BUGS.md S10).
+func (n *Node) compactTo() int64 {
+	if n.cfg.UnsafeTrimEarly {
+		return n.st.logStart
+	}
+	return min(n.st.logStart, n.snapStart)
 }
 
 // raftEnv is the node as Raft sees it.
@@ -727,12 +742,15 @@ func (n *Node) advance() {
 	}
 	n.stepVoterChange()
 	n.peerAddrs()
-	n.raft.Compact(n.st.logStart) // effective only below a snapshot, unless UnsafeTrimEarly
+	n.raft.Compact(n.compactTo()) // effective only below a snapshot, unless UnsafeTrimEarly
 	// A Trim frees disk only once a snapshot after it exists: take one now.
 	trimPending := n.trimmedAt > n.raft.SnapshotIndex() && !n.cfg.UnsafeTrimEarly
 	if every := n.cfg.SnapshotEvery; n.fatal == nil && (trimPending || every > 0 && n.applied-1-n.raft.SnapshotIndex() >= every) {
 		n.raft.SaveSnapshot(n.applied-1, n.st.encode())
-		n.raft.Compact(n.st.logStart)
+		if n.raft.SnapshotIndex() == n.applied-1 {
+			n.snapStart = n.st.logStart
+		}
+		n.raft.Compact(n.compactTo())
 	}
 	if n.serving && n.fatal == nil && n.st.level >= 2 {
 		n.retain()

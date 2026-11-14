@@ -26,19 +26,24 @@ const cleanBatchBytes = 4 << 20
 // proposals are in flight, so as not to propose the same thing twice. They
 // do not wait for each other: an expiry only removes references, and a
 // relocation checks at apply that its reference is unchanged.
+//
+// Each look walks every batch reference, so the leader looks once a
+// second, except that while the cleaner has work it starts its next round
+// as soon as the last one has applied: one round a second could not keep
+// up with a busy log.
 func (n *Node) retain() {
 	now := n.clock.Now()
 	// Over the safety limit it acts at once, as retention did before C2.
 	over := n.cfg.RetentionBytes > 0 && n.raft.LogBytesFrom(n.st.logStart) > n.cfg.RetentionBytes
-	if now < n.retainAt && !over {
-		return
+	if now >= n.retainAt || over {
+		n.retainAt = now + sys.Instant(retainEvery)
+		if n.expiring == 0 {
+			n.expireRecords(now)
+		}
+		n.cleanActive = true // clean decides
 	}
-	n.retainAt = now + sys.Instant(retainEvery)
-	if n.expiring == 0 {
-		n.expireRecords(now)
-	}
-	if n.cleaning == 0 {
-		n.clean()
+	if n.cleaning == 0 && n.cleanActive {
+		n.cleanActive = n.clean()
 	}
 }
 
@@ -105,7 +110,8 @@ func (n *Node) expireRecords(now sys.Instant) {
 	}
 }
 
-// liveBytes returns the bytes of every batch a partition references.
+// liveBytes returns the bytes on disk of the log entries holding every
+// batch a partition references.
 func (n *Node) liveBytes() int64 {
 	var live int64
 	for _, name := range n.st.names {
@@ -122,8 +128,9 @@ func (n *Node) liveBytes() int64 {
 // budget: it copies the batches still referenced there to the tail, and
 // once none is, trims the segment. If live data alone exceeds
 // -retention-bytes, copying cannot help, and the oldest live data goes as
-// before C2, counted in ForcedRetentionBytes.
-func (n *Node) clean() {
+// before C2, counted in ForcedRetentionBytes. It reports whether it
+// proposed anything, and so whether another round may follow.
+func (n *Node) clean() bool {
 	start := n.st.logStart
 	disk, live := n.raft.LogBytesFrom(start), n.liveBytes()
 	segment := n.cfg.SegmentBytes
@@ -133,14 +140,17 @@ func (n *Node) clean() {
 	limit := n.cfg.RetentionBytes
 	if limit > 0 && disk > limit && live+segment > limit {
 		n.forceTrim(limit)
-		return
+		return false
 	}
-	if float64(disk) <= n.cfg.RetentionSlack*float64(max(live, segment)) && (limit <= 0 || disk <= limit) {
-		return
+	// One segment more than the budget: then, either way, more than a
+	// segment of the log is dead, and every round frees some of it. Without
+	// that margin, a log of live data only could be copied around for ever.
+	if float64(disk) <= n.cfg.RetentionSlack*float64(max(live, segment))+float64(segment) && (limit <= 0 || disk <= limit) {
+		return false
 	}
 	end := n.raft.SegmentEnd(start)
 	if end < 0 {
-		return // the head is the segment being written
+		return false // the head is the segment being written
 	}
 	copied := 0
 	for _, name := range n.st.names {
@@ -153,12 +163,12 @@ func (n *Node) clean() {
 					continue
 				}
 				if copied >= cleanBatchBytes {
-					return // the rest in the next round
+					return true // the rest in the next round
 				}
 				cmd, _, err := n.raft.Read(b.logIndex)
 				if err != nil {
 					n.fatal = fmt.Errorf("read committed batch at log index %d to relocate it: %w", b.logIndex, err)
-					return
+					return false
 				}
 				data := appendBatch(cmd)
 				copied += len(data)
@@ -168,11 +178,16 @@ func (n *Node) clean() {
 			}
 		}
 	}
-	if copied == 0 && end > n.trimProposed {
+	if copied > 0 {
+		return true
+	}
+	if end > n.trimProposed {
 		n.trimProposed = end
 		n.cleaning++
 		n.propose(encodeTrim(end), func(result) { n.cleaning-- })
+		return true
 	}
+	return false
 }
 
 // forceTrim is retention before C2: cut the oldest segments, live or not.

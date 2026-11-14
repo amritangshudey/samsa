@@ -97,3 +97,6 @@ func readPayload(f sys.File, pos int64, h frameHeader) ([]byte, error) {
 	}
 	return payload, nil
 }
+
+// FrameBytes returns the bytes a record of payload bytes takes in a segment.
+func FrameBytes(payload int) int64 { return int64(headerSize + payload) }
