@@ -41,9 +41,13 @@ func (n *Node) retain() {
 			n.expireRecords(now)
 		}
 		n.cleanActive = true // clean decides
+		n.compactActive = true
 	}
 	if n.cleaning == 0 && n.cleanActive {
 		n.cleanActive = n.clean()
+	}
+	if n.compacting == 0 && n.compactActive && n.st.level >= 3 && !n.cfg.CompactionOff {
+		n.compactActive = n.compact(now)
 	}
 }
 
@@ -69,7 +73,7 @@ func (n *Node) expireRecords(now sys.Instant) {
 		t := n.st.topics[name]
 		ms := topicLimit(t, "retention.ms", n.cfg.RetentionTime.Milliseconds())
 		maxBytes := topicLimit(t, "retention.bytes", n.cfg.RetentionBytesPerPartition)
-		if ms < 0 && maxBytes < 0 {
+		if ms < 0 && maxBytes < 0 || !deletes(t) { // a compact-only topic is never expired
 			continue
 		}
 		for i, p := range t.parts {

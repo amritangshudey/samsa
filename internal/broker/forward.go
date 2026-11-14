@@ -83,7 +83,8 @@ func (n *Node) onBrokerMessage(from sys.NodeID, msg []byte) {
 		}
 		need := byte(1) // cmdForwarded is level 1
 		if cmd[0] == cmdTopicConfigs {
-			need = 2
+			_, changes, _ := readTopicConfigs(wire.NewReader(cmd[1:])) // validForwarded checked it
+			need = changesLevel(changes)
 		}
 		if !n.canRead() || n.levelRefused(need) != "" {
 			n.net.SendPeer(from, binary.BigEndian.AppendUint64([]byte{brokerMsg, msgForwardRefused}, tag))

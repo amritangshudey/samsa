@@ -515,3 +515,70 @@ var (
 	anyName    = "orders"
 	testFilter = ACLFilter{ResourceType: 2, ResourceName: &anyName, PatternType: 2, Operation: 1, Permission: 1}
 )
+
+func TestCompactedBatch(t *testing.T) {
+	recs := []Record{
+		{Key: []byte("a"), Value: []byte("1"), Timestamp: 10},
+		{Key: []byte("b"), Value: []byte("2"), Timestamp: 11},
+		{Key: []byte("a"), Value: nil, Timestamp: 12}, // a tombstone
+		{Key: []byte("c"), Value: []byte("4"), Timestamp: 13},
+	}
+	b := EncodeBatch(recs)
+	SetBatchBaseOffset(b, 100)
+	stored, err := SplitBatch(b)
+	if err != nil || len(stored) != 4 {
+		t.Fatalf("split: %v, %d records", err, len(stored))
+	}
+	if stored[2].Value != nil || string(stored[3].Key) != "c" || stored[3].OffsetDelta != 3 || stored[3].Timestamp != 13 {
+		t.Fatalf("records read wrongly: %+v", stored)
+	}
+
+	tests := []struct {
+		name string
+		keep []bool
+		want []int32 // offset deltas left
+	}{
+		{"all", []bool{true, true, true, true}, []int32{0, 1, 2, 3}},
+		{"the middle two", []bool{true, false, false, true}, []int32{0, 3}},
+		{"the last only", []bool{false, false, false, true}, []int32{3}},
+		{"none", []bool{false, false, false, false}, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out := KeepRecords(b, stored, tc.keep)
+			if tc.want == nil {
+				if out != nil {
+					t.Fatalf("got a batch with no records kept")
+				}
+				return
+			}
+			if _, code := ParseCompacted(out, 1<<20); code != ErrNone {
+				t.Fatalf("ParseCompacted: code %d", code)
+			}
+			if BatchBaseOffset(out) != 100 || BatchLastOffsetDelta(out) != 3 {
+				t.Fatalf("base %d, last delta %d: want 100 and 3", BatchBaseOffset(out), BatchLastOffsetDelta(out))
+			}
+			got, err := SplitBatch(out)
+			if err != nil || len(got) != len(tc.want) {
+				t.Fatalf("split of the result: %v, %d records, want %d", err, len(got), len(tc.want))
+			}
+			for i, g := range got {
+				if g.OffsetDelta != tc.want[i] || !bytes.Equal(g.Raw, stored[g.OffsetDelta].Raw) {
+					t.Fatalf("record %d: %+v is not the original at delta %d", i, g, tc.want[i])
+				}
+			}
+			// A client's batch has no gaps, so the strict parser refuses it
+			// when some are left, and accepts it when none are.
+			_, strict := ParseBatch(out, 1<<20)
+			if (len(tc.want) == 4) != (strict == ErrNone) {
+				t.Fatalf("ParseBatch code %d for %d of 4 records", strict, len(tc.want))
+			}
+		})
+	}
+	// Damage: a count that disagrees with the bytes.
+	bad := append([]byte(nil), b...)
+	bad[BatchOverhead-1]++ // count 5 over 4 records
+	if _, err := SplitBatch(bad); err == nil {
+		t.Fatal("split accepted a count larger than the records")
+	}
+}

@@ -85,6 +85,19 @@ type Config struct {
 	// before the cleaner copies live batches out of its head segment.
 	// Default 2 (ADR 0026).
 	RetentionSlack float64
+	// DeleteRetentionTime is how long a tombstone is kept once it is the
+	// latest record of its key, for a topic that sets no delete.retention.ms.
+	// Default 24 h (design C2b).
+	DeleteRetentionTime time.Duration
+	// CompactionMapBytes bounds the memory of the key maps of compacted
+	// partitions, per node. Default 64 MiB.
+	CompactionMapBytes int64
+	// CompactionOff stops the compactor, for the simulator's check that a
+	// restart replays to the same state.
+	CompactionOff bool
+	// UnsafeCompact makes the compactor do something deliberately wrong
+	// (the Unsafe constants of compact.go); zero is correct.
+	UnsafeCompact int
 	// UnsafeTrimLive makes the cleaner trim the head segment without
 	// copying its live batches first.
 	UnsafeTrimLive bool
@@ -170,6 +183,12 @@ func (c Config) withDefaults() Config {
 	}
 	if c.ProducerExpiry == 0 {
 		c.ProducerExpiry = 24 * time.Hour
+	}
+	if c.DeleteRetentionTime == 0 {
+		c.DeleteRetentionTime = 24 * time.Hour
+	}
+	if c.CompactionMapBytes == 0 {
+		c.CompactionMapBytes = 64 << 20
 	}
 	if c.SnapshotEvery == 0 {
 		c.SnapshotEvery = 10_000
@@ -280,6 +299,12 @@ type Node struct {
 	// expiring and cleaning count the retention proposals in flight;
 	// retainAt is when the leader next looks at retention (retain.go).
 	expiring, cleaning int
+	// compacting counts cmdCompact proposals in flight, and compactActive
+	// says the compactor had work at its last round. keyMaps is its soft
+	// state per compacted partition (compact.go).
+	compacting    int
+	compactActive bool
+	keyMaps       map[*partition]*keyMap
 	retainAt           sys.Instant
 	cleanActive        bool // the cleaner had work at its last round
 	// expirySamples are (time, applied index) pairs the serving leader
@@ -609,7 +634,8 @@ func (n *Node) lead() {
 		n.serving, n.servingTerm = true, term
 		n.trimProposed = n.st.logStart // a Trim proposed in an earlier term may have been lost
 		n.expirySamples = nil
-		n.expiring, n.cleaning = 0, 0 // proposals of an earlier term are never answered
+		n.expiring, n.cleaning, n.compacting = 0, 0, 0 // proposals of an earlier term are never answered
+		n.keyMaps, n.compactActive = nil, false
 		n.startGroups()
 		n.log.Info("serving as leader", "term", term, "applied", n.applied)
 		n.levelProposed = false

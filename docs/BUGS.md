@@ -388,6 +388,44 @@ for how much that is worth.
   after apply, and with nothing written, nothing was applied. A
   one-second timer now runs it too.
 
+### C2b-1. A snapshot with a first batch after the log start was refused (C2 part b)
+
+- **Seeds:** 1, 4, 7, 13, 14 and 64 more of the first 300, as soon as a
+  compacted topic existed. Reported as "recovery of node 2 failed: snapshot
+  at 976: undecodable command in log: snapshot state ... malformed".
+- **Root cause:** the snapshot reader required the first batch of a
+  partition to begin at or before the partition's start, which was true
+  while batches covered every offset. Compaction can remove the batches
+  around the start.
+- **Fix:** the reader allows a first batch after the start.
+
+### C2b-2. Trim moved a partition's start past records compaction had removed (C2 part b)
+
+- **Seeds:** 25, 65, 93, 166, 201 (`make sim SEED=25`), through R9: "tc/0
+  log start moved to 1358 past record 690".
+- **Root cause (two):** (1) Trim raised every partition's start to its
+  first remaining batch's base, also when it dropped none of that
+  partition's batches; with a gap before the first batch that moved the
+  start. (2) The expiry loop had no check that the topic's policy includes
+  `delete`, so a compact-only topic was also expired by the broker's
+  default `retention.ms`. The second is why the first showed: it was a
+  change that did not apply (the edit missed its target by a tab) and the
+  simulator found it at once.
+- **Fix:** Trim leaves a partition alone if it dropped none of its
+  batches; expiry skips a topic whose policy has no `delete`.
+
+### C2b-3. Fetch at an offset inside a gap returned a batch of earlier records (C2 part b)
+
+- **Found by:** reading the fetch path while implementing. The unit test
+  that fetches from offset 0 after compaction and the simulator's
+  consumers cover it; there is no seed.
+- **Root cause:** `readBatches` assumed offsets are dense, so the batch
+  with the last base at or below the offset contains it. With gaps it may
+  end before the offset, and a client that gets only records below its
+  position makes no progress.
+- **Fix:** the read skips a first batch whose last offset is below the
+  offset.
+
 ## Bugs in the simulator and tests
 
 ### M8. I6 blamed the broker for a Trim proposed after the final restart (A1 part b)
@@ -606,3 +644,28 @@ would happen against Kafka too (not tested against Kafka).
   C2 the leader rarely proposed anything once clients were idle.
 - **Fix:** the check waits until the leader has applied every entry in
   its log, then hashes and restarts every node in the same instant.
+
+### M14. C1 trusted record ids to order the records of a key (C2 part b)
+
+- **Seed:** 1537, in the first 2,000 seeds with a compacted topic.
+- **Reported as:** "C1: record 15344 ... is gone, and nothing later of the
+  key is left to replace it".
+- **Root cause:** the final check took a tombstone with a higher id as
+  later. Ids are in send order, offsets in arrival order; across clients
+  and retries they differ. Here a tombstone at offset 981 had a lower id
+  than the put at offset 975 that it replaced.
+- **Fix:** order by offset where the offset is known, by id only for
+  records whose acknowledgement never arrived.
+
+### M15. The final read did not count a tombstone nobody had learned the acknowledgement of (C2 part b)
+
+- **Seed:** 1553.
+- **Reported as:** "C5: the tombstone for key key-7 at offset 580 is gone,
+  but a record of the key at offset 573, older, is still there".
+- **Root cause:** a tombstone has no value to name its id, so a read can
+  only match it to a record by the offset the model knows. One whose
+  acknowledgement never arrived was skipped, and with it the proof that a
+  later record of the key was left, which made the older one look
+  orphaned.
+- **Fix:** such a tombstone, read in the final pass, is counted as a record
+  of its key at its offset.

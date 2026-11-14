@@ -20,6 +20,10 @@ var catalogue = []struct {
 
 const ghostTopic = "ghost"
 
+// compactTopic is created with cleanup.policy=compact in runs that enable
+// compaction (docs/design/c2b-compaction.md); its records carry keys.
+const compactTopic = "tc"
+
 // keptTopic is created with retention.ms=-1 when the broker's default
 // retention is on: it keeps everything while the others expire.
 const keptTopic = "t0"
@@ -27,6 +31,9 @@ const keptTopic = "t0"
 // inCatalogue reports whether tp could ever exist. A write to anything else
 // has to be rejected.
 func inCatalogue(tp TP) bool {
+	if tp.Topic == compactTopic {
+		return tp.Part == 0
+	}
 	for _, t := range catalogue {
 		if t.name == tp.Topic {
 			return tp.Part >= 0 && tp.Part < t.max
@@ -256,6 +263,9 @@ func (cl *client) distinctTPs(n int) []TP {
 	var out []TP
 	for range n {
 		tp := cl.randomTP()
+		if cl.w.opts.compact && cl.rng.Chance(0.2) {
+			tp = TP{compactTopic, 0}
+		}
 		dup := false
 		for _, o := range out {
 			dup = dup || o == tp
@@ -314,6 +324,9 @@ func (cl *client) misc() {
 func (cl *client) createTopic() {
 	m := cl.w.model
 	t := catalogue[cl.rng.Intn(len(catalogue))]
+	if cl.w.opts.compact && cl.rng.Chance(0.25) {
+		t.name, t.parts, t.max = compactTopic, 1, 1
+	}
 	name, parts, v := t.name, t.parts, cl.version(wire.KeyCreateTopics)
 	valid := true
 	switch {
@@ -330,6 +343,14 @@ func (cl *client) createTopic() {
 	configured := name == keptTopic && cl.w.opts.retainMs > 0
 	if configured {
 		req.Topics[0].Configs = []wire.TopicConfig{{Name: "retention.ms", Value: "-1"}}
+	}
+	if name == compactTopic {
+		configured = true
+		req.Topics[0].Configs = []wire.TopicConfig{
+			{Name: "cleanup.policy", Value: "compact"},
+			{Name: "delete.retention.ms", Value: fmt.Sprint(cl.w.opts.compactRetain)},
+			{Name: "min.compaction.lag.ms", Value: fmt.Sprint(cl.w.opts.compactLag)},
+		}
 	}
 	resp := &wire.CreateTopicsResponse{}
 	cl.request(wire.KeyCreateTopics, v, req, resp, func(ok bool) {
@@ -390,6 +411,13 @@ func (cl *client) produce() {
 			recs := make([]wire.Record, n)
 			for i := range recs {
 				recs[i] = wire.Record{Value: Value(first + uint64(i)), Timestamp: int64(w.now / 1e6)}
+				if tp.Topic == compactTopic {
+					recs[i].Key, recs[i].Value = Key(first+uint64(i)), RecordValue(first+uint64(i))
+				}
+			}
+			if tp.Topic == compactTopic && cl.rng.Chance(0.03) { // a record without a key
+				recs[0].Key = nil
+				sp.mustFail = true
 			}
 			switch b := cl.rng.Intn(40); b {
 			case 0: // too large for the broker
@@ -409,6 +437,11 @@ func (cl *client) produce() {
 		// One topic entry per partition: the encoding allows it, and it
 		// keeps the response easy to match up.
 		req.Topics = append(req.Topics, wire.ProduceTopic{Name: tp.Topic, Partitions: []wire.ProducePartition{{Index: tp.Part, Records: records}}})
+	}
+	for _, sp := range parts {
+		if sp.tp.Topic == compactTopic && req.Acks == 0 {
+			req.Acks = 1 // an unanswered record blocks the compaction checks of its key: send fewer of them
+		}
 	}
 	if req.Acks == 0 {
 		for _, sp := range parts {

@@ -116,8 +116,8 @@ func (n *Node) createTopics(c *conn, h wire.RequestHeader, req *wire.CreateTopic
 			res.ErrorCode, res.ErrorMessage = wire.ErrTopicAlreadyExists, "topic already exists"
 		case configErr != "":
 			res.ErrorCode, res.ErrorMessage = wire.ErrInvalidConfig, configErr
-		case len(configs) > 0 && n.levelRefused(2) != "":
-			res.ErrorCode, res.ErrorMessage = wire.ErrUnsupportedVersion, n.levelRefused(2)
+		case len(configs) > 0 && n.levelRefused(configsLevel(configs)) != "":
+			res.ErrorCode, res.ErrorMessage = wire.ErrUnsupportedVersion, n.levelRefused(configsLevel(configs))
 		}
 		seen[t.Name] = true
 		if res.ErrorCode != wire.ErrNone || req.ValidateOnly {
@@ -197,6 +197,12 @@ func (n *Node) produce(c *conn, h wire.RequestHeader, req *wire.ProduceRequest) 
 					// size must not be used to step forward.
 					res.ErrorCode = code
 					break
+				}
+				if tp := n.st.topics[t.Name]; tp != nil && compacts(tp) {
+					if code := checkCompactable(rest[:info.Size]); code != wire.ErrNone {
+						res.ErrorCode = code
+						break
+					}
 				}
 				sizes = append(sizes, info.Size)
 				rest = rest[info.Size:]
@@ -367,10 +373,18 @@ func (n *Node) buildFetch(c *conn, req *wire.FetchRequest) (resp *wire.FetchResp
 // returned even if it is larger. Each batch gets its assigned base offset.
 func (n *Node) readBatches(p *partition, offset int64, limit int, force bool) []byte {
 	// The last batch whose base is <= offset. Offsets are dense, so it
-	// contains offset whenever offset < p.next.
+	// contains offset whenever offset < p.next, except that a compacted
+	// partition has gaps: then offset may lie after the batch's last record,
+	// and the read starts at the next batch.
 	i := sort.Search(len(p.batches), func(i int) bool { return p.batches[i].base > offset }) - 1
-	if offset >= p.next || i < 0 {
+	if offset >= p.next {
 		return nil
+	}
+	if i < 0 {
+		i = 0 // below the first batch: a gap, or the start of a compacted partition
+		if len(p.batches) == 0 {
+			return nil
+		}
 	}
 	var out []byte
 	for ; i < len(p.batches); i++ {
@@ -385,6 +399,9 @@ func (n *Node) readBatches(p *partition, offset int64, limit int, force bool) []
 			return out
 		}
 		batch := appendBatch(cmd)
+		if len(out) == 0 && ref.base+int64(wire.BatchLastOffsetDelta(batch)) < offset {
+			continue // the whole batch lies before offset: offset is in a gap
+		}
 		if len(out)+len(batch) > limit && (len(out) > 0 || !force) {
 			break
 		}

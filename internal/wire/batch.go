@@ -250,3 +250,102 @@ func PeekBatch(b []byte) (info BatchInfo, ok bool) {
 	info.producer(b)
 	return info, info.Count > 0
 }
+
+// BatchLastOffsetDelta returns the offset of a batch's last record relative
+// to its base offset. In a batch a client sent it is the count minus one; in
+// one the cleaner rewrote it is larger when records were removed
+// (docs/design/c2b-compaction.md, section 3.3). b needs a full header.
+func BatchLastOffsetDelta(b []byte) int32 {
+	return int32(binary.BigEndian.Uint32(b[batchLastDeltaAt:]))
+}
+
+// BatchCompressed reports whether the records of a batch with a full header
+// are compressed.
+func BatchCompressed(b []byte) bool {
+	return binary.BigEndian.Uint16(b[batchAttributesAt:])&0x07 != 0
+}
+
+// StoredRecord is one record of an uncompressed batch as it is stored, for
+// the cleaner: where it is, what it holds, and its bytes as they are, so a
+// batch can be rebuilt without them (KeepRecords).
+type StoredRecord struct {
+	OffsetDelta int32  // offset of the record relative to the batch's base
+	Timestamp   int64  // absolute, in milliseconds
+	Key, Value  []byte // nil for null
+	Raw         []byte // the record exactly as stored, length prefix included
+}
+
+// SplitBatch returns the records of one uncompressed batch that
+// ParseBatch or ParseCompacted accepted. Offset deltas must increase and
+// stay within the batch's last offset; the slices alias b.
+func SplitBatch(b []byte) ([]StoredRecord, error) {
+	if len(b) < BatchOverhead || BatchCompressed(b) {
+		return nil, ErrMalformed
+	}
+	count := int(int32(binary.BigEndian.Uint32(b[batchCountAt:])))
+	last := BatchLastOffsetDelta(b)
+	baseTime := int64(binary.BigEndian.Uint64(b[batchBaseTimeAt:]))
+	r := NewReader(b[BatchOverhead:])
+	out := make([]StoredRecord, 0, min(count, 1024))
+	prev := int32(-1)
+	for ; count > 0 && r.Err() == nil; count-- {
+		start := len(b) - r.Len()
+		size := int(r.Varint())
+		body := NewReader(r.take(size))
+		body.Int8()
+		rec := StoredRecord{Timestamp: baseTime + body.Varlong()}
+		rec.OffsetDelta = body.Varint()
+		rec.Key = body.varBytes()
+		rec.Value = body.varBytes()
+		if body.Err() != nil || rec.OffsetDelta <= prev || rec.OffsetDelta > last {
+			return nil, ErrMalformed
+		}
+		prev = rec.OffsetDelta
+		rec.Raw = b[start : len(b)-r.Len()]
+		out = append(out, rec)
+	}
+	if r.Err() != nil || r.Len() != 0 {
+		return nil, ErrMalformed
+	}
+	return out, nil
+}
+
+// KeepRecords returns a copy of batch b, whose records recs came from
+// SplitBatch, holding only the records with keep set, or nil if there are
+// none. The base offset, last offset delta, base timestamp, maximum
+// timestamp and producer fields stay as they were, so every record that
+// remains keeps its offset and timestamp; only the count, the length and
+// the checksum change.
+func KeepRecords(b []byte, recs []StoredRecord, keep []bool) []byte {
+	out := append([]byte(nil), b[:BatchOverhead]...)
+	n := 0
+	for i, rec := range recs {
+		if keep[i] {
+			out = append(out, rec.Raw...)
+			n++
+		}
+	}
+	if n == 0 {
+		return nil
+	}
+	binary.BigEndian.PutUint32(out[batchLengthAt:], uint32(len(out)-batchLogOverhead))
+	binary.BigEndian.PutUint32(out[batchCountAt:], uint32(n))
+	binary.BigEndian.PutUint32(out[batchCRCAt:], crc32.Checksum(out[batchAttributesAt:], castagnoli))
+	return out
+}
+
+// ParseCompacted validates a batch the cleaner rewrote: like ParseBatch, but
+// the count may be smaller than the last offset delta plus one, since
+// records were removed. It returns the same codes.
+func ParseCompacted(b []byte, maxSize int) (BatchInfo, int16) {
+	info, code := parseBatch(b, maxSize)
+	if code == ErrInvalidRecord && info.Count >= 1 && int64(BatchLastOffsetDelta(b)) >= int64(info.Count)-1 &&
+		binary.BigEndian.Uint16(b[batchAttributesAt:])&(attrControl|attrTransactional) == 0 &&
+		(info.ProducerID < 0 || info.BaseSequence >= 0) {
+		return info, ErrNone
+	}
+	if code != ErrNone {
+		return BatchInfo{}, code
+	}
+	return info, ErrNone
+}

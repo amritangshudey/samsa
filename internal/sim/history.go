@@ -95,6 +95,10 @@ type Model struct {
 	clock     func() int64
 	rebatched bool
 	groups    groupModel
+	// compact and keyst are set by Compaction (compaction.go).
+	compact map[string]*compactRules
+	keyst   map[string]*[compactKeys]keyState
+	blind   []blindRecord
 }
 
 // NewModel returns an empty model.
@@ -180,6 +184,7 @@ func (m *Model) Send(tp TP, n int) uint64 {
 	for range n {
 		m.recs = append(m.recs, rec{tp: tp, first: first, n: n, offset: -1, sent: sent})
 	}
+	m.sentCompacted(tp, first, n)
 	return first
 }
 
@@ -202,6 +207,7 @@ func (m *Model) Rejected(first uint64, n int) error {
 		if r.offset >= 0 {
 			return fmt.Errorf("I5: record %d was rejected but had been read at %v offset %d", id, r.tp, r.offset)
 		}
+		m.answered(id)
 		r.state = recRejected
 	}
 	return nil
@@ -228,9 +234,11 @@ func (m *Model) Acked(first uint64, n int, base int64, epoch int) error {
 	}
 	for i := range n {
 		id := first + uint64(i)
+		m.answered(id)
 		if err := m.place(id, base+int64(i)); err != nil {
 			return err
 		}
+		m.known(id, base+int64(i))
 		m.recs[id].state, m.recs[id].ackEpoch = recAcked, m.epoch
 	}
 	p := m.part(m.recs[first].tp)
@@ -389,7 +397,12 @@ func (m *Model) Fetched(f Fetch) (next int64, err error) {
 		return -1, fmt.Errorf("I2: %v fetch at offset %d succeeded with high watermark %d", f.TP, f.Offset, f.HW)
 	}
 	next = -1
-	for rest := f.Records; len(rest) > 0; {
+	if m.compact[f.TP.Topic] != nil {
+		if next, err = m.readCompacted(f); err != nil {
+			return -1, err
+		}
+	}
+	for rest := f.Records; len(rest) > 0 && m.compact[f.TP.Topic] == nil; {
 		info, code := wire.ParseBatch(rest, len(rest))
 		if code != wire.ErrNone {
 			return -1, fmt.Errorf("I4: %v returned a malformed batch (code %d)", f.TP, code)
@@ -413,7 +426,7 @@ func (m *Model) Fetched(f Fetch) (next int64, err error) {
 	if next > f.HW {
 		return -1, fmt.Errorf("I2: %v returned records up to %d beyond its high watermark %d", f.TP, next-1, f.HW)
 	}
-	if next == -1 && f.MustProgress && f.Offset < f.HW {
+	if next == -1 && f.MustProgress && f.Offset < f.HW && m.compact[f.TP.Topic] == nil { // a compacted partition may end in a gap
 		return -1, fmt.Errorf("I2: %v fetch at %d returned nothing although the high watermark is %d", f.TP, f.Offset, f.HW)
 	}
 	p := m.part(f.TP)
@@ -470,11 +483,14 @@ func (m *Model) CheckFinal() error {
 		if t := m.topics[r.tp.Topic]; t != nil && t.deleting {
 			continue
 		}
+		if m.compact[r.tp.Topic] != nil {
+			continue // checkCompactedFinal: a record may be superseded
+		}
 		if r.state == recAcked && (m.strict || r.ackEpoch == m.epoch) && r.final != m.finalPass && r.offset >= m.part(r.tp).start {
 			return fmt.Errorf("I1: record %d was acknowledged at %v offset %d and is gone", id, r.tp, r.offset)
 		}
 	}
-	return nil
+	return m.checkCompactedFinal()
 }
 
 // PartitionsAttempted records that a client asked for a topic to grow to

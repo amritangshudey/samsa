@@ -171,7 +171,9 @@ func decodeState(b []byte) (*state, error) {
 				return batchRef{base: r.Int64(), logIndex: r.Int64(), maxTimestamp: r.Int64()}
 			})
 			// The first batch holds the start: DeleteRecords can put it inside.
-			if p.start < 0 || p.start > p.next || len(p.batches) > 0 && (p.batches[0].base > p.start || p.start == p.next ||
+			// Not when compaction removed the batches around the start
+			// (the first batch may begin after it).
+			if p.start < 0 || p.start > p.next || len(p.batches) > 0 && (p.start == p.next ||
 				len(p.batches) > 1 && p.batches[1].base <= p.start || slices.ContainsFunc(p.batches, func(b batchRef) bool { return b.logIndex < s.logStart })) {
 				bad = true
 			}

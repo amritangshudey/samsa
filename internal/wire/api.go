@@ -86,6 +86,7 @@ const (
 	ErrInconsistentClusterID       int16 = 104
 	ErrVoterNotFound               int16 = 127
 	ErrUnsupportedForMessageFormat int16 = 43
+	ErrUnsupportedCompressionType  int16 = 76
 	ErrOutOfOrderSequenceNumber    int16 = 45
 	ErrInvalidProducerEpoch        int16 = 47
 	ErrMemberIDRequired            int16 = 79

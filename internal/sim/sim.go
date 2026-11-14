@@ -92,6 +92,10 @@ type options struct {
 	// retainMs is the broker's default retention.ms (0: none); t0 then
 	// keeps everything, so the cleaner has live data to copy (design C2).
 	retainMs int64
+	// compact adds the compacted topic tc (compaction.go) with these
+	// min.compaction.lag.ms and delete.retention.ms.
+	compact                   bool
+	compactLag, compactRetain int64
 	// Between nodes (network.go): drop and duplicate probabilities per
 	// message, and whether partition scenarios run.
 	drop, dup  float64
@@ -178,12 +182,16 @@ func Run(cfg Config) Result {
 		w.bcfg.RetentionTime = time.Duration(w.opts.retainMs) * time.Millisecond
 		w.bcfg.RetentionSlack = []float64{1.5, 2}[pick.Intn(2)]
 	}
+	w.opts.compact = pick.Chance(0.5) // drawn last, so older seeds keep their other choices
+	w.opts.compactLag = []int64{0, 0, 500, 2000}[pick.Intn(4)]
+	w.opts.compactRetain = []int64{0, 1000, 3000}[pick.Intn(3)]
 	if cfg.Calm {
 		w.opts.drop, w.opts.dup = 0, 0
 	}
 	if cfg.Mutate != nil {
 		cfg.Mutate(&w.bcfg)
 		w.opts.retainMs = w.bcfg.RetentionTime.Milliseconds()
+		w.opts.compact = w.opts.compact || w.bcfg.UnsafeCompact != 0 // a compaction bug needs a compacted topic
 	}
 	strict := w.bcfg.Sync == broker.SyncAlways
 	if w.opts.nodes > 1 && !strict {
@@ -208,14 +216,17 @@ func Run(cfg Config) Result {
 	if w.opts.retainMs > 0 && w.bcfg.RetentionBytes == 0 && w.opts.admins == 0 {
 		// Only topic retention moves a start: R9 holds every move to it.
 		w.model.Retention(func(topic string) int64 {
-			if topic == keptTopic {
+			if topic == keptTopic || topic == compactTopic {
 				return -1
 			}
 			return w.opts.retainMs
 		}, func() int64 { return int64(w.now / 1e6) })
 	}
-	res := Result{Seed: cfg.Seed, Setup: fmt.Sprintf("nodes=%d sync=%d segment=%d election=%v faults=%v every=%v drop=%v dup=%v partitions=%v append=%d snapshot=%d retention=%d disconnects=%v producers=%d consumers=%d vandals=%d members=%d idempotent=%d expiry=%v classic=%v admins=%d changes=%v retain-ms=%d",
-		w.opts.nodes, w.bcfg.Sync, w.bcfg.SegmentBytes, w.bcfg.ElectionTimeout, w.opts.faults, w.opts.faultEvery, w.opts.drop, w.opts.dup, w.opts.partitions, w.bcfg.MaxAppendBytes, w.bcfg.SnapshotEvery, w.bcfg.RetentionBytes, w.opts.disconnects, w.opts.producers, w.opts.consumers, w.opts.vandals, w.opts.members, w.opts.idempotent, w.opts.expiry, w.opts.classic, w.opts.admins, w.opts.changes, w.opts.retainMs)}
+	if w.opts.compact {
+		w.model.Compaction(compactTopic, w.opts.compactLag, w.opts.compactRetain, func() int64 { return int64(w.now / 1e6) })
+	}
+	res := Result{Seed: cfg.Seed, Setup: fmt.Sprintf("nodes=%d sync=%d segment=%d election=%v faults=%v every=%v drop=%v dup=%v partitions=%v append=%d snapshot=%d retention=%d disconnects=%v producers=%d consumers=%d vandals=%d members=%d idempotent=%d expiry=%v classic=%v admins=%d changes=%v retain-ms=%d compact=%v",
+		w.opts.nodes, w.bcfg.Sync, w.bcfg.SegmentBytes, w.bcfg.ElectionTimeout, w.opts.faults, w.opts.faultEvery, w.opts.drop, w.opts.dup, w.opts.partitions, w.bcfg.MaxAppendBytes, w.bcfg.SnapshotEvery, w.bcfg.RetentionBytes, w.opts.disconnects, w.opts.producers, w.opts.consumers, w.opts.vandals, w.opts.members, w.opts.idempotent, w.opts.expiry, w.opts.classic, w.opts.admins, w.opts.changes, w.opts.retainMs, w.opts.compact)}
 	if w.trace != nil {
 		_, _ = fmt.Fprintf(w.trace, "seed %d: %s\n", cfg.Seed, res.Setup)
 	}
@@ -312,6 +323,9 @@ func (w *world) finalChecks() {
 		}
 	}
 	tps = append(tps, TP{doomedTopic, 0})
+	if w.opts.compact {
+		tps = append(tps, TP{compactTopic, 0})
+	}
 	w.model.BeginFinal()
 	v := &client{w: w, rng: w.rng.Fork(), pin: leader, fetchMin: 5} // v5+ tells where the log starts
 	v.c = w.connect(v)
@@ -369,10 +383,12 @@ func (w *world) finalChecks() {
 	_, hash := leader.inc.n.StateHash()
 	w.stats.ProducersExpired += leader.inc.n.ExpiredProducers()
 	w.stats.BytesRelocated += int(leader.inc.n.Metrics().RelocatedBytes)
+	w.stats.RecordsCompacted += int(leader.inc.n.Metrics().CompactedRecords)
 	// A restarted leader may legitimately trim again; I6 is about replay.
 	for _, nd := range w.nodes {
 		nd.cfg.RetentionBytes, nd.cfg.RetentionTime = 0, 0
 		nd.cfg.RetentionSlack = math.Inf(1) // and may clean again
+		nd.cfg.CompactionOff = true
 	}
 	for _, power := range []bool{false, true} {
 		if power && !w.model.strict {
