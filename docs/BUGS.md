@@ -463,3 +463,38 @@ would happen against Kafka too (not tested against Kafka).
   suite still catches `UnsafeNoLease`; 3000 seeds pass.
 - **Lesson:** the same as M1. Late messages make stale states legal; the
   invariant must say which order of terms it forbids.
+
+### M11. The exhaustive search's one-node reduction skipped schedules (B2)
+
+- **Found by:** comparing the reduced search with the full one, before
+  item 11 was merged. In the default configuration, with one election and
+  one proposal per node, the full search reached 793 distinct node states
+  and the reduced search 63. Both reported no violation.
+- **Root cause:** at each state, the reduction followed only one node's
+  events, on the argument that events of different nodes commute. They
+  do, but another node's event can *enable* new events for the chosen
+  node: a message sent to it. The reduction forced the chosen node to act
+  before any such message could arrive. So every schedule in which it
+  waits for a message, then handles it first, was never searched. In
+  partial-order reduction terms, the set was not persistent: a path
+  outside it (another node sends, then the chosen node receives) contains
+  an event dependent on the set. An earlier symptom pointed the same way.
+  The reduced search found `AckBeforeSync` in 19 events; the full search
+  found it in 12.
+- **Fix:** the reduction is gone. The search follows every enabled event.
+  A sound reduction for message passing needs the receive events of every
+  node that may still be sent a message (stubborn sets, or dynamic
+  partial-order reduction), which is a project of its own. The bounds
+  shrank to what the full search finishes (design, section 2).
+- **Found with it:** the bound itself was vacuous. With per-node clocks
+  starting fresh, a node ignores candidates for an election timeout
+  after start, and one election per node never moved a voter's clock
+  past it. No leader was ever elected, so "complete, no violation"
+  checked almost nothing. Raising proposals from 1 to 2 changed no state
+  count, which gave it away. Nodes now start aged, and `TestExhaustive`
+  fails unless some state committed a proposal.
+- **Lesson:** a reduction is a claim like any other and needs its own
+  test. "Events of different nodes commute" was true and not enough.
+  So is a bound: a search that completes must show it reached something.
+  The test that caught it compares what the two searches reach, not only
+  their verdicts: both verdicts were "no violation".
