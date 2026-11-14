@@ -73,6 +73,18 @@ leader looks every second:
   it, the old global trim runs, and the live bytes it drops are counted in
   `ForcedRetentionBytes`.
 
+**Key compaction** ([design](design/c2b-compaction.md), ADR 0029;
+`broker/compact.go`). At format level 3, `cleanup.policy=compact`,
+`delete.retention.ms` and `min.compaction.lag.ms` are topic configs. The
+leader keeps, per compacted partition, a soft key map (digest of the key,
+highest offset, count, whether the latest is a tombstone), built by reading
+its log and never saved. A sweep rewrites each batch that holds a record a
+newer one of its key replaces, with `cmdCompact`: the same base and last
+offset, fewer records, so offsets stay and gaps appear. Apply checks the
+header and that the reference is unchanged, and knows no keys. A tombstone
+goes only once it is old enough and nothing older of its key is left. The
+Produce handler refuses keyless and compressed batches for such a topic.
+
 Below level 2, retention is the global trim alone, as described next.
 
 **Retention** ([design](design/a1-snapshots.md), section 3). When its log

@@ -36,6 +36,11 @@ creation or with `kafka-configs.sh --alter`; `-retention-time` and
 segment so it can be deleted, which costs extra writes
 (`-retention-slack`, ADR 0026). `-retention-bytes N` is a safety limit on
 the whole log: past it, the oldest data goes, live or not.
+`cleanup.policy=compact` (or `compact,delete`) keeps the latest record of
+each key: a record without a key and a compressed batch are refused on such
+a topic, a tombstone (null value) goes after `delete.retention.ms`, and a
+record younger than `min.compaction.lag.ms` is left alone (ADR 0029,
+`-delete-retention-time`, `-compaction-map-bytes`).
 `-producer-expiry` (default 24h) is how long an idempotent producer may
 write nothing before it is forgotten. If it comes back, its next batch
 is refused with `OUT_OF_ORDER_SEQUENCE_NUMBER`, and the Java client starts
@@ -166,8 +171,9 @@ fetch, metadata, offsets, topics) and [ADR 0008](docs/adr/0008-group-api-version
 ## What is not supported
 
 Transactions (a transactional producer is refused with `INVALID_REQUEST`),
-log compaction (`cleanup.policy=compact`), configs other than
-`retention.ms`, `retention.bytes` and `cleanup.policy=delete`, the legacy
+compression on a compacted topic, configs other than `retention.ms`,
+`retention.bytes`, `cleanup.policy`, `delete.retention.ms` and
+`min.compaction.lag.ms`, the legacy
 AlterConfigs API (IncrementalAlterConfigs works), client quotas, topic ids, tiered storage,
 reusing a node id with a new disk (replace a node under a new id),
 `kafka-metadata-quorum.sh` (DescribeQuorum, add-controller), the KIP-848 group protocol, static membership,

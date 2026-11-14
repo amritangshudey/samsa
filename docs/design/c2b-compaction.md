@@ -320,3 +320,45 @@ the state machine (first draft); the `base + lastOffsetDelta < end` check
 instead of `count == end - base`, because with gaps the count is smaller
 than the span; the compressed-batch refusal, because the core has no
 decompressor.
+
+## 7. As built (2026-11-15)
+
+What differs from sections 3 to 6:
+
+- **Format level 3, not 2.** `cmdCompact` and the config values are new
+  content of the log (ADR 0024). Section 3.1 and 3.7 said no raise; wrong.
+- **Sweeps, not the head-segment cleaner.** Section 3.5 had the cleaner
+  rewrite batches as it relocates them. As built, a separate sweep
+  (`compact.go`) rewrites any batch with dead records, wherever it is.
+  Reason: the cleaner starts when disk exceeds slack times referenced
+  bytes, and dead records count as referenced, so an overwrite-heavy topic
+  would not start it. A sweep shrinks the referenced bytes; the cleaner
+  then frees disk as in part (a).
+- **A sweep starts** when at least half the counted records have a newer
+  record of their key, or the partition has a tombstone; after a sweep
+  that removed nothing, the next waits 30 s.
+- **The tombstone rule needs a count.** A tombstone that is the latest of
+  its key goes only if it is the only record of the key left. The first
+  design said old enough; a removed tombstone would then bring an older
+  value back when the older record was in a batch not yet rewritten
+  (simulator mutation `UnsafeTombstoneOrphan`, C5).
+- **Gaps changed three more places than section 3.3 listed:** the snapshot
+  reader (a first batch after the start is valid), Trim (a partition's
+  start moves only if a batch of it was dropped), and Fetch (a first batch
+  that ends before the offset is skipped).
+- **Compacted-records and relocated-bytes counters count at apply,** by
+  the command's `applied` result, not at proposal; the first version
+  counted a stale command twice.
+- **Simulator:** one extra topic `tc` in half the runs; records carry one
+  of eight keys (six updated all the time, two for tombstones and rare
+  puts, so a tombstone often stays latest); one record in 7 is a
+  tombstone; 3% of batches to it lack a key and must fail. Acknowledged
+  writes to it never use acks=0, which leaves records unanswered and
+  blinds the checks for their key. C1 to C5 are in `sim/compaction.go`;
+  C1 and C5 run after the final read, C3 (and C1 for a key whose records
+  are all answered) while reading. Held back after a power loss that may
+  have cut acknowledged data (not strict and epoch above 0).
+- **Mutation scores (200 seeds each):** compact away the latest record 67
+  (C1); compact inside the lag 61 (C3); remove a tombstone early 8 (C1);
+  leave older records behind a removed tombstone 26 (C5); tell keys apart
+  by their first byte 82 (C1).
