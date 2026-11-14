@@ -273,10 +273,46 @@ type parkedFetch struct {
 	h     wire.RequestHeader
 	req   *wire.FetchRequest
 	timer sys.TimerID
+	slow  bool // FaultSlowFetch: not woken by data, only by its deadline
 }
 
 func (n *Node) fetch(c *conn, h wire.RequestHeader, req *wire.FetchRequest) {
 	resp, size, failed := n.buildFetch(c, req)
+	// Faults that change what a consumer sees of its fetches (faults.go).
+	// Each enabled kind draws once per fetch.
+	// A kind draws only for a request it can act on.
+	outOfRange := !failed && n.faults.inject(FaultOutOfRange)
+	empty := size > 0 && n.faults.inject(FaultEmptyFetch)
+	slow := !failed && size > 0 && req.MaxWaitMs > 0 && n.fatal == nil && n.faults.inject(FaultSlowFetch)
+	switch {
+	case outOfRange:
+		n.log.Info("fault injected", "kind", FaultOutOfRange, "fault", n.faults.count)
+		for _, t := range resp.Topics {
+			for i := range t.Partitions {
+				if p := &t.Partitions[i]; p.ErrorCode == wire.ErrNone {
+					p.ErrorCode, p.Records = wire.ErrOffsetOutOfRange, nil
+				}
+			}
+		}
+		n.respond(c, h, resp)
+		return
+	case empty:
+		n.log.Info("fault injected", "kind", FaultEmptyFetch, "fault", n.faults.count)
+		for _, t := range resp.Topics {
+			for i := range t.Partitions {
+				t.Partitions[i].Records = nil
+			}
+		}
+		n.respond(c, h, resp)
+		return
+	case slow:
+		n.log.Info("fault injected", "kind", FaultSlowFetch, "fault", n.faults.count)
+		f := &parkedFetch{c: c, h: h, req: req, timer: n.nextTimer, slow: true}
+		n.nextTimer++
+		n.parked = append(n.parked, f)
+		n.clock.SetTimer(f.timer, time.Duration(req.MaxWaitMs)*time.Millisecond)
+		return
+	}
 	if failed || size >= int(req.MinBytes) || req.MaxWaitMs <= 0 || n.fatal != nil {
 		n.respond(c, h, resp)
 		return
@@ -307,7 +343,7 @@ func (n *Node) completeFetch(f *parkedFetch) {
 // wakeFetches answers the parked fetches that newly applied data satisfies.
 func (n *Node) wakeFetches() {
 	for _, f := range append([]*parkedFetch(nil), n.parked...) { // completeFetch edits n.parked
-		if f.c.closed || !n.hasNewData(f.req) {
+		if f.c.closed || f.slow || !n.hasNewData(f.req) {
 			continue
 		}
 		if f.req.MinBytes > 1 {

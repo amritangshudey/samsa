@@ -581,6 +581,11 @@ func (n *Node) heartbeat(c *conn, req *wire.HeartbeatRequest) *wire.HeartbeatRes
 		return &wire.HeartbeatResponse{ErrorCode: wire.ErrIllegalGeneration}
 	}
 	n.touch(sg, m)
+	if sg.round == nil && !sg.proposing && n.faults.inject(FaultExpire) {
+		n.log.Info("fault injected", "kind", FaultExpire, "group", req.GroupID, "member", m.id, "fault", n.faults.count)
+		n.removeMember(sg, m.id)
+		return &wire.HeartbeatResponse{ErrorCode: wire.ErrUnknownMemberID}
+	}
 	if sg.round == nil && !sg.proposing && n.faults.inject(FaultRebalance) {
 		n.log.Info("fault injected", "kind", FaultRebalance, "group", req.GroupID, "fault", n.faults.count)
 		n.startRound(sg, nil)

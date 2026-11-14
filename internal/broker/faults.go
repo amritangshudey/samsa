@@ -39,19 +39,41 @@ const (
 	// NOT_LEADER_OR_FOLLOWER (NOT_COORDINATOR for the commit) without
 	// acting on it, as a node does during a leader change.
 	FaultNotLeader = "notleader"
+	// FaultEmptyFetch answers a fetch with no records although there are
+	// some, and the high watermark unchanged, as a node does when data has
+	// not reached it yet.
+	FaultEmptyFetch = "emptyfetch"
+	// FaultSlowFetch holds a fetch for its whole MaxWait and then answers
+	// it normally, even if data was there at once: a slow broker.
+	FaultSlowFetch = "slowfetch"
+	// FaultOutOfRange answers a fetch of a partition that exists with
+	// OFFSET_OUT_OF_RANGE and the true log start, as when retention has cut
+	// the offsets the consumer was reading. The client resets by its own
+	// auto.offset.reset: that is what the fault tests.
+	FaultOutOfRange = "outofrange"
+	// FaultExpire answers a heartbeat by expiring the member's session, as
+	// if it had not heartbeated within its session timeout: the member is
+	// removed, the group rebalances, and the member's next request is
+	// UNKNOWN_MEMBER_ID.
+	FaultExpire = "expire"
 )
 
 // FaultKinds is every fault kind, sorted.
-var FaultKinds = []string{FaultLostAck, FaultNotLeader, FaultRebalance}
+var FaultKinds = []string{FaultEmptyFetch, FaultExpire, FaultLostAck, FaultNotLeader, FaultOutOfRange, FaultRebalance, FaultSlowFetch}
+
+// DefaultFaultKinds are the kinds of a spec that names none: the three of
+// the first release. The others change what a consumer sees of its own
+// offsets and sessions and are asked for by name.
+var DefaultFaultKinds = []string{FaultLostAck, FaultNotLeader, FaultRebalance}
 
 // DefaultFaultRate is the rate of a spec that names none.
 const DefaultFaultRate = 0.05
 
 // ParseFaults reads a spec of comma-separated key=value pairs:
 // seed=N (required), rate=R (0 < R <= 1, default 0.05) and
-// kinds=a+b (default all of FaultKinds).
+// kinds=a+b (default DefaultFaultKinds; kinds=all names every kind).
 func ParseFaults(spec string) (Faults, error) {
-	f := Faults{Rate: DefaultFaultRate, Kinds: FaultKinds}
+	f := Faults{Rate: DefaultFaultRate, Kinds: DefaultFaultKinds}
 	seen := map[string]bool{}
 	for part := range strings.SplitSeq(spec, ",") {
 		k, v, ok := strings.Cut(strings.TrimSpace(part), "=")
@@ -78,6 +100,10 @@ func ParseFaults(spec string) (Faults, error) {
 		case "kinds":
 			f.Kinds = nil
 			for kind := range strings.SplitSeq(v, "+") {
+				if kind == "all" {
+					f.Kinds = slices.Clone(FaultKinds)
+					continue
+				}
 				if !slices.Contains(FaultKinds, kind) {
 					return Faults{}, fmt.Errorf("faults %q: unknown kind %q (known: %s)", spec, kind, strings.Join(FaultKinds, ", "))
 				}

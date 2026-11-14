@@ -154,3 +154,35 @@ func TestVerdictCatchesCommitBeforeProcess(t *testing.T) {
 		}
 	})
 }
+
+// TestVerdictUnderTheOtherFaults is item 23a of the production plan: the
+// fault kinds that the first release lacked. A session that expires in the
+// middle of a batch loses what a commit-before-process application had
+// committed; the correct application passes with every kind on, whatever
+// it is told about its offsets.
+func TestVerdictUnderTheOtherFaults(t *testing.T) {
+	t.Run("commit before process loses records when the session expires", func(t *testing.T) {
+		const faults = "seed=5,rate=0.2,kinds=expire"
+		var out string
+		var code int
+		for range 3 {
+			if out, code, _ = runPipeline(t, faults, true); code == 1 {
+				break
+			}
+		}
+		if code != 1 || !strings.Contains(out, "lost: group \"app\" committed past them") {
+			t.Fatalf("want a FAIL naming lost records, got exit %d:\n%s", code, out)
+		}
+	})
+	t.Run("commit after process passes under every kind", func(t *testing.T) {
+		out, code, log := runPipeline(t, "seed=5,rate=0.03,kinds=all", false)
+		if code != 0 || !strings.HasPrefix(out, "PASS") {
+			t.Fatalf("want PASS, got exit %d:\n%s", code, out)
+		}
+		for _, kind := range []string{"emptyfetch", "expire", "outofrange", "slowfetch"} {
+			if !strings.Contains(log, `msg="fault injected" kind=`+kind) {
+				t.Errorf("no %s fault was injected: the pass proves less than it says", kind)
+			}
+		}
+	})
+}

@@ -62,13 +62,18 @@ A failing verdict looks like this, from the sample in
 ## The faults
 
 `-faults seed=N[,rate=R][,kinds=a+b]`. `rate` is the chance per eligible
-request (default 0.05). `kinds` defaults to all of:
+request (default 0.05). `kinds` defaults to the first three below;
+`kinds=all` turns on every one, and the others are named with `+`:
 
 | Kind | Hits | What happens | Catches |
 |---|---|---|---|
 | `lostack` | produce | the write commits, the answer never arrives (connection closed) | producers that retry without idempotence: duplicates |
 | `notleader` | produce, fetch, offset commit | NOT_LEADER_OR_FOLLOWER (NOT_COORDINATOR for a commit), nothing done | error handling that gives up or skips |
 | `rebalance` | a heartbeat of a stable group | a rebalance starts; every member's partitions are revoked mid-work | commit before process, work abandoned without care |
+| `expire` | a heartbeat of a stable group | the member's session expires: UNKNOWN_MEMBER_ID, the group rebalances | commit before process; a consumer that does not rejoin; work done after the session was lost |
+| `emptyfetch` | a fetch that has data | an answer with no records and the same high watermark | consumers that treat an empty poll as the end of the topic |
+| `slowfetch` | a fetch that has data and waits | the answer comes at the end of `max.wait`, though data was there at once | timeouts shorter than the fetch wait; throughput assumptions |
+| `outofrange` | a fetch of an existing partition | OFFSET_OUT_OF_RANGE with the true log start, as when retention cut the offsets | a wrong `auto.offset.reset`: `latest` skips what was pending (the verdict reports it lost), `earliest` reprocesses (duplicates) |
 
 The seed fixes the fault stream: the *k*-th eligible request gets the
 *k*-th draw. Real clients send requests concurrently, so which request is

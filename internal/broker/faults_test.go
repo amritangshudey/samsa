@@ -4,6 +4,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/amritangshudey/samsa/internal/wire"
 )
@@ -13,6 +14,8 @@ func TestParseFaults(t *testing.T) {
 		spec, want, err string
 	}{
 		{spec: "seed=7", want: "seed=7,rate=0.05,kinds=lostack+notleader+rebalance"},
+		{spec: "seed=7,kinds=all", want: "seed=7,rate=0.05,kinds=emptyfetch+expire+lostack+notleader+outofrange+rebalance+slowfetch"},
+		{spec: "seed=7,kinds=outofrange+expire", want: "seed=7,rate=0.05,kinds=expire+outofrange"},
 		{spec: "seed=7, rate=0.5,kinds=rebalance+lostack+rebalance", want: "seed=7,rate=0.5,kinds=lostack+rebalance"},
 		{spec: "rate=0.5", err: "seed is required"},
 		{spec: "seed=-1", err: "seed"},
@@ -139,5 +142,68 @@ func TestFaultRebalance(t *testing.T) {
 	rb := h.joined(2, corr)
 	if ra.ErrorCode != 0 || rb.ErrorCode != 0 || ra.GenerationID != 3 || rb.GenerationID != 3 {
 		t.Fatalf("rejoin: %+v / %+v", ra, rb)
+	}
+}
+
+// The fetch faults of item 23a: a consumer is told its offset is out of
+// range, or gets nothing, or gets it late, though the data is there.
+func TestFaultFetches(t *testing.T) {
+	h := newHarness(t, Config{})
+	h.open(1)
+	h.open(2)
+	h.createTopic(1, "t", 1)
+	h.produce(1, "t", 0, "a")
+	h.produce(1, "t", 0, "b")
+
+	h.node.faults = faulter{cfg: Faults{Seed: 1, Rate: 1, Kinds: []string{FaultOutOfRange}}, state: 1}
+	var resp wire.FetchResponse
+	h.call(1, wire.KeyFetch, 11, fetchReq("t", 0, 0, 0, 1), &resp)
+	if p := resp.Topics[0].Partitions[0]; p.ErrorCode != wire.ErrOffsetOutOfRange || p.LogStartOffset != 0 || p.HighWatermark != 2 || len(p.Records) != 0 {
+		t.Fatalf("outofrange: %+v", p)
+	}
+
+	h.node.faults = faulter{cfg: Faults{Seed: 1, Rate: 1, Kinds: []string{FaultEmptyFetch}}, state: 1}
+	h.call(1, wire.KeyFetch, 11, fetchReq("t", 0, 0, 0, 1), &resp)
+	if p := resp.Topics[0].Partitions[0]; p.ErrorCode != 0 || p.HighWatermark != 2 || len(p.Records) != 0 {
+		t.Fatalf("emptyfetch: %+v", p)
+	}
+	// Nothing to return anyway: no fault is counted.
+	n := h.node.faults.count
+	h.call(1, wire.KeyFetch, 11, fetchReq("t", 0, 2, 0, 1), &resp)
+	if h.node.faults.count != n {
+		t.Fatal("an empty fetch was faulted again")
+	}
+
+	// slowfetch: the data is there, and comes at the deadline.
+	h.node.faults = faulter{cfg: Faults{Seed: 1, Rate: 1, Kinds: []string{FaultSlowFetch}}, state: 1}
+	corr := h.send(1, wire.KeyFetch, 11, fetchReq("t", 0, 0, 500, 1))
+	h.run()
+	if h.recv(1, wire.KeyFetch, 11, corr, &resp) {
+		t.Fatal("a slow fetch was answered at once")
+	}
+	h.produce(2, "t", 0, "c") // new data does not wake it
+	if h.recv(1, wire.KeyFetch, 11, corr, &resp) {
+		t.Fatal("a slow fetch was woken by data")
+	}
+	h.advance(500 * time.Millisecond)
+	if !h.recv(1, wire.KeyFetch, 11, corr, &resp) || len(resp.Topics[0].Partitions[0].Records) == 0 {
+		t.Fatalf("a slow fetch at its deadline: %+v", resp)
+	}
+}
+
+// FaultExpire: a heartbeat finds the member's session gone.
+func TestFaultExpire(t *testing.T) {
+	h, a, b := stableGroup(t)
+	h.node.faults = faulter{cfg: Faults{Seed: 1, Rate: 1, Kinds: []string{FaultExpire}}, state: 1}
+	if code := h.heartbeat(1, 2, a); code != wire.ErrUnknownMemberID {
+		t.Fatalf("heartbeat: %d, want UNKNOWN_MEMBER_ID", code)
+	}
+	h.node.faults.cfg.Rate = 0
+	// The other member is told to rejoin: the group is rebalancing.
+	if code := h.heartbeat(2, 2, b); code != wire.ErrRebalanceInProgress {
+		t.Fatalf("the other member's heartbeat: %d, want REBALANCE_IN_PROGRESS", code)
+	}
+	if code := h.heartbeat(1, 2, a); code != wire.ErrUnknownMemberID {
+		t.Fatalf("the expired member's next heartbeat: %d", code)
 	}
 }
