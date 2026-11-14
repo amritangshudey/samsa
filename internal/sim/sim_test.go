@@ -135,7 +135,7 @@ func TestSim(t *testing.T) {
 			"leaders elected": total.Leaders, "requests refused by a non-leader": total.NotLeader, "replica comparisons": total.ReplicasCompared, "partitions": total.Partitions,
 			"starts from a snapshot": total.SnapshotStarts, "log trims": total.Trims, "snapshots installed": total.Installs,
 			"idempotent records acknowledged": total.IdempotentAcked, "idempotent retries": total.Retries, "producer ids": total.ProducerIDs, "producers expired": total.ProducersExpired, "leadership handovers": total.Handovers,
-			"records deleted": total.RecordDeletes, "partitions added": total.PartitionsAdded, "topics deleted": total.TopicsDeleted, "bytes relocated": total.BytesRelocated, "records compacted": total.RecordsCompacted, "damage injected": total.DamageInjected, "damage found": total.DamageFound, "damage repaired": total.DamageRepaired, "bytes scrubbed": total.ScrubbedBytes,
+			"records deleted": total.RecordDeletes, "partitions added": total.PartitionsAdded, "topics deleted": total.TopicsDeleted, "bytes relocated": total.BytesRelocated, "records compacted": total.RecordsCompacted, "damage injected": total.DamageInjected, "damage found": total.DamageFound, "damage repaired": total.DamageRepaired, "bytes scrubbed": total.ScrubbedBytes, "follower reads": total.FollowerReads, "preferred replicas named": total.PreferredReplicas,
 			"faults on the serving leader": total.LeaderFaults, "leaders isolated": total.LeaderIsolated, "terms without a leader": total.TermsWithoutLeader,
 		} {
 			if n < *seeds/10 {
@@ -295,6 +295,7 @@ var mutations = []mutationCase{
 	{"trim the head segment without copying its live batches", func(c *broker.Config) {
 		c.UnsafeTrimLive, c.RetentionTime, c.RetentionBytes = true, time.Second, 0
 	}},
+	{"a follower tells a consumer that is ahead of it that its offset is out of range", func(c *broker.Config) { c.UnsafeFollowerOutOfRange = true }},
 	{"vote while recovering from damage to the log", func(c *broker.Config) { c.UnsafeRaft |= raft.MutVoteWhileRecovering }},
 	{"ignore the recovery marker at start", func(c *broker.Config) { c.UnsafeRaft |= raft.MutRecoveredEarly }},
 	{"cut the log at damage and carry on", func(c *broker.Config) { c.UnsafeRaft |= raft.MutTruncateAtDamage }},

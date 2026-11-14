@@ -178,3 +178,22 @@ func IsDamage(err error) bool { return errors.Is(err, storage.ErrCorrupt) }
 func (r *Raft) Scrub(cursor int64, budget int) (next int64, read int, damage int64, found bool, err error) {
 	return r.log.Scrub(cursor, budget)
 }
+
+// Match returns the highest log index the leader knows to be durable on
+// node id, and whether this node leads and knows id. It is for the broker's
+// choice of a replica that consumers may read from (KIP-392).
+func (r *Raft) Match(id sys.NodeID) (int64, bool) {
+	if r.role != Leader {
+		return 0, false
+	}
+	p, ok := r.peers[id]
+	if !ok {
+		return 0, false
+	}
+	return p.match, true
+}
+
+// HeardFromLeader reports whether a leader was heard within an election
+// timeout: a follower that has may answer reads from what it has applied.
+func (r *Raft) HeardFromLeader() bool { return r.role != Leader && r.heardFromLeader() }
+

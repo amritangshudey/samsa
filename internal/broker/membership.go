@@ -90,6 +90,9 @@ func (n *Node) members() []Peer {
 		} else if q, ok := n.bootPeer(p.ID); ok {
 			p = q
 		}
+		if q, ok := n.bootPeer(p.ID); ok {
+			p.Rack = q.Rack // racks come from the first configuration only
+		}
 		out = append(out, p)
 	}
 	return out

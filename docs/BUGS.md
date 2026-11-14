@@ -459,6 +459,27 @@ for how much that is worth.
   failed with `ErrCorrupt` before any repair ran.
 - **Fix:** that failure runs the repair and starts again.
 
+### S13. A follower served from a log that had been reset under its state (C19, before merge)
+
+- **Seed:** 749 (`make sim SEED=749`), the first run with fetch from followers.
+- **Reported as:** "node 2 stopped with an error no fault explains: read
+  committed batch at log index 1248: storage: offset out of range: 1248
+  not in [1553, 1749]".
+- **Root cause:** a node receiving a snapshot resets its log to the leader's
+  start while its applied state, which refers to batches by log index, is
+  still the old one. Nobody read batches from followers before, so nothing
+  had read them in that window.
+- **Fix:** a node that is installing a snapshot does not answer fetches.
+
+### C19-1. The rack was lost for every node of a real cluster (C19)
+
+- **Found by:** `TestFetchFromTheNearestReplica` on real processes, not by a
+  seed: the leader never named a replica.
+- **Root cause:** `members()` builds a node's address from the member info in
+  the log and fell back to the configured peer only when there was none, so
+  the rack, which is only in the configuration, was dropped.
+- **Fix:** the rack is read from the configuration either way.
+
 ## Bugs in the simulator and tests
 
 ### M8. I6 blamed the broker for a Trim proposed after the final restart (A1 part b)
@@ -722,3 +743,17 @@ would happen against Kafka too (not tested against Kafka).
 - **Root cause:** with a voter removed, two voters remained, and one of them
   was recovering. A configuration of two has no minority to lose.
 - **Fix:** damage and membership changes are not combined in one run.
+
+### M18. The simulator took an answer's sender from the node's state at receipt (C19)
+
+- **Seeds:** 285, 620, 678, 777, 822, 61, 266, 416, 809.
+- **Reported as:** "a follower named a preferred read replica", and "R1:
+  log start went back from 24 to 11".
+- **Root cause:** the model held an answer to the follower rules or the leader
+  rules by whether the node was serving when the client processed it. A
+  leader that stepped down after answering, or a follower that became the
+  leader, was judged by the wrong rules.
+- **Fix:** a counter of each node's changes of role. An answer is held to the
+  leader's rules only if the node was serving at the request and at the
+  receipt with no change between; to the follower's rules only if it was not
+  serving throughout; to the lesser ones otherwise.

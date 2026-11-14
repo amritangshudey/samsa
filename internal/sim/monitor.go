@@ -59,6 +59,10 @@ func (w *world) monitor(inc *incarnation) {
 	}
 	w.checkRot(nd, r.Recovering())
 	nd.term, nd.vote, nd.voted = term, vote, voted
+	if serving := inc.n.Serving(); serving != nd.serving {
+		nd.serving = serving
+		nd.servEpoch++
+	}
 	if r.Role() == raft.Leader {
 		if other, ok := w.leaders[term]; ok && other != nd.id {
 			w.fail("S1: nodes %d and %d both led term %d", other, nd.id, term)

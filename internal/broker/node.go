@@ -37,6 +37,10 @@ type Peer struct {
 	// PeerAddr is host:port where other nodes connect; empty where the
 	// network routes by id (the simulator).
 	PeerAddr string
+	// Rack is where the node is, as `-peers id=client/peer@rack` says, for
+	// fetch from the nearest replica (KIP-392). Only the nodes the cluster
+	// started with have one.
+	Rack string
 }
 
 // Config configures a Node. Zero values select the defaults named below.
@@ -104,6 +108,10 @@ type Config struct {
 	// UnsafeCompact makes the compactor do something deliberately wrong
 	// (the Unsafe constants of compact.go); zero is correct.
 	UnsafeCompact int
+	// UnsafeFollowerOutOfRange makes a follower that has not applied as far
+	// as a consumer asks answer OFFSET_OUT_OF_RANGE, which sends the consumer
+	// back to its reset policy, not OFFSET_NOT_AVAILABLE.
+	UnsafeFollowerOutOfRange bool
 	// UnsafeTrimLive makes the cleaner trim the head segment without
 	// copying its live batches first.
 	UnsafeTrimLive bool
@@ -1068,9 +1076,12 @@ func (n *Node) dispatch(c *conn, frame []byte) {
 		return
 	}
 	var resp wire.Message
-	if !n.canRead() {
+	// A follower answers a consumer's fetch from what it has applied (follower.go).
+	_, isFetch := req.(*wire.FetchRequest)
+	followerFetch := isFetch && !n.canRead() && h.Version >= 11 && n.canServeFetch()
+	if !n.canRead() && !followerFetch {
 		resp = refusal(req)
-	} else if f := notLeaderFault(req); f != nil && n.faults.inject(FaultNotLeader) {
+	} else if f := notLeaderFault(req); !followerFetch && f != nil && n.faults.inject(FaultNotLeader) {
 		n.log.Info("fault injected", "kind", FaultNotLeader, "key", h.Key, "fault", n.faults.count)
 		resp = f
 	}

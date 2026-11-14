@@ -118,6 +118,7 @@ type Broker struct {
 	NodeID int32
 	Host   string
 	Port   int32
+	Rack   string // "" is null
 }
 
 // PartitionMetadata is one partition in a Metadata response.
@@ -162,7 +163,7 @@ func (m *MetadataResponse) Decode(r *Reader, v int16) {
 	}
 	m.Brokers = Array(r, false, func() Broker {
 		b := Broker{NodeID: r.Int32(), Host: r.String(false), Port: r.Int32()}
-		r.NullableString(false) // Rack, v1+
+		b.Rack, _ = r.NullableString(false) // v1+
 		return b
 	})
 	if v >= 2 {
@@ -203,7 +204,11 @@ func (m *MetadataResponse) Encode(w *Writer, v int16) {
 		w.Int32(b.NodeID)
 		w.String(false, b.Host)
 		w.Int32(b.Port)
-		w.NullString(false) // Rack
+		if b.Rack == "" {
+			w.NullString(false)
+		} else {
+			w.String(false, b.Rack)
+		}
 	}
 	if v >= 2 {
 		w.String(false, m.ClusterID)
@@ -476,6 +481,9 @@ type FetchTopic struct {
 type FetchRequest struct {
 	MaxWaitMs, MinBytes, MaxBytes int32
 	Topics                        []FetchTopic
+	// RackID is the consumer's rack (v11+): the broker may name a replica in
+	// it to fetch from (KIP-392).
+	RackID string
 }
 
 // Decode implements Message.
@@ -511,7 +519,7 @@ func (m *FetchRequest) Decode(r *Reader, v int16) {
 		})
 	}
 	if v >= 11 {
-		r.String(false) // RackId
+		m.RackID = r.String(false)
 	}
 }
 
@@ -546,7 +554,7 @@ func (m *FetchRequest) Encode(w *Writer, v int16) {
 		w.ArrayLen(false, 0)
 	}
 	if v >= 11 {
-		w.String(false, "")
+		w.String(false, m.RackID)
 	}
 }
 
@@ -557,6 +565,10 @@ type FetchPartitionResponse struct {
 	HighWatermark  int64
 	LogStartOffset int64  // v5+: the first offset still available
 	Records        []byte // whole record batches, or nil
+	// PreferredReadReplica, if HasPreferred (v11+), is the node the consumer
+	// should fetch from next, in its own rack (KIP-392).
+	PreferredReadReplica int32
+	HasPreferred         bool
 }
 
 // FetchTopicResponse is one topic of a Fetch response.
@@ -588,7 +600,9 @@ func (m *FetchResponse) Decode(r *Reader, v int16) {
 				return struct{}{}
 			})
 			if v >= 11 {
-				r.Int32() // PreferredReadReplica
+				if id := r.Int32(); id >= 0 {
+					p.PreferredReadReplica, p.HasPreferred = id, true
+				}
 			}
 			if p.Records = r.Bytes(false); len(p.Records) == 0 {
 				p.Records = nil
@@ -619,7 +633,11 @@ func (m *FetchResponse) Encode(w *Writer, v int16) {
 			}
 			w.ArrayLen(false, -1) // AbortedTransactions: null
 			if v >= 11 {
-				w.Int32(-1)
+				if p.HasPreferred {
+					w.Int32(p.PreferredReadReplica)
+				} else {
+					w.Int32(-1)
+				}
 			}
 			// "No records" is sent as an empty set, never as null. The
 			// definition allows null, and the Java client and franz-go

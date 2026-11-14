@@ -21,7 +21,7 @@ func (n *Node) metadata(c *conn, req *wire.MetadataRequest) *wire.MetadataRespon
 	resp := &wire.MetadataResponse{ClusterID: n.cfg.ClusterID, ControllerID: leader.ID}
 	var all []int32
 	for _, p := range n.members() {
-		resp.Brokers = append(resp.Brokers, wire.Broker{NodeID: p.ID, Host: p.Host, Port: p.Port})
+		resp.Brokers = append(resp.Brokers, wire.Broker{NodeID: p.ID, Host: p.Host, Port: p.Port, Rack: p.Rack})
 		all = append(all, p.ID)
 	}
 	names := req.Topics
@@ -278,6 +278,13 @@ type parkedFetch struct {
 
 func (n *Node) fetch(c *conn, h wire.RequestHeader, req *wire.FetchRequest) {
 	resp, size, failed := n.buildFetch(c, req)
+	if !n.serving {
+		n.stats.followerFetchBytes += int64(size)
+		n.log.Debug("fetch answered by a follower", "bytes", size, "failed", failed, "rack", req.RackID)
+	} else if req.RackID != "" && h.Version >= 11 && !failed && n.preferReplica(req.RackID, resp) {
+		n.respond(c, h, resp) // read from that node next: nothing to wait for here
+		return
+	}
 	// Faults that change what a consumer sees of its fetches (faults.go).
 	// Each enabled kind draws once per fetch.
 	// A kind draws only for a request it can act on.
@@ -332,7 +339,7 @@ func (n *Node) completeFetch(f *parkedFetch) {
 		}
 	}
 	n.clock.CancelTimer(f.timer)
-	if !n.canRead() { // the lease ran out while it waited
+	if !n.canRead() && !n.canServeFetch() { // the lease ran out while it waited
 		n.respond(f.c, f.h, refusal(f.req))
 		return
 	}
@@ -387,6 +394,10 @@ func (n *Node) buildFetch(c *conn, req *wire.FetchRequest) (resp *wire.FetchResp
 				pr.ErrorCode = wire.ErrTopicAuthorizationFailed
 			case p == nil:
 				pr.ErrorCode = wire.ErrUnknownTopicOrPartition
+			case q.Offset > p.next && !n.serving && !n.cfg.UnsafeFollowerOutOfRange:
+				// A follower that has not applied that far yet: the consumer
+				// is not wrong, and must not reset (KIP-392).
+				pr.ErrorCode, pr.HighWatermark, pr.LogStartOffset = wire.ErrOffsetNotAvailable, p.next, p.start
 			case q.Offset < p.start || q.Offset > p.next:
 				pr.ErrorCode, pr.HighWatermark, pr.LogStartOffset = wire.ErrOffsetOutOfRange, p.next, p.start
 			default:
