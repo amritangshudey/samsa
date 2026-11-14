@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/amritangshudey/samsa/internal/raft"
+	"github.com/amritangshudey/samsa/internal/sys"
 )
 
 // The monitor checks what no client can see: Raft's own safety properties,
@@ -21,6 +22,7 @@ import (
 //	S5  a node's term never decreases and a vote it gave in a term never
 //	    changes, not even across restarts; its commit index never
 //	    decreases while it runs.
+//	S7  a node recovering from damage to its log grants no vote (rot.go).
 //	S6  no node becomes leader of a newer term while another holds a lease
 //	    (ADR 0013): the guarantee that lets a leader answer reads on its
 //	    own. A stale leader of an older term may still appear (late vote
@@ -48,6 +50,14 @@ func (w *world) monitor(inc *incarnation) {
 		w.fail("S5: node %d voted for node %d in term %d and now %s", nd.id, nd.vote, term, now)
 		return
 	}
+	// S7: a node that cut its log at damage grants no vote until it has
+	// fetched back what it lost (docs/design/b1-storage-faults.md). A vote it
+	// gave before the damage was found stays; a new one is the bug.
+	if r.Recovering() && voted && vote != sys.NodeID(nd.id) && (term != nd.term || !nd.voted || vote != nd.vote) {
+		w.fail("S7: node %d voted for node %d in term %d while recovering from damage to its log", nd.id, vote, term)
+		return
+	}
+	w.checkRot(nd, r.Recovering())
 	nd.term, nd.vote, nd.voted = term, vote, voted
 	if r.Role() == raft.Leader {
 		if other, ok := w.leaders[term]; ok && other != nd.id {

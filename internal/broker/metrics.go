@@ -23,6 +23,12 @@ type Metrics struct {
 	// ForcedRetentionBytes the live bytes -retention-bytes dropped because
 	// live data alone exceeded it (design C2).
 	RelocatedBytes, ForcedRetentionBytes int64
+	// Recovering is set while the node holds no vote after damage to its
+	// Raft log; Repaired counts the damage it has cut out and refetched;
+	// Scrubbed is the bytes of the log the scrub has read.
+	Recovering bool
+	Repaired   int
+	Scrubbed   int64
 	// CompactedRecords counts the records the compactor removed as leader.
 	CompactedRecords int64
 
@@ -51,6 +57,7 @@ func (n *Node) Metrics() Metrics {
 	m := Metrics{
 		Requests: n.stats.requests, BytesIn: n.stats.bytesIn, BytesOut: n.stats.bytesOut,
 		Connections: n.stats.conns, Dropped: n.stats.drops, Open: len(n.conns), Faults: n.faults.count,
+		Recovering: n.raft.Recovering(), Repaired: n.raft.Repaired(), Scrubbed: n.scrubbed,
 		RelocatedBytes: n.stats.relocatedBytes, CompactedRecords: n.stats.compactedRecords, ForcedRetentionBytes: n.stats.forcedBytes,
 		Leader: n.raft.Role() == raft.Leader, Serving: n.serving,
 		Term: n.raft.Term(), Committed: n.raft.Committed(), Applied: n.applied,
@@ -66,6 +73,10 @@ func (n *Node) Metrics() Metrics {
 		m.NotReady = "failed: " + n.fatal.Error()
 	case n.stopping:
 		m.NotReady = "stopping"
+	case n.raft.Recovering():
+		m.NotReady = "recovering from damage to its log: it votes again once it holds what it lost"
+	case n.raft.Recovering():
+		m.NotReady = "recovering from damage to its log: it votes again once it holds what it lost"
 	case n.serving:
 		m.Ready = true
 	case m.Leader:

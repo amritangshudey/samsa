@@ -286,6 +286,7 @@ func (r *Raft) maybePromote() {
 	}
 	r.latest, r.latestBytes = *r.pending, r.pendingBytes
 	r.commit = max(r.commit, r.latest.index)
+	r.maybeRecovered()
 	r.pending, r.pendingBytes = nil, nil
 }
 

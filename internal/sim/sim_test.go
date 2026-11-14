@@ -135,7 +135,7 @@ func TestSim(t *testing.T) {
 			"leaders elected": total.Leaders, "requests refused by a non-leader": total.NotLeader, "replica comparisons": total.ReplicasCompared, "partitions": total.Partitions,
 			"starts from a snapshot": total.SnapshotStarts, "log trims": total.Trims, "snapshots installed": total.Installs,
 			"idempotent records acknowledged": total.IdempotentAcked, "idempotent retries": total.Retries, "producer ids": total.ProducerIDs, "producers expired": total.ProducersExpired, "leadership handovers": total.Handovers,
-			"records deleted": total.RecordDeletes, "partitions added": total.PartitionsAdded, "topics deleted": total.TopicsDeleted, "bytes relocated": total.BytesRelocated, "records compacted": total.RecordsCompacted,
+			"records deleted": total.RecordDeletes, "partitions added": total.PartitionsAdded, "topics deleted": total.TopicsDeleted, "bytes relocated": total.BytesRelocated, "records compacted": total.RecordsCompacted, "damage injected": total.DamageInjected, "damage found": total.DamageFound, "damage repaired": total.DamageRepaired, "bytes scrubbed": total.ScrubbedBytes,
 			"faults on the serving leader": total.LeaderFaults, "leaders isolated": total.LeaderIsolated, "terms without a leader": total.TermsWithoutLeader,
 		} {
 			if n < *seeds/10 {
@@ -295,6 +295,9 @@ var mutations = []mutationCase{
 	{"trim the head segment without copying its live batches", func(c *broker.Config) {
 		c.UnsafeTrimLive, c.RetentionTime, c.RetentionBytes = true, time.Second, 0
 	}},
+	{"vote while recovering from damage to the log", func(c *broker.Config) { c.UnsafeRaft |= raft.MutVoteWhileRecovering }},
+	{"ignore the recovery marker at start", func(c *broker.Config) { c.UnsafeRaft |= raft.MutRecoveredEarly }},
+	{"cut the log at damage and carry on", func(c *broker.Config) { c.UnsafeRaft |= raft.MutTruncateAtDamage }},
 	{"compact away the latest record of a key", func(c *broker.Config) { c.UnsafeCompact = broker.UnsafeCompactLatest }},
 	{"compact records younger than min.compaction.lag.ms", func(c *broker.Config) { c.UnsafeCompact = broker.UnsafeCompactNoLag }},
 	{"remove a tombstone before delete.retention.ms", func(c *broker.Config) { c.UnsafeCompact = broker.UnsafeTombstoneEarly }},

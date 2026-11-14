@@ -38,7 +38,8 @@ type DiskConfig struct {
 // journal up to the last entry touching d.
 //
 // Known kindness of the model: directory operations persist in order (as on
-// a journalling filesystem), and synced data is never corrupted.
+// a journalling filesystem). Synced data is corrupted only when a test asks,
+// by [Disk.Corrupt].
 type Disk struct {
 	rng *Rand
 	cfg DiskConfig
@@ -132,6 +133,29 @@ func (d *Disk) mutate(apply func()) error {
 		return ErrCrashed
 	}
 	return nil
+}
+
+// FileSize returns the length of a file's live content, or -1 if it does not
+// exist.
+func (d *Disk) FileSize(name string) int {
+	if ino := d.files[clean(name)]; ino != nil {
+		return len(ino.live)
+	}
+	return -1
+}
+
+// Corrupt overwrites bytes of file name, at offset off, with data: in the
+// synced copy and in the live one, as latent damage to data at rest (bit
+// rot, a misdirected write). It reports whether the file exists and is long
+// enough. It does not count as a disk operation and cannot crash the machine.
+func (d *Disk) Corrupt(name string, off int, data []byte) bool {
+	ino := d.files[clean(name)]
+	if ino == nil || off < 0 || off+len(data) > len(ino.live) || off+len(data) > len(ino.durable) {
+		return false
+	}
+	copy(ino.live[off:], data)
+	copy(ino.durable[off:], data)
+	return true
 }
 
 // Restart brings the machine back after a crash (crashing it first if it is

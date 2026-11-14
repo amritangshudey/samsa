@@ -80,6 +80,8 @@ func run() error {
 	retentionPart := flag.Int64("retention-bytes-per-partition", 0, "how many bytes a partition of a topic without retention.bytes keeps (0: no limit)")
 	deleteRetention := flag.Duration("delete-retention-time", 0, "how long a tombstone of a compacted topic without delete.retention.ms is kept once it is the latest record of its key (0: 24h)")
 	mapBytes := flag.Int64("compaction-map-bytes", 0, "memory for the key maps of compacted partitions; a partition with more keys is not compacted (0: 64 MiB)")
+	scrubRate := flag.Int("scrub-bytes-per-second", 0, "how much of the Raft log the scrub reads each second to find damaged data (0: 8 MiB)")
+	scrubEvery := flag.Duration("scrub-interval", 0, "how long the scrub rests after reading the whole log (0: 24h; negative turns it off)")
 	slack := flag.Float64("retention-slack", 2, "how many times the live data the log may grow to before live batches are copied forward and the oldest segment freed")
 	producerExpiry := flag.Duration("producer-expiry", 24*time.Hour, "forget an idempotent producer after it writes nothing for this long (negative: never)")
 	logLevel := flag.String("log-level", "info", "debug, info, warn or error")
@@ -230,6 +232,7 @@ func run() error {
 		Sync: policy, SyncInterval: *syncInterval, Logger: logger, RetentionBytes: *retention, ProducerExpiry: *producerExpiry,
 		RetentionTime: *retentionTime, RetentionBytesPerPartition: *retentionPart, RetentionSlack: *slack,
 		DeleteRetentionTime: *deleteRetention, CompactionMapBytes: *mapBytes,
+		ScrubBytesPerSecond: *scrubRate, ScrubInterval: *scrubEvery,
 		Faults: faults, SASL: sasl, Authorization: auth,
 	}
 	if auth != nil && sasl == nil {
