@@ -157,7 +157,7 @@ type Raft struct {
 	hsf  hardStateFile
 
 	log   *storage.Log
-	terms []int64 // term of every entry, by index
+	terms termIndex // term of every entry, by index
 	hard  hardState
 
 	role   Role
@@ -265,7 +265,7 @@ func (r *Raft) Start() error {
 		if err := r.checkSnapshot(s); err != nil {
 			return err
 		}
-		r.terms, from = s.expand(), s.index+1
+		r.terms, from = termsOf(s.runs, s.index, log.StartOffset()-1), s.index+1
 		r.commit = s.index // the caller applied it, so it was committed
 		r.setBase(s)
 	} else if marker == nil && log.StartOffset() > 0 {
@@ -280,7 +280,7 @@ func (r *Raft) Start() error {
 			if len(b.Payload) < entryHeader || b.Count != 1 {
 				return fmt.Errorf("%w: raft log entry %d has no header", storage.ErrCorrupt, b.Base)
 			}
-			r.terms = append(r.terms, int64(binary.BigEndian.Uint64(b.Payload)))
+			r.terms.append(int64(binary.BigEndian.Uint64(b.Payload)))
 			if err := r.noteEntry(b.Base, b.Payload[8], b.Payload[entryHeader:]); err != nil {
 				return fmt.Errorf("%w: %w", storage.ErrCorrupt, err)
 			}
@@ -397,10 +397,10 @@ func (r *Raft) Lease() bool {
 func (r *Raft) Durable() int64 { return r.log.DurableOffset() }
 
 // LastIndex returns the index of the last entry in the log, or -1.
-func (r *Raft) LastIndex() int64 { return int64(len(r.terms)) - 1 }
+func (r *Raft) LastIndex() int64 { return r.terms.last() }
 
 // EntryTerm returns the term of the entry at index, which must exist.
-func (r *Raft) EntryTerm(index int64) int64 { return r.terms[index] }
+func (r *Raft) EntryTerm(index int64) int64 { return r.terms.at(index) }
 
 // NeedsFlush reports whether entries have been appended since the last
 // Flush. The caller should then call Flush soon: until it does, followers
@@ -408,10 +408,7 @@ func (r *Raft) EntryTerm(index int64) int64 { return r.terms[index] }
 func (r *Raft) NeedsFlush() bool { return r.dirty && r.err == nil }
 
 func (r *Raft) lastTerm() int64 {
-	if len(r.terms) == 0 {
-		return 0
-	}
-	return r.terms[len(r.terms)-1]
+	return r.terms.lastTerm()
 }
 
 // stable returns the index up to which this node's log counts as durable.
@@ -620,7 +617,7 @@ func (r *Raft) append(e entry) (int64, error) {
 		r.fail(fmt.Errorf("append raft entry: %w", err))
 		return 0, r.err
 	}
-	r.terms = append(r.terms, e.term)
+	r.terms.append(e.term)
 	r.dirty = true
 	if err := r.noteEntry(index, e.kind, e.cmd); err != nil {
 		r.fail(err)
@@ -720,7 +717,7 @@ func (r *Raft) replicate(to sys.NodeID, p *progress) {
 	}
 	m := message{typ: msgAppendEntries, prevIndex: p.next - 1, commit: r.commit, stamp: int64(r.env.Now())}
 	if m.prevIndex >= 0 {
-		m.prevTerm = r.terms[m.prevIndex]
+		m.prevTerm = r.terms.at(m.prevIndex)
 	}
 	if p.next <= r.LastIndex() {
 		batches, err := r.log.Read(p.next, r.cfg.MaxAppendBytes)
@@ -729,7 +726,7 @@ func (r *Raft) replicate(to sys.NodeID, p *progress) {
 			return
 		}
 		for _, b := range batches {
-			m.entries = append(m.entries, entry{term: r.terms[b.Base], kind: b.Payload[8], cmd: b.Payload[entryHeader:]})
+			m.entries = append(m.entries, entry{term: r.terms.at(b.Base), kind: b.Payload[8], cmd: b.Payload[entryHeader:]})
 		}
 	}
 	p.inflight = true
@@ -747,7 +744,7 @@ func (r *Raft) advanceCommit() {
 	// older one that is on a majority can still be overwritten by a
 	// leader that never saw it (Figure 8); it commits along with the
 	// first current-term entry after it.
-	if n > r.commit && (r.terms[n] == r.hard.term || r.mut(MutCommitAnyTerm)) {
+	if n > r.commit && (r.terms.at(n) == r.hard.term || r.mut(MutCommitAnyTerm)) {
 		r.commit = n
 		r.pruneAfterCommit()
 	}
@@ -907,7 +904,7 @@ func (r *Raft) onAppendEntries(from sys.NodeID, m message) {
 
 	// The entry before the new ones must be here with the same term;
 	// otherwise the logs differ somewhere before it.
-	if m.prevIndex > r.LastIndex() || (m.prevIndex >= 0 && r.terms[m.prevIndex] != m.prevTerm) {
+	if m.prevIndex > r.LastIndex() || (m.prevIndex >= 0 && r.terms.at(m.prevIndex) != m.prevTerm) {
 		// shortcut: the leader steps back one entry per round trip when
 		// terms differ. Send the conflicting term's first index if
 		// catching up a long-diverged follower is ever slow.
@@ -917,7 +914,7 @@ func (r *Raft) onAppendEntries(from sys.NodeID, m message) {
 	for i, e := range m.entries {
 		index := m.prevIndex + 1 + int64(i)
 		if index <= r.LastIndex() {
-			if r.terms[index] == e.term {
+			if r.terms.at(index) == e.term {
 				continue // already here: an old or repeated message changes nothing
 			}
 			// A real conflict: same index, different term. Everything
@@ -930,7 +927,7 @@ func (r *Raft) onAppendEntries(from sys.NodeID, m message) {
 				r.fail(fmt.Errorf("truncate raft log at %d: %w", index, err))
 				return
 			}
-			r.terms = r.terms[:index]
+			r.terms.truncate(index)
 			r.dropConfsFrom(index)
 		}
 		if _, err := r.append(e); err != nil {
@@ -944,7 +941,7 @@ func (r *Raft) onAppendEntries(from sys.NodeID, m message) {
 			r.fail(fmt.Errorf("truncate raft log at %d: %w", confirmed+1, err))
 			return
 		}
-		r.terms = r.terms[:confirmed+1]
+		r.terms.truncate(confirmed + 1)
 		r.dropConfsFrom(confirmed + 1)
 	}
 	// Only up to the last entry this message vouched for: anything beyond

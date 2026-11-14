@@ -35,17 +35,6 @@ const (
 // before it is written), so the node must not guess.
 var errBadSnapshot = errors.New("raft: snapshot file is corrupt or does not match the log")
 
-// runsOf compresses terms[0..index] into runs.
-func runsOf(terms []int64, index int64) []termRun {
-	var runs []termRun
-	for i := int64(0); i <= index; i++ {
-		if len(runs) == 0 || runs[len(runs)-1].term != terms[i] {
-			runs = append(runs, termRun{i, terms[i]})
-		}
-	}
-	return runs
-}
-
 func (s *snapshot) encode() []byte {
 	b := binary.BigEndian.AppendUint32(nil, snapshotMagic)
 	// Version 1 when there is no configuration to store: an older build in
@@ -121,24 +110,6 @@ func decodeSnapshot(b []byte) (snapshot, error) {
 	return s, nil
 }
 
-// expand returns the term of every entry 0..index.
-//
-// shortcut: keeps one term per entry in memory, as Raft did before
-// snapshots; replace r.terms by runs when the log is cut (A1 part b).
-func (s *snapshot) expand() []int64 {
-	terms := make([]int64, 0, s.index+1)
-	for i, r := range s.runs {
-		end := s.index + 1
-		if i+1 < len(s.runs) {
-			end = s.runs[i+1].first
-		}
-		for range end - r.first {
-			terms = append(terms, r.term)
-		}
-	}
-	return terms
-}
-
 // loadSnapshot returns the stored snapshot and its bytes, or one with index
 // -1 if none was ever stored.
 func loadSnapshot(disk sys.Disk, dir string) (snapshot, []byte, error) {
@@ -168,7 +139,7 @@ func (r *Raft) SaveSnapshot(index int64, state []byte) {
 			return
 		}
 	}
-	s := snapshot{index: index, runs: runsOf(r.terms, index), state: state}
+	s := snapshot{index: index, runs: r.terms.runsTo(index), state: state}
 	if c := r.confAsOf(index); !c.boot { // the bootstrap one stays implicit, and so stays bootstrap (BUGS.md S9)
 		s.members = c.members
 	}
@@ -210,7 +181,9 @@ func (r *Raft) Compact(offset int64) {
 	}
 	if err := r.log.TruncatePrefix(min(offset, r.commit+1)); err != nil {
 		r.fail(fmt.Errorf("compact raft log below %d: %w", offset, err))
+		return
 	}
+	r.terms.trim(r.log.StartOffset() - 1) // the entry before the start is still needed: sendSnapshot's prevTerm
 }
 
 // RetentionCut returns where to cut the log so that about maxBytes remain,
@@ -274,7 +247,7 @@ func (r *Raft) beginInstall(cut int64, s snapshot, raw []byte) error {
 			return fmt.Errorf("reset raft log to %d: %w", cut, err)
 		}
 	}
-	r.terms = s.expand()[:cut]
+	r.terms = termsOf(s.runs, cut-1, cut-1)
 	r.commit = max(r.commit, cut-1)
 	r.dropConfsFrom(cut)
 	r.setBase(s)
@@ -324,7 +297,7 @@ func (r *Raft) sendSnapshot(to sys.NodeID, p *progress) {
 	n := min(int64(len(b))-p.snapOff, int64(chunk))
 	p.inflight = true
 	cut := r.log.StartOffset()
-	r.send(to, message{typ: msgInstallSnapshot, stamp: int64(r.env.Now()), cut: cut, prevTerm: r.terms[cut-1], snapIndex: s.index,
+	r.send(to, message{typ: msgInstallSnapshot, stamp: int64(r.env.Now()), cut: cut, prevTerm: r.terms.at(cut - 1), snapIndex: s.index,
 		total: int64(len(b)), offset: p.snapOff, data: b[p.snapOff : p.snapOff+n]})
 }
 
@@ -347,7 +320,7 @@ func (r *Raft) onInstallSnapshot(from sys.NodeID, m message) {
 	// Only a node that cannot continue from its own log needs it: one
 	// whose entry before the cut is missing or from another term. A copy
 	// that arrives after the node caught up must not reset its log.
-	if m.cut-1 <= r.LastIndex() && r.terms[m.cut-1] == m.prevTerm {
+	if m.cut-1 <= r.LastIndex() && r.terms.at(m.cut-1) == m.prevTerm {
 		reply.offset = -1
 		r.send(from, reply)
 		return

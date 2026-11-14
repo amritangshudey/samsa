@@ -222,6 +222,36 @@ for how much that is worth.
   implementations, and why the plan says to match the reference broker's
   observable behaviour, not only its specification.
 
+## Bugs found by the soak
+
+### L1. Raft kept one term per entry ever written (G5)
+
+- **Found by:** the 24 h soak (`docs/soak/`), started 2026-11-14 00:53 IST
+  on v0.5's code: three nodes under a steady producer and consumer, with
+  retention holding the disk at about 269 MB.
+- **Symptom:** resident memory grew about 7 MB an hour and never fell:
+  27 MB after 1 h, 109 MB after 11 h. Disk stayed flat.
+- **Root cause:** `Raft.terms` was a slice with the term of every entry
+  since index 0. Compaction cut the log on disk but never the slice, so it
+  grew 8 bytes per entry for as long as the node ran. Start and snapshot
+  install also expanded a snapshot's runs back into one term per entry.
+  It was a recorded shortcut in `snapshot.go` ("replace r.terms by runs
+  when the log is cut"), never taken up.
+- **Fix:** `termIndex` (`internal/raft/terms.go`). Terms below the log
+  start are kept as runs, one per change of term; one term per entry is
+  kept only from the entry before the log start (still needed as an
+  InstallSnapshot's `prevTerm`). `Compact` trims it and copies the tail so
+  the memory is returned; start and install expand only what the log
+  still holds. Lookups work for any index, so callers did not change.
+  `TestTermIndex` checks it against a plain slice and checks that trimmed
+  memory is released. The random Raft schedules found a first draft's
+  mistake (a snapshot's runs past the cut kept their terms), before it
+  was committed.
+- **Lesson:** the simulator runs for minutes of virtual time; a leak of
+  8 bytes per entry is invisible there. Bounded memory needs either a run
+  long enough to see it or a test that asserts the bound. Every
+  `shortcut:` that says "grows with" is a soak finding waiting to happen.
+
 ## Bugs found by fuzzing
 
 ### F1. Negative batch length crashed the produce handler (Phase 2)

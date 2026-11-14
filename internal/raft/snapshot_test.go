@@ -159,3 +159,17 @@ func TestSnapshotChunksDoNotMultiply(t *testing.T) {
 		t.Fatalf("%d chunks sent for a snapshot of about 30", chunks)
 	}
 }
+
+// runsOf compresses terms[0..index] into runs.
+func runsOf(terms []int64, index int64) []termRun {
+	var runs []termRun
+	for i := int64(0); i <= index; i++ {
+		if len(runs) == 0 || runs[len(runs)-1].term != terms[i] {
+			runs = append(runs, termRun{i, terms[i]})
+		}
+	}
+	return runs
+}
+
+// expand returns the term of every entry 0..s.index.
+func (s *snapshot) expand() []int64 { t := termsOf(s.runs, s.index, 0); return t.tail }
