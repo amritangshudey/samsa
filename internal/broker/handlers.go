@@ -2,6 +2,7 @@ package broker
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 
@@ -86,6 +87,18 @@ func (n *Node) createTopics(c *conn, h wire.RequestHeader, req *wire.CreateTopic
 		if parts == -1 {
 			parts = 1 // "broker default"
 		}
+		// The configurations Samsa keeps; others are accepted and ignored,
+		// as before C2. A null value asks for the default.
+		configs, configErr := map[string]string{}, ""
+		for _, kv := range t.Configs {
+			if kv.Null || !slices.Contains(topicConfigKeys, kv.Name) {
+				continue
+			}
+			if msg := checkTopicConfig(kv.Name, kv.Value); msg != "" && configErr == "" {
+				configErr = msg
+			}
+			configs[kv.Name] = kv.Value
+		}
 		switch {
 		case !validTopicName(t.Name):
 			res.ErrorCode, res.ErrorMessage = wire.ErrInvalidTopic, "topic names are 1-249 characters of [a-zA-Z0-9._-]"
@@ -101,13 +114,17 @@ func (n *Node) createTopics(c *conn, h wire.RequestHeader, req *wire.CreateTopic
 			res.ErrorCode, res.ErrorMessage = wire.ErrInvalidReplicationFactor, "every node holds every partition: the replication factor is the cluster size"
 		case n.st.topics[t.Name] != nil:
 			res.ErrorCode, res.ErrorMessage = wire.ErrTopicAlreadyExists, "topic already exists"
+		case configErr != "":
+			res.ErrorCode, res.ErrorMessage = wire.ErrInvalidConfig, configErr
+		case len(configs) > 0 && n.levelRefused(2) != "":
+			res.ErrorCode, res.ErrorMessage = wire.ErrUnsupportedVersion, n.levelRefused(2)
 		}
 		seen[t.Name] = true
 		if res.ErrorCode != wire.ErrNone || req.ValidateOnly {
 			continue
 		}
 		pending++
-		n.propose(encodeCreateTopic(t.Name, parts), func(r result) {
+		n.propose(encodeCreateTopic(t.Name, parts, configs), func(r result) {
 			res.ErrorCode = r.errCode
 			if r.errCode == wire.ErrTopicAlreadyExists {
 				res.ErrorMessage = "topic already exists"

@@ -245,6 +245,15 @@ type CreateTopic struct {
 	// HasAssignments is set if the request carried a manual replica
 	// assignment, which the broker does not support.
 	HasAssignments bool
+	Configs        []TopicConfig
+}
+
+// TopicConfig is one configuration of a topic being created: a name and a
+// value, which may be null.
+type TopicConfig struct {
+	Name  string
+	Value string
+	Null  bool
 }
 
 // CreateTopicsRequest is the body of a CreateTopics request (key 19).
@@ -264,10 +273,10 @@ func (m *CreateTopicsRequest) Decode(r *Reader, _ int16) {
 			return struct{}{}
 		})
 		t.HasAssignments = len(assignments) > 0
-		Array(r, false, func() struct{} { // Configs: accepted and ignored
-			r.String(false)
-			r.NullableString(false)
-			return struct{}{}
+		t.Configs = Array(r, false, func() TopicConfig {
+			c := TopicConfig{Name: r.String(false)}
+			c.Value, c.Null = r.NullableString(false)
+			return c
 		})
 		return t
 	})
@@ -275,7 +284,7 @@ func (m *CreateTopicsRequest) Decode(r *Reader, _ int16) {
 	m.ValidateOnly = r.Bool() // v1+
 }
 
-// Encode implements Message. It never writes configs; HasAssignments is
+// Encode implements Message. HasAssignments is
 // written as one assignment of partition 0 to no brokers, so that it
 // survives a round trip.
 func (m *CreateTopicsRequest) Encode(w *Writer, _ int16) {
@@ -291,7 +300,15 @@ func (m *CreateTopicsRequest) Encode(w *Writer, _ int16) {
 		} else {
 			w.ArrayLen(false, 0)
 		}
-		w.ArrayLen(false, 0)
+		w.ArrayLen(false, len(t.Configs))
+		for _, c := range t.Configs {
+			w.String(false, c.Name)
+			if c.Null {
+				w.NullString(false)
+			} else {
+				w.String(false, c.Value)
+			}
+		}
 	}
 	w.Int32(m.TimeoutMs)
 	w.Bool(m.ValidateOnly)

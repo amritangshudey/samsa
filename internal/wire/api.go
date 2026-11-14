@@ -21,8 +21,10 @@ const (
 	KeyDescribeConfigs  int16 = 32
 	KeyCreatePartitions int16 = 37
 	KeyDescribeCluster  int16 = 60
-	KeyAPIVersions      int16 = 18
-	KeyCreateTopics     int16 = 19
+	// KeyIncrementalAlterConfigs sets topic configurations (C2).
+	KeyIncrementalAlterConfigs int16 = 44
+	KeyAPIVersions             int16 = 18
+	KeyCreateTopics            int16 = 19
 	// KeySaslHandshake and KeySaslAuthenticate authenticate a connection
 	// (ADR 0019).
 	KeySaslHandshake    int16 = 17
@@ -76,6 +78,7 @@ const (
 	ErrInvalidPartitions           int16 = 37
 	ErrInvalidReplicationFactor    int16 = 38
 	ErrInvalidReplicaAssignment    int16 = 39
+	ErrInvalidConfig               int16 = 40
 	ErrNotController               int16 = 41
 	ErrInvalidRequest              int16 = 42
 	ErrRequestTimedOut             int16 = 7
@@ -138,6 +141,7 @@ var APIs = []API{
 	{Key: KeyCreateAcls, Min: 1, Max: 3, AdvertisedMin: 1, FlexFrom: 2},
 	{Key: KeyDeleteAcls, Min: 1, Max: 3, AdvertisedMin: 1, FlexFrom: 2},
 	{Key: KeyDescribeConfigs, Min: 1, Max: 4, AdvertisedMin: 1, FlexFrom: 4},
+	{Key: KeyIncrementalAlterConfigs, Min: 0, Max: 1, AdvertisedMin: 0, FlexFrom: 1},
 	{Key: KeySaslAuthenticate, Min: 0, Max: 2, AdvertisedMin: 0, FlexFrom: 2},
 	{Key: KeyCreatePartitions, Min: 0, Max: 3, AdvertisedMin: 0, FlexFrom: 2},
 	{Key: KeyDescribeUserScramCredentials, Min: 0, Max: 0, AdvertisedMin: 0, FlexFrom: 0},

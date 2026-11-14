@@ -144,7 +144,7 @@ func refusal(req wire.Message) wire.Message {
 	}
 	// APIVersions, Metadata, FindCoordinator, DescribeConfigs,
 	// DescribeCluster and DescribeAcls are answered by every node, and
-	// CreateAcls and DeleteAcls forwarded to the leader (forward.go); ListGroups by every node,
+	// CreateAcls, DeleteAcls and IncrementalAlterConfigs forwarded to the leader (forward.go); ListGroups by every node,
 	// empty unless it serves.
 	return nil
 }

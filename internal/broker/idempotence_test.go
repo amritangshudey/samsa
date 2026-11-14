@@ -353,7 +353,7 @@ func TestSnapshotV3ProducerIndex(t *testing.T) {
 	const id = 0x0102030405060708
 	s := newState()
 	for i, cmd := range [][]byte{
-		encodeCreateTopic("t", 1),
+		encodeCreateTopic("t", 1, nil),
 		encodeAppend("t", 0, batchAs(id, 0x0a0b, 0, "a")),
 		encodeAppend("t", 0, batch("b")),
 	} {

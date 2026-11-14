@@ -464,7 +464,7 @@ func TestForwardRefused(t *testing.T) {
 	if len(n.net.peers) != 1 || n.net.peers[0].to != 2 || n.net.peers[0].msg[1] != msgForwardRefused {
 		t.Fatalf("a node that does not serve answered %+v", n.net.peers)
 	}
-	for _, bad := range [][]byte{{brokerMsg}, {brokerMsg, msgForward, 1, 2}, append([]byte{brokerMsg, msgForward, 0, 0, 0, 0, 0, 0, 0, 9}, encodeCreateTopic("t", 1)...)} {
+	for _, bad := range [][]byte{{brokerMsg}, {brokerMsg, msgForward, 1, 2}, append([]byte{brokerMsg, msgForward, 0, 0, 0, 0, 0, 0, 0, 9}, encodeCreateTopic("t", 1, nil)...)} {
 		n.net.peers = nil
 		n.must(n.node.OnPeerMessage(2, bad))
 		if len(n.net.peers) != 0 {

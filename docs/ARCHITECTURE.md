@@ -44,8 +44,8 @@ a lone node elects itself, and an entry commits when it is synced
 
 What this shape costs: every node stores every partition and one leader
 takes all writes, so adding nodes adds no capacity; partitions interleave in
-the log, so fetches have poor locality; retention is one size bound for the whole log,
-not per topic; `acks=0` and `acks=1` behave as `acks=all`.
+the log, so fetches have poor locality; retention per topic costs extra writes,
+because live data is copied forward out of the log's head (below); `acks=0` and `acks=1` behave as `acks=all`.
 
 **Snapshots** ([design](design/a1-snapshots.md)). Every `SnapshotEvery`
 applied entries (default 10 000), the node syncs its log and writes a
@@ -53,6 +53,27 @@ snapshot: the terms of the entries so far, as runs, and the encoded state
 machine (`broker/snapshot.go`; record data stays in the log). A start loads
 it, reads only the entries after it, and applies from there. A snapshot
 that the log cannot back stops the node.
+
+**Per-topic retention** ([design](design/c2-retention-compaction.md),
+ADR 0026, ADR 0027; `broker/retain.go`). At format level 2, the topic
+configs `retention.ms` and `retention.bytes` are state. The flags
+`-retention-time` and `-retention-bytes-per-partition` give the defaults. The
+leader looks every second:
+
+- **Expiry:** it proposes a DeleteRecords for every partition whose
+  oldest batches its topic no longer keeps.
+- **Cleaning:** when the log from its start exceeds `-retention-slack`
+  (default 2) times the bytes still referenced, the cleaner works on the
+  head segment. It proposes `cmdRelocate` for each batch there that is
+  still referenced: a byte-for-byte copy at the tail. Applying it moves
+  the reference only if it still points where the leader read it. Once
+  nothing in the head is referenced, it proposes the `Trim` described
+  below. Offsets never change, only where the bytes are.
+- **`-retention-bytes`** becomes a safety limit on the whole log. Past
+  it, the old global trim runs, and the live bytes it drops are counted in
+  `ForcedRetentionBytes`.
+
+Below level 2, retention is the global trim alone, as described next.
 
 **Retention** ([design](design/a1-snapshots.md), section 3). When its log
 exceeds `RetentionBytes`, the leader proposes `Trim(C)`, C a segment base

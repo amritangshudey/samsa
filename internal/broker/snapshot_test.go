@@ -18,8 +18,8 @@ func sampleState(t *testing.T) *state {
 		members: []*member{{id: "a", sessionTimeout: 6000, rebalanceTimeout: 9000,
 			protocols: []wire.GroupProtocol{{Name: "range", Metadata: []byte("m")}, {Name: "rr"}}}, {id: "b"}}}
 	cmds := [][]byte{
-		encodeCreateTopic("b", 2),
-		encodeCreateTopic("a", 1),
+		encodeCreateTopic("b", 2, nil),
+		encodeCreateTopic("a", 1, nil),
 		encodeAppend("a", 0, batch("x", "y")),
 		encodeAppend("b", 1, batch("z")),
 		encodeAppend("a", 0, batch("w")),
@@ -75,7 +75,7 @@ func TestCredentialCommands(t *testing.T) {
 	if err != nil || res.origin != 3 || res.tag != 77 {
 		t.Fatalf("forwarded result %+v, %v", res, err)
 	}
-	if _, err := s.apply(201, encodeForwarded(3, 78, encodeCreateTopic("x", 1))); err == nil {
+	if _, err := s.apply(201, encodeForwarded(3, 78, encodeCreateTopic("x", 1, nil))); err == nil {
 		t.Fatal("a forwarded command other than an ACL change was applied")
 	}
 }
@@ -102,7 +102,7 @@ func TestACLCommands(t *testing.T) {
 }
 
 func TestStateEncoding(t *testing.T) {
-	for name, s := range map[string]*state{"empty": newState(), "sample": sampleState(t)} {
+	for name, s := range map[string]*state{"empty": newState(), "sample": sampleState(t), "level 2": sampleLevel2(t)} {
 		b := s.encode()
 		got, err := decodeState(b)
 		if err != nil {
@@ -174,5 +174,86 @@ func BenchmarkRestart(b *testing.B) {
 				}
 			})
 		}
+	}
+}
+
+// sampleLevel2 is sampleState at format level 2: topic configs and a
+// relocated batch, which snapshot version 8 carries.
+func sampleLevel2(t *testing.T) *state {
+	t.Helper()
+	s := sampleState(t)
+	cmds := [][]byte{
+		{cmdSetLevel, 2},
+		encodeCreateTopic("c", 1, map[string]string{"retention.ms": "60000", "cleanup.policy": "delete"}),
+		encodeTopicConfigs("a", []configChange{{name: "retention.bytes", value: "100"}}),
+		encodeRelocate("a", 0, 0, 2, batch("x", "y")),
+	}
+	for i, cmd := range cmds {
+		if res, err := s.apply(int64(100+i), cmd); err != nil || res.errCode != 0 {
+			t.Fatalf("command %d: %+v, %v", i, res, err)
+		}
+	}
+	if b := s.encode(); b[0] != 8 {
+		t.Fatalf("snapshot version %d at level 2, want 8", b[0])
+	}
+	return s
+}
+
+// A relocation moves a reference only if it still points where the leader
+// read the batch; trim then drops what nothing references below the cut,
+// whatever the order of the references.
+func TestRelocate(t *testing.T) {
+	s := newState()
+	apply := func(index int64, cmd []byte) result {
+		t.Helper()
+		res, err := s.apply(index, cmd)
+		if err != nil {
+			t.Fatalf("index %d: %v", index, err)
+		}
+		return res
+	}
+	apply(1, []byte{cmdSetLevel, 2})
+	apply(2, encodeCreateTopic("t", 1, nil))
+	apply(3, encodeAppend("t", 0, batch("a", "b"))) // offsets 0-1
+	apply(4, encodeAppend("t", 0, batch("c")))      // offset 2
+	apply(5, encodeAppend("t", 0, batch("d")))      // offset 3
+	p := s.topics["t"].parts[0]
+
+	apply(6, encodeRelocate("t", 0, 0, 3, batch("a", "b")))
+	apply(7, encodeRelocate("t", 0, 0, 3, batch("a", "b"))) // stale: it moved to 6
+	apply(8, encodeRelocate("t", 0, 3, 4, batch("d")))      // stale: offset 3 is at 5
+	if got := []int64{p.batches[0].logIndex, p.batches[1].logIndex, p.batches[2].logIndex}; got[0] != 6 || got[1] != 4 || got[2] != 5 {
+		t.Fatalf("log indexes %v, want [6 4 5]", got)
+	}
+	if _, err := s.apply(9, encodeRelocate("t", 0, 2, 4, batch("c", "x"))); err == nil {
+		t.Fatal("a copy with another record count was accepted")
+	}
+	if _, err := s.apply(9, encodeRelocate("t", 0, 2, 9, batch("c"))); err == nil {
+		t.Fatal("a copy from its own index was accepted")
+	}
+	// Cut 5: index 4 (offset 2) is below it; offsets 0-1 at 6 are not, but
+	// offsets stay dense, so everything up to offset 2 goes.
+	apply(10, encodeTrim(5))
+	if len(p.batches) != 1 || p.batches[0].base != 3 || p.start != 3 {
+		t.Fatalf("after trim: %+v, start %d", p.batches, p.start)
+	}
+	if got := appendBatch(encodeRelocate("t", 0, 0, 3, batch("a"))); !bytes.Equal(got, batch("a")) {
+		t.Fatal("appendBatch does not return a relocated batch's bytes")
+	}
+}
+
+// Topic configs: set, delete, and refused on a missing topic.
+func TestTopicConfigCommands(t *testing.T) {
+	s := newState()
+	s.apply(1, encodeCreateTopic("t", 1, map[string]string{"retention.ms": "5"}))
+	s.apply(2, encodeTopicConfigs("t", []configChange{{name: "retention.bytes", value: "9"}, {name: "retention.ms", delete: true}}))
+	if c := s.topics["t"].configs; len(c) != 1 || c["retention.bytes"] != "9" {
+		t.Fatalf("configs %v", c)
+	}
+	if res, _ := s.apply(3, encodeTopicConfigs("u", []configChange{{name: "retention.ms", value: "1"}})); res.errCode != wire.ErrUnknownTopicOrPartition {
+		t.Fatalf("missing topic: %+v", res)
+	}
+	if _, err := s.apply(4, encodeTopicConfigs("t", []configChange{{name: "retention.ms", value: "x"}})); err == nil {
+		t.Fatal("an invalid value was applied")
 	}
 }

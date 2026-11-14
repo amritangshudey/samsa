@@ -28,8 +28,14 @@ kcat -b localhost:9092 -C -t demo -p 0 -o beginning -e
 Topics are never created automatically, hence the `topic` tool. `-sync
 always` (the default) acknowledges a write only after fsync; `interval` and
 `never` trade that for speed, on a single node only: a cluster needs `always`.
-`-retention-bytes N` keeps about N bytes of log, deleting the oldest
-segments; consumers below the new start get `OFFSET_OUT_OF_RANGE`.
+Topics set `retention.ms` and `retention.bytes` (per partition) at
+creation or with `kafka-configs.sh --alter`; `-retention-time` and
+`-retention-bytes-per-partition` are the defaults for topics that set none
+(default: keep everything). Consumers below a partition's new start get
+`OFFSET_OUT_OF_RANGE`. Live data is copied forward out of the oldest
+segment so it can be deleted, which costs extra writes
+(`-retention-slack`, ADR 0026). `-retention-bytes N` is a safety limit on
+the whole log: past it, the oldest data goes, live or not.
 `-producer-expiry` (default 24h) is how long an idempotent producer may
 write nothing before it is forgotten. If it comes back, its next batch
 is refused with `OUT_OF_ORDER_SEQUENCE_NUMBER`, and the Java client starts
@@ -160,8 +166,9 @@ fetch, metadata, offsets, topics) and [ADR 0008](docs/adr/0008-group-api-version
 ## What is not supported
 
 Transactions (a transactional producer is refused with `INVALID_REQUEST`),
-log compaction, retention by time or per topic (only `-retention-bytes`, one
-bound for the whole log), changing configs (AlterConfigs), client quotas, topic ids, tiered storage,
+log compaction (`cleanup.policy=compact`), configs other than
+`retention.ms`, `retention.bytes` and `cleanup.policy=delete`, the legacy
+AlterConfigs API (IncrementalAlterConfigs works), client quotas, topic ids, tiered storage,
 reusing a node id with a new disk (replace a node under a new id),
 `kafka-metadata-quorum.sh` (DescribeQuorum, add-controller), the KIP-848 group protocol, static membership,
 fetch sessions, more than one Raft

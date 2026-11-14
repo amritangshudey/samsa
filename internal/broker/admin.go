@@ -145,7 +145,7 @@ func (n *Node) describeConfigs(c *conn, req *wire.DescribeConfigsRequest) *wire.
 	topicConfigs := []wire.ConfigEntry{
 		{Name: "cleanup.policy", Value: "delete", Source: wire.ConfigSourceDefault, Type: list},
 		{Name: "max.message.bytes", Value: maxBatch, Source: static, Type: integer},
-		{Name: "retention.bytes", Value: retention, Source: static, Type: long},
+		{Name: "retention.bytes", Value: "-1", Source: wire.ConfigSourceDefault, Type: long}, // per partition; the log-wide bound is log.retention.bytes
 		{Name: "retention.ms", Value: "-1", Source: wire.ConfigSourceDefault, Type: long},
 		{Name: "segment.bytes", Value: segment, Source: static, Type: integer},
 	}
@@ -165,7 +165,12 @@ func (n *Node) describeConfigs(c *conn, req *wire.DescribeConfigsRequest) *wire.
 		case res.Type == wire.ResourceBroker && !n.may(c, opDescribeConfigs, resCluster, clusterName):
 			out.ErrorCode = wire.ErrClusterAuthorizationFailed
 		case res.Type == wire.ResourceTopic && n.st.topics[res.Name] != nil:
-			all = topicConfigs
+			all = slices.Clone(topicConfigs)
+			for j, e := range all {
+				if v, ok := n.st.topics[res.Name].configs[e.Name]; ok {
+					all[j].Value, all[j].Source = v, wire.ConfigSourceDynamicTopic
+				}
+			}
 		case res.Type == wire.ResourceTopic:
 			out.ErrorCode, out.ErrorMessage = wire.ErrUnknownTopicOrPartition, "no such topic"
 		case res.Type == wire.ResourceBroker && (res.Name == "" || res.Name == strconv.Itoa(int(n.cfg.NodeID))):
@@ -177,7 +182,7 @@ func (n *Node) describeConfigs(c *conn, req *wire.DescribeConfigsRequest) *wire.
 		}
 		for _, e := range all {
 			if res.Keys == nil || slices.Contains(res.Keys, e.Name) {
-				e.ReadOnly = true // there is no AlterConfigs
+				e.ReadOnly = !slices.Contains(topicConfigKeys, e.Name) || res.Type != wire.ResourceTopic
 				out.Configs = append(out.Configs, e)
 			}
 		}
@@ -273,4 +278,81 @@ func (n *Node) describeCluster(_ *conn, req *wire.DescribeClusterRequest) *wire.
 		resp.Brokers = append(resp.Brokers, wire.Broker{NodeID: p.ID, Host: p.Host, Port: p.Port})
 	}
 	return resp
+}
+
+// alterConfigs answers IncrementalAlterConfigs (design C2): SET and DELETE
+// of the topic configs Samsa keeps. Broker configs are flags, not state.
+func (n *Node) alterConfigs(c *conn, h wire.RequestHeader, req *wire.IncrementalAlterConfigsRequest) {
+	resp := &wire.IncrementalAlterConfigsResponse{Results: make([]wire.AlterConfigsResult, len(req.Resources))}
+	add, done := collect(func() { n.respond(c, h, resp) })
+	seen := map[string]bool{}
+	for i, res := range req.Resources {
+		out := &resp.Results[i]
+		out.Type, out.Name = res.Type, res.Name
+		var changes []configChange
+		switch {
+		case res.Type == wire.ResourceBroker:
+			if !n.may(c, opAlterConfigs, resCluster, clusterName) {
+				out.ErrorCode = wire.ErrClusterAuthorizationFailed
+			} else {
+				out.ErrorCode, out.ErrorMessage = wire.ErrInvalidRequest, "broker configs are command-line flags"
+			}
+		case res.Type != wire.ResourceTopic:
+			out.ErrorCode, out.ErrorMessage = wire.ErrInvalidRequest, "only topic configs can be altered"
+		case seen[res.Name]:
+			out.ErrorCode, out.ErrorMessage = wire.ErrInvalidRequest, "topic appears twice in the request"
+		case !n.may(c, opAlterConfigs, resTopic, res.Name):
+			out.ErrorCode = wire.ErrTopicAuthorizationFailed
+		case n.st.topics[res.Name] == nil:
+			out.ErrorCode, out.ErrorMessage = wire.ErrUnknownTopicOrPartition, "no such topic"
+		case n.levelRefused(2) != "" && n.knowsLeader(): // without one, a follower's level may lag
+			out.ErrorCode, out.ErrorMessage = wire.ErrUnsupportedVersion, n.levelRefused(2)
+		default:
+			changes, out.ErrorMessage = configChanges(res.Configs)
+			if out.ErrorMessage != "" {
+				out.ErrorCode = wire.ErrInvalidConfig
+			}
+		}
+		if res.Type == wire.ResourceTopic {
+			seen[res.Name] = true
+		}
+		if out.ErrorCode != wire.ErrNone || req.ValidateOnly || len(changes) == 0 {
+			continue
+		}
+		add()
+		n.proposeOrForward(encodeTopicConfigs(res.Name, changes), func(r result) {
+			out.ErrorCode = r.errCode
+			done()
+		})
+	}
+	done()
+}
+
+// configChanges turns a resource's alterations into commands, or returns
+// why they are refused. Every change is checked before any applies, so a
+// resource changes all at once or not at all, as in Kafka.
+func configChanges(configs []wire.AlterableConfig) ([]configChange, string) {
+	var changes []configChange
+	seen := map[string]bool{}
+	for _, a := range configs {
+		switch {
+		case seen[a.Name]:
+			return nil, "config " + a.Name + " appears twice"
+		case !slices.Contains(topicConfigKeys, a.Name):
+			return nil, "Unknown topic config name: " + a.Name
+		case a.Operation == wire.ConfigDelete:
+			changes = append(changes, configChange{name: a.Name, delete: true})
+		case a.Operation != wire.ConfigSet:
+			return nil, "only SET and DELETE apply to " + a.Name + ", which is not a list"
+		case a.Null:
+			return nil, "a SET of " + a.Name + " needs a value"
+		default:
+			if why := checkTopicConfig(a.Name, a.Value); why != "" {
+				return nil, why
+			}
+			changes = append(changes, configChange{name: a.Name, value: a.Value})
+		}
+		seen[a.Name] = true
+	}
+	return changes, ""
 }

@@ -77,6 +77,18 @@ func TestKafkaCLI(t *testing.T) {
 	expect(run("kafka-topics.sh", "--describe", "--topic", "cli"), `PartitionCount: 3`)
 
 	expect(run("kafka-configs.sh", "--describe", "--entity-type", "topics", "--entity-name", "cli", "--all"), `retention\.ms=-1`)
+	// Topic retention (ADR 0027): set and delete with the incremental API,
+	// set at creation, and refused for an unknown name.
+	run("kafka-configs.sh", "--alter", "--entity-type", "topics", "--entity-name", "cli", "--add-config", "retention.ms=3600000,retention.bytes=1048576")
+	out := run("kafka-configs.sh", "--describe", "--entity-type", "topics", "--entity-name", "cli")
+	expect(out, `retention\.ms=3600000`)
+	expect(out, `retention\.bytes=1048576`)
+	run("kafka-configs.sh", "--alter", "--entity-type", "topics", "--entity-name", "cli", "--delete-config", "retention.bytes")
+	if out := run("kafka-configs.sh", "--describe", "--entity-type", "topics", "--entity-name", "cli"); strings.Contains(out, "retention.bytes") {
+		t.Fatalf("retention.bytes still set after --delete-config:\n%s", out)
+	}
+	run("kafka-topics.sh", "--create", "--topic", "cli-kept", "--partitions", "1", "--replication-factor", "3", "--config", "retention.ms=-1")
+	expect(run("kafka-configs.sh", "--describe", "--entity-type", "topics", "--entity-name", "cli-kept"), `retention\.ms=-1`)
 	leader := c.leader(cl)
 	expect(run("kafka-configs.sh", "--describe", "--entity-type", "brokers", "--entity-name", fmt.Sprint(leader), "--all"), `samsa\.sync=always`)
 
@@ -95,7 +107,7 @@ func TestKafkaCLI(t *testing.T) {
 
 	// What is left of partition 0, read without a group, then by group
 	// clig, which commits and leaves.
-	out := run("kafka-console-consumer.sh", "--topic", "cli", "--partition", "0", "--offset", "earliest", "--max-messages", "3", "--timeout-ms", "30000")
+	out = run("kafka-console-consumer.sh", "--topic", "cli", "--partition", "0", "--offset", "earliest", "--max-messages", "3", "--timeout-ms", "30000")
 	expect(out, `(?s)v5.*v6.*v7`)
 	if strings.Contains(out, "v4") {
 		t.Fatalf("a deleted record was read:\n%s", out)

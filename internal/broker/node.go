@@ -76,6 +76,18 @@ type Config struct {
 	// the oldest segments (docs/design/a1-snapshots.md, section 3). Zero
 	// keeps everything.
 	RetentionBytes int64
+	// RetentionTime and RetentionBytesPerPartition are the retention of a
+	// topic that sets no retention.ms or retention.bytes (design C2). Zero
+	// keeps everything.
+	RetentionTime                time.Duration
+	RetentionBytesPerPartition int64
+	// RetentionSlack is how many times the live data the log may grow to
+	// before the cleaner copies live batches out of its head segment.
+	// Default 2 (ADR 0026).
+	RetentionSlack float64
+	// UnsafeTrimLive makes the cleaner trim the head segment without
+	// copying its live batches first.
+	UnsafeTrimLive bool
 	// ProducerExpiry is how long an idempotent producer may write nothing
 	// before every partition forgets it (docs/design/a2-idempotent-producer.md,
 	// section 7). Default 24 h; negative never expires.
@@ -153,6 +165,9 @@ func (c Config) withDefaults() Config {
 	if c.SyncInterval <= 0 {
 		c.SyncInterval = time.Second
 	}
+	if c.RetentionSlack == 0 {
+		c.RetentionSlack = 2
+	}
 	if c.ProducerExpiry == 0 {
 		c.ProducerExpiry = 24 * time.Hour
 	}
@@ -198,6 +213,7 @@ const (
 	timerElection  sys.TimerID = 3
 	timerHeartbeat sys.TimerID = 4
 	timerLevel     sys.TimerID = 5
+	timerRetain    sys.TimerID = 6
 
 	firstFreeTimer sys.TimerID = 16
 )
@@ -258,6 +274,14 @@ type Node struct {
 	// trimmedAt is the index of the last Trim applied (-1: none since the
 	// last restore); trimProposed the highest cut this node proposed.
 	trimmedAt, trimProposed int64
+	// snapStart is the log start of the newest snapshot on disk: the log
+	// must keep every entry from there (compactTo).
+	snapStart int64
+	// expiring and cleaning count the retention proposals in flight;
+	// retainAt is when the leader next looks at retention (retain.go).
+	expiring, cleaning int
+	retainAt           sys.Instant
+	cleanActive        bool // the cleaner had work at its last round
 	// expirySamples are (time, applied index) pairs the serving leader
 	// wrote down, oldest first: soft state, so a new leader starts empty
 	// and expiry is only ever late.
@@ -313,6 +337,34 @@ func (n *Node) adopt(st *state) {
 	st.noFencing, st.noSequences = n.cfg.UnsafeNoFencing, n.cfg.UnsafeNoSequenceCheck
 	st.keepOffsetsOnDelete, st.trimResetsStart = n.cfg.UnsafeKeepOffsetsOnDelete, n.cfg.UnsafeTrimResetsStart
 	n.st = st
+	n.snapStart = st.logStart // every state adopted is a snapshot's
+	// A snapshot older than version 8 has no batch sizes; the cleaner's
+	// sum of live bytes needs them. A failed read leaves 0: fetch reports
+	// a read failure of committed data itself.
+	for _, name := range st.names {
+		for _, p := range st.topics[name].parts {
+			for i, b := range p.batches {
+				if b.size != 0 {
+					continue
+				}
+				if cmd, _, err := n.raft.Read(b.logIndex); err == nil {
+					p.batches[i].size = int32(raft.EntryBytes(len(cmd)))
+				}
+			}
+		}
+	}
+}
+
+// compactTo returns where the log may be cut: below the log start of the
+// newest snapshot on disk, not below the state's. After a Trim the state's
+// start is ahead of the snapshot's until the next snapshot is saved; a
+// crash before then restarts from the older snapshot, which still needs
+// those entries (BUGS.md S10).
+func (n *Node) compactTo() int64 {
+	if n.cfg.UnsafeTrimEarly {
+		return n.st.logStart
+	}
+	return min(n.st.logStart, n.snapStart)
 }
 
 // raftEnv is the node as Raft sees it.
@@ -392,6 +444,7 @@ func (n *Node) OnStart() error {
 		n.clock.SetTimer(timerSync, n.cfg.SyncInterval)
 	}
 	n.clock.SetTimer(timerLevel, levelEvery)
+	n.clock.SetTimer(timerRetain, retainEvery)
 	err := n.settle()
 	n.log.Info("started", "entries", n.raft.LastIndex()+1, "applied", n.applied, "topics", len(n.st.names), "groups", len(n.st.groups))
 	return err
@@ -468,6 +521,11 @@ func (n *Node) OnTimer(id sys.TimerID) error {
 		n.raft.OnTimer(raft.TimerHeartbeat)
 	case timerLevel:
 		n.onLevelTimer()
+	case timerRetain:
+		if n.serving && n.fatal == nil && n.st.level >= 2 {
+			n.retain() // an idle log expires too
+		}
+		n.clock.SetTimer(timerRetain, retainEvery)
 	default:
 		if fn := n.timers[id]; fn != nil {
 			delete(n.timers, id)
@@ -551,6 +609,7 @@ func (n *Node) lead() {
 		n.serving, n.servingTerm = true, term
 		n.trimProposed = n.st.logStart // a Trim proposed in an earlier term may have been lost
 		n.expirySamples = nil
+		n.expiring, n.cleaning = 0, 0 // proposals of an earlier term are never answered
 		n.startGroups()
 		n.log.Info("serving as leader", "term", term, "applied", n.applied)
 		n.levelProposed = false
@@ -683,14 +742,19 @@ func (n *Node) advance() {
 	}
 	n.stepVoterChange()
 	n.peerAddrs()
-	n.raft.Compact(n.st.logStart) // effective only below a snapshot, unless UnsafeTrimEarly
+	n.raft.Compact(n.compactTo()) // effective only below a snapshot, unless UnsafeTrimEarly
 	// A Trim frees disk only once a snapshot after it exists: take one now.
 	trimPending := n.trimmedAt > n.raft.SnapshotIndex() && !n.cfg.UnsafeTrimEarly
 	if every := n.cfg.SnapshotEvery; n.fatal == nil && (trimPending || every > 0 && n.applied-1-n.raft.SnapshotIndex() >= every) {
 		n.raft.SaveSnapshot(n.applied-1, n.st.encode())
-		n.raft.Compact(n.st.logStart)
+		if n.raft.SnapshotIndex() == n.applied-1 {
+			n.snapStart = n.st.logStart
+		}
+		n.raft.Compact(n.compactTo())
 	}
-	if n.serving && n.cfg.RetentionBytes > 0 && n.fatal == nil {
+	if n.serving && n.fatal == nil && n.st.level >= 2 {
+		n.retain()
+	} else if n.serving && n.cfg.RetentionBytes > 0 && n.fatal == nil {
 		if cut := n.raft.RetentionCut(n.cfg.RetentionBytes); cut > n.st.logStart && cut > n.trimProposed {
 			n.trimProposed = cut
 			n.propose(encodeTrim(cut), func(result) {})
@@ -894,6 +958,9 @@ func (n *Node) dispatch(c *conn, frame []byte) {
 	case wire.KeyDeleteRecords:
 		m := &wire.DeleteRecordsRequest{}
 		req, handle = m, func() { n.deleteRecords(c, h, m) }
+	case wire.KeyIncrementalAlterConfigs:
+		m := &wire.IncrementalAlterConfigsRequest{}
+		req, handle = m, func() { n.alterConfigs(c, h, m) }
 	case wire.KeyDescribeConfigs:
 		m := &wire.DescribeConfigsRequest{}
 		req, handle = m, func() { n.respond(c, h, n.describeConfigs(c, m)) }

@@ -32,7 +32,7 @@ func FuzzDecodeMessage(f *testing.F) {
 		"DescribeClusterRequest", "DescribeClusterResponse",
 		"SaslHandshakeRequest", "SaslHandshakeResponse", "SaslAuthenticateRequest", "SaslAuthenticateResponse",
 		"CreateAclsRequest", "CreateAclsResponse", "DeleteAclsRequest", "DeleteAclsResponse", "DescribeAclsRequest", "DescribeAclsResponse",
-		"DescribeUserScramCredentialsRequest", "DescribeUserScramCredentialsResponse", "AlterUserScramCredentialsRequest", "AlterUserScramCredentialsResponse", "DescribeClientQuotasRequest", "DescribeClientQuotasResponse", "AddRaftVoterRequest", "VoterChangeResponse", "RemoveRaftVoterRequest", // new kinds go at the end
+		"DescribeUserScramCredentialsRequest", "DescribeUserScramCredentialsResponse", "AlterUserScramCredentialsRequest", "AlterUserScramCredentialsResponse", "DescribeClientQuotasRequest", "DescribeClientQuotasResponse", "AddRaftVoterRequest", "VoterChangeResponse", "RemoveRaftVoterRequest", "IncrementalAlterConfigsRequest", "IncrementalAlterConfigsResponse", // new kinds go at the end
 	}
 	all := messages()
 	for i, name := range names {

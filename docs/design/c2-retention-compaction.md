@@ -103,7 +103,7 @@ sequential, and usually still in the page cache when the log is small.
   configs and by IncrementalAlterConfigs (API 44), and reported by
   DescribeConfigs. Wire versions are checked against Kafka's schemas
   before coding (rule 5) and recorded in the ADR.
-- **Broker defaults** apply to topics that set nothing: `-retention-ms`
+- **Broker defaults** apply to topics that set nothing: `-retention-time`
   (default 7 days, as Kafka's `log.retention.hours=168`) and
   `-retention-bytes-per-partition` (default unlimited).
 - **`-retention-bytes` keeps its meaning,** a bound on the whole log on
@@ -160,6 +160,62 @@ The mutation `UnsafeRelocateStale` applies a relocation without checking
 that the reference is unchanged. It must be caught: an expired batch
 would come back.
 
+### As built (part a)
+
+What changed from the plan above, and why:
+
+- **Expiry reuses DeleteRecords** instead of a new `cmdExpire`. The
+  leader computes the offset; the command carries it. Apply still reads
+  no clock. One fewer command to version.
+- **The live-bytes sum is computed, not kept.** The leader walks every
+  batch reference once per look (`retainEvery`, one second), which also
+  computes expiry. Keeping a running sum at apply would touch four
+  commands and the snapshot for a number only the leader needs.
+- **`-retention-time` defaults to forever,** not 7 days (ADR 0027): an
+  upgrade must not start deleting what the old build kept.
+- **Expiry and cleaning run on a timer** as well as after apply. Before
+  that, an idle partition never expired, because nothing was applied.
+- **Expiry and the cleaner each wait only for their own proposals.** One
+  shared counter starved the cleaner whenever data expired every second
+  (BUGS.md C2a).
+- **Sizes are bytes on disk:** the log entry with its framing, not the
+  batch alone. Otherwise a log of live data only looks over budget
+  (BUGS.md S11).
+- **The cleaner starts above slack × max(live, segment) plus one
+  segment.** Either trigger then means more than a segment of the log is
+  dead, so every round frees something and cleaning ends.
+- **Rounds follow each other while there is work:** at most 4 MiB of
+  copies in flight, and the next round starts as soon as they apply. At
+  one round a second the cleaner fell far behind a 150 MB/s log.
+- **The safety limit acts at once,** as before C2. It drops live data only
+  when live data plus one segment exceeds it, and the dropped bytes are
+  counted in the metric `ForcedRetentionBytes`.
+- **A relocation also checks its record count** against the offsets the
+  batch it replaces spans, so a malformed copy stops the node instead of
+  shifting offsets.
+- **Snapshots older than version 8 have no batch sizes.** At start, the
+  node reads each referenced batch once to fill them in.
+- **Below format level 2,** nothing changes: the old global trim runs,
+  and topic configs are refused.
+
+Invariants in the simulator:
+
+- **R8** is the history model's existing byte check. It now also runs
+  over relocated batches.
+- **R9** is new (`Model.Retention`). In runs where only topic retention
+  moves a start, each move of a log start is checked against the records
+  below it: each must be older than its topic's `retention.ms`. `t0`
+  keeps everything (`retention.ms=-1`), so the cleaner has live data to
+  copy.
+- **R10 is a unit test only** (`TestCleanerCopiesForward`): log at most
+  slack times `max(live, segment)` plus one segment. A simulator check
+  needs the cleaner to have caught up, which no point in a faulty run
+  guarantees.
+
+The mutation is `UnsafeTrimLive`: trim the head without copying. R9
+catches it, in 42 of 200 seeds. The planned `UnsafeRelocateStale` does
+not work as a mutation; see review question 1.
+
 ## 4. Design, part (b): compaction
 
 Designed in full after part (a) is merged; the outline:
@@ -194,6 +250,14 @@ Designed in full after part (a) is merged; the outline:
    copies was dropped and then resurrects it. The check that the
    partition still references the old index prevents that, and the
    mutation shows the simulator would notice.
+   **Corrected while building:** that answer is wrong. A relocation only
+   edits a reference that still exists, so an expired batch can never
+   come back. Without the index check, a stale copy would point a live
+   reference at another copy of the same bytes, which is harmless.
+   Only one case does harm: the topic is deleted and created again under
+   the same name, and offset 0 then names different data. The check is
+   kept for that case. The mutation that tests the cleaner is
+   `UnsafeTrimLive`.
 2. *Can a relocation race a DeleteRecords that lands inside the batch?*
    The start can sit inside a batch today. Relocation keeps the batch
    whole and leaves the start alone.
