@@ -85,6 +85,16 @@ header and that the reference is unchanged, and knows no keys. A tombstone
 goes only once it is old enough and nothing older of its key is left. The
 Produce handler refuses keyless and compressed batches for such a topic.
 
+**Damage and the scrub** ([design](design/b1-storage-faults.md), ADR 0030;
+`raft/recovery.go`, `broker/scrub.go`). A timer reads the sealed segments of
+the Raft log a little at a time and checks every frame. A bad frame, or a read
+that fails, writes the `damaged` marker and stops the node. At the next start
+`raft.Start` finds the damage again, writes the `recovering` marker and cuts
+the log there (or empties it and removes the snapshot file, if the damage is
+under the snapshot). While `recovering` exists the node grants no vote and
+does not campaign; it ends when the node holds what it held, or the leader
+has nothing more for it.
+
 Below level 2, retention is the global trim alone, as described next.
 
 **Retention** ([design](design/a1-snapshots.md), section 3). When its log

@@ -84,8 +84,8 @@ type keyMap struct {
 	full    bool  // the keys outgrew -compaction-map-bytes: no more compaction
 	// A sweep rewrites the batches the map covers, oldest first.
 	sweeping  bool
-	cursor    int64    // the next batch to look at has at least this base
-	removed   int64    // records removed by this sweep
+	cursor    int64 // the next batch to look at has at least this base
+	removed   int64 // records removed by this sweep
 	nextSweep sys.Instant
 }
 

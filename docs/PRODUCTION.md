@@ -169,7 +169,8 @@ Blockers are written to `docs/QUESTIONS.md` as they arrive.
 | 10 Rolling upgrade | done (`docs/reports/g7-rolling-upgrade.md`): a cluster format level raised only once every voter supports it, and snapshots written in the oldest version that holds them. `TestRollingUpgrade` upgrades three processes from v0.2.0 under a producer, in CI. With the level raised early (`-unsafe raise-level-early`), the old nodes stop on an unknown command |
 | 11 Exhaustive checking | done (`docs/reports/b2-exhaustive.md`, ADR 0025): three Raft nodes, breadth-first, every schedule up to depth 10 (`go test`) and 12 (CI, with one power loss or loss per node), both configurations; no violation. `AckBeforeSync` found with its shortest counterexample, 11 events. A one-node reduction and a vacuous bound found and removed (BUGS.md M11). Bounds are short; no sound reduction yet |
 | 12 Retention and compaction | part (a), per-topic retention: done (`docs/reports/c2-retention-part-a.md`, ADR 0026, ADR 0027). `retention.ms` and `retention.bytes` per topic, set with CreateTopics or `kafka-configs.sh --alter`; live batches copied forward out of the head segment; R9 in the simulator catches `UnsafeTrimLive`. Part (b), key compaction: done (`docs/reports/c2-retention-part-b.md`, ADR 0029, format level 3); `cleanup.policy=compact` keeps the latest record of every key, C1 to C5 in the simulator, five mutations caught |
-| 13–17 | not started |
+| 13 Storage faults | done (`docs/reports/b1-storage-faults.md`, ADR 0030): scrub, `damaged` and `recovering` markers, repair from the other nodes, S7 in the simulator, three mutations caught. Limits: the active segment, the small files, a cluster of one |
+| 14–17 | not started |
 | 18–24, 18a, 23a, 23b | planned (section 7, ADR 0028) |
 
 ## 7. Kafka's problems, and the plan's answer to each

@@ -125,6 +125,14 @@ const (
 	// MutChangeBeforeCommit lets a leader append a configuration before an
 	// entry of its own term has committed (Ongaro's 2015 erratum).
 	MutChangeBeforeCommit
+	// MutVoteWhileRecovering lets a node that cut its log at damage vote
+	// and campaign before it has fetched back what it lost.
+	MutVoteWhileRecovering
+	// MutRecoveredEarly ignores the recovery marker at start.
+	MutRecoveredEarly
+	// MutTruncateAtDamage cuts the log at damage and carries on at once,
+	// without the marker: the naive repair.
+	MutTruncateAtDamage
 )
 
 // ErrTransferring is returned by TransferLeadership when it cannot start.
@@ -157,6 +165,11 @@ type Raft struct {
 	hsf  hardStateFile
 
 	log   *storage.Log
+	// recovering is set while the node fetches back what damage to its log
+	// cost it: until is the log end it had (recovery.go).
+	recovering bool
+	until      int64
+	repaired   int
 	terms termIndex // term of every entry, by index
 	hard  hardState
 
@@ -222,10 +235,26 @@ func New(cfg Config, env Env, disk sys.Disk) *Raft {
 		leader: noVote, commit: -1, ackTo: noVote, transferee: noVote, latest: snapshot{index: -1}}
 }
 
+// errRestartStart makes Start begin again: the repair of damage changed the
+// log and the snapshot under it.
+var errRestartStart = errors.New("raft: start again after repairing damage")
+
 // Start recovers the log and the hard state from disk and begins as a
 // follower. A node that is alone in its cluster stands for election at
 // once, since nobody else can.
 func (r *Raft) Start() error {
+	err := r.start()
+	if errors.Is(err, errRestartStart) {
+		repaired, until, recovering, log := r.repaired, r.until, r.recovering, r.log
+		_ = log.Close()
+		*r = *New(r.cfg, r.env, r.disk)
+		r.repaired, r.until, r.recovering = repaired, until, recovering
+		err = r.start()
+	}
+	return err
+}
+
+func (r *Raft) start() error {
 	if (len(r.cfg.Peers) > 0 && !slices.Contains(r.cfg.Peers, r.cfg.ID)) || r.cfg.ID <= 0 {
 		return fmt.Errorf("raft: node %d is not in its own peer list %v", r.cfg.ID, r.cfg.Peers)
 	}
@@ -235,6 +264,12 @@ func (r *Raft) Start() error {
 		return fmt.Errorf("open raft log: %w", err)
 	}
 	r.log = log
+	if err := r.loadRecovering(); err != nil {
+		return err
+	}
+	if err := r.repairMarked(); err != nil {
+		return err
+	}
 	r.contact = r.env.Now() // it may have answered a leader just before it stopped
 	if r.latest, r.latestBytes, err = loadSnapshot(r.disk, r.cfg.Dir); err != nil {
 		return err
@@ -263,6 +298,13 @@ func (r *Raft) Start() error {
 	}
 	if s := r.latest; marker == nil && s.index >= 0 {
 		if err := r.checkSnapshot(s); err != nil {
+			if errors.Is(err, storage.ErrCorrupt) { // the entry at the snapshot is damaged
+				if cut, rerr := r.repairDamage(log.StartOffset(), err); rerr != nil {
+					return rerr
+				} else if cut {
+					return errRestartStart
+				}
+			}
 			return err
 		}
 		r.terms, from = termsOf(s.runs, s.index, log.StartOffset()-1), s.index+1
@@ -274,6 +316,13 @@ func (r *Raft) Start() error {
 	for off := from; off < log.EndOffset(); {
 		batches, err := log.Read(off, 4<<20)
 		if err != nil {
+			if errors.Is(err, storage.ErrCorrupt) {
+				if cut, rerr := r.repairDamage(off, err); rerr != nil {
+					return fmt.Errorf("scan raft log at %d: %w", off, rerr)
+				} else if cut {
+					continue
+				}
+			}
 			return fmt.Errorf("scan raft log at %d: %w", off, err)
 		}
 		for _, b := range batches {
@@ -295,6 +344,7 @@ func (r *Raft) Start() error {
 		return fmt.Errorf("%w: log holds term %d, hard state says %d", errBadHardState, last, r.hard.term)
 	}
 	r.maybePromote()
+	r.maybeRecovered() // the snapshot may already cover what the marker asks for
 	// A node that is the only voter of its bootstrap configuration may
 	// lead at once: no other node ever led it. One left alone by a
 	// change must wait an election timeout like any voter, because a
@@ -562,6 +612,10 @@ func (r *Raft) quorumActive() bool {
 // campaign starts an election in a new term; transfer marks one that a
 // leader asked for with TimeoutNow.
 func (r *Raft) campaign(transfer bool) {
+	if r.recovering && !r.mut(MutVoteWhileRecovering) {
+		r.armElection() // nobody votes for a node that has lost entries it acknowledged
+		return
+	}
 	r.setHard(r.hard.term+1, r.cfg.ID, true)
 	r.role, r.leader, r.peers, r.ackTo, r.preVotes = Candidate, noVote, nil, noVote, nil
 	r.votes = map[sys.NodeID]bool{r.cfg.ID: true}
@@ -807,7 +861,7 @@ func (r *Raft) Step(from sys.NodeID, raw []byte) {
 	switch m.typ {
 	case msgPreVote:
 		if !r.heardFromLeader() {
-			grant := m.term > r.hard.term && r.upToDate(m)
+			grant := m.term > r.hard.term && r.upToDate(m) && (!r.recovering || r.mut(MutVoteWhileRecovering))
 			term := r.hard.term // a refusal tells the asker our term
 			if grant {
 				term = m.term
@@ -886,7 +940,7 @@ func (r *Raft) Step(from sys.NodeID, raw []byte) {
 }
 
 func (r *Raft) onRequestVote(from sys.NodeID, m message, stale bool) {
-	grant := !stale && r.upToDate(m) && (r.hard.votedFor == noVote || r.hard.votedFor == from)
+	grant := !stale && r.upToDate(m) && (r.hard.votedFor == noVote || r.hard.votedFor == from) && (!r.recovering || r.mut(MutVoteWhileRecovering))
 	if grant {
 		// On disk before the answer leaves: a node that forgot its vote
 		// could give a second one in the same term.
@@ -951,6 +1005,13 @@ func (r *Raft) onAppendEntries(from sys.NodeID, m message) {
 	// Only up to the last entry this message vouched for: anything beyond
 	// it in our log may be a stale suffix.
 	r.commit = max(r.commit, min(m.commit, confirmed))
+	// A leader with nothing more to send beyond what this node holds has
+	// no entry of its log that the node lacks: what the node held beyond
+	// that was never committed (recovery.go).
+	if r.recovering && len(m.entries) == 0 && m.prevIndex == r.LastIndex() {
+		r.until = 0
+	}
+	r.maybeRecovered()
 	if r.ackTo != from || confirmed > r.ackIndex {
 		r.ackTo, r.ackIndex, r.ackEcho = from, confirmed, m.prevIndex
 	}

@@ -13,6 +13,7 @@ import (
 	"github.com/amritangshudey/samsa/internal/broker"
 	"github.com/amritangshudey/samsa/internal/raft"
 	"github.com/amritangshudey/samsa/internal/simsys"
+	"github.com/amritangshudey/samsa/internal/storage"
 	"github.com/amritangshudey/samsa/internal/sys"
 )
 
@@ -73,6 +74,10 @@ type Stats struct {
 	BytesRelocated int
 	// RecordsCompacted counts the records the compactor removed.
 	RecordsCompacted int
+	// DamageInjected, DamageFound and DamageRepaired count the faultRot
+	// damage that was made, that stopped a node, and that a restarted node
+	// cut out and fetched back; ScrubbedBytes is what the scrub read.
+	DamageInjected, DamageFound, DamageRepaired, ScrubbedBytes int
 	// Coverage of states that are hard to reach (docs/design/a3-sim-tools.md,
 	// 2.3): a fault that hit the serving leader, a partition that isolated
 	// it, and terms that ended without electing anyone (split votes, or a
@@ -95,6 +100,16 @@ type simNode struct {
 	voted     bool
 }
 
+// rotState is where the damage injected by faultRot stands (rot.go).
+type rotState uint8
+
+const (
+	rotNone      rotState = iota // no damage is in flight: one may be injected
+	rotInjected                  // damaged, not yet found
+	rotFound                     // found; the node is down and restarts to repair
+	rotRecovered                 // repaired, the node has not yet fetched back what it lost
+)
+
 // world owns virtual time and everything outside the nodes.
 type world struct {
 	opts  options
@@ -105,6 +120,7 @@ type world struct {
 	queue eventHeap
 
 	nodes    []*simNode
+	rot      rotInfo
 	conns    map[sys.ConnID]*conn
 	nextConn sys.ConnID
 	// The monitor's memory; see monitor.go.
@@ -321,6 +337,12 @@ func (w *world) call(inc *incarnation, err error) {
 		// unsynced data now holds is unknown: model it as a power loss.
 		w.stats.SyncFailures++
 		w.down(nd, true, "failed sync")
+	case errors.Is(err, storage.ErrCorrupt) && w.rot.state == rotInjected && w.rot.node == nd:
+		// The scrub (or a read) found the damage that faultRot made: the
+		// node stops, and its next start repairs it.
+		w.stats.DamageFound++
+		w.rot.state = rotFound
+		w.down(nd, false, "damage found")
 	default:
 		w.fail("node %d stopped with an error no fault explains: %v", nd.id, err)
 	}
@@ -410,6 +432,14 @@ func (w *world) start(nd *simNode) {
 		return
 	}
 	nd.inc = inc
+	if w.rot.node == nd && w.rot.state == rotFound {
+		if inc.n.Raft().Repaired() > 0 {
+			w.stats.DamageRepaired++
+			w.rot.state = rotRecovered
+		} else {
+			w.rot.state = rotNone // a snapshot took the damaged entries over: nothing to repair
+		}
+	}
 	w.stats.Starts++
 	if inc.n.Raft().SnapshotIndex() >= 0 {
 		w.stats.SnapshotStarts++
@@ -455,6 +485,8 @@ func (w *world) chaos() {
 			nd.disk.SetSyncErrorRate(1) // the next sync fails
 		case faultStop:
 			w.stop(nd)
+		case faultRot:
+			w.rotOne(nd)
 		}
 	}
 	w.after(time.Duration(1+w.rng.Intn(2*int(w.opts.faultEvery))), w.chaos)

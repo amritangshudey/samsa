@@ -69,6 +69,7 @@ const (
 	faultSync                   // the next sync fails
 	faultStop                   // a graceful stop (SIGTERM): hand over, then exit
 	faultNone                   // a fault that was drawn and then skipped
+	faultRot                    // latent damage to a sealed segment of one node (rot.go)
 )
 
 // options is the swarm configuration: what kind of run the seed selected.
@@ -94,6 +95,7 @@ type options struct {
 	retainMs int64
 	// compact adds the compacted topic tc (compaction.go) with these
 	// min.compaction.lag.ms and delete.retention.ms.
+	rot                       bool // faultRot is among the faults (rot.go)
 	compact                   bool
 	compactLag, compactRetain int64
 	// Between nodes (network.go): drop and duplicate probabilities per
@@ -103,7 +105,7 @@ type options struct {
 }
 
 func (f fault) String() string {
-	return [...]string{"power", "diskcrash", "kill", "syncfail", "stop", "none"}[f]
+	return [...]string{"power", "diskcrash", "kill", "syncfail", "stop", "none", "rot"}[f]
 }
 
 // Run executes one simulation and returns what happened. It is a pure
@@ -185,6 +187,12 @@ func Run(cfg Config) Result {
 	w.opts.compact = pick.Chance(0.5) // drawn last, so older seeds keep their other choices
 	w.opts.compactLag = []int64{0, 0, 500, 2000}[pick.Intn(4)]
 	w.opts.compactRetain = []int64{0, 1000, 3000}[pick.Intn(3)]
+	// Rot needs a copy to repair from, and a scrub fast enough to find it.
+	// Not together with membership changes: a configuration of two voters has
+	// no minority to lose (design B1, section 7).
+	if w.opts.rot = pick.Chance(0.5) && w.opts.nodes >= 3 && !w.opts.changes; w.opts.rot { // drawn last
+		w.opts.faults = append(w.opts.faults, faultRot)
+	}
 	if cfg.Calm {
 		w.opts.drop, w.opts.dup = 0, 0
 	}
@@ -200,7 +208,7 @@ func Run(cfg Config) Result {
 		// breaks what Raft is built on (ADR 0012). That combination is
 		// not simulated; only process kills, which lose nothing.
 		w.opts.diskCrash = false
-		w.opts.faults = slices.DeleteFunc(w.opts.faults, func(f fault) bool { return f != faultKill && f != faultStop })
+		w.opts.faults = slices.DeleteFunc(w.opts.faults, func(f fault) bool { return f != faultKill && f != faultStop && f != faultRot })
 	}
 	if !strict {
 		// shortcut: a retry re-sends records a power loss may have taken
@@ -225,8 +233,8 @@ func Run(cfg Config) Result {
 	if w.opts.compact {
 		w.model.Compaction(compactTopic, w.opts.compactLag, w.opts.compactRetain, func() int64 { return int64(w.now / 1e6) })
 	}
-	res := Result{Seed: cfg.Seed, Setup: fmt.Sprintf("nodes=%d sync=%d segment=%d election=%v faults=%v every=%v drop=%v dup=%v partitions=%v append=%d snapshot=%d retention=%d disconnects=%v producers=%d consumers=%d vandals=%d members=%d idempotent=%d expiry=%v classic=%v admins=%d changes=%v retain-ms=%d compact=%v",
-		w.opts.nodes, w.bcfg.Sync, w.bcfg.SegmentBytes, w.bcfg.ElectionTimeout, w.opts.faults, w.opts.faultEvery, w.opts.drop, w.opts.dup, w.opts.partitions, w.bcfg.MaxAppendBytes, w.bcfg.SnapshotEvery, w.bcfg.RetentionBytes, w.opts.disconnects, w.opts.producers, w.opts.consumers, w.opts.vandals, w.opts.members, w.opts.idempotent, w.opts.expiry, w.opts.classic, w.opts.admins, w.opts.changes, w.opts.retainMs, w.opts.compact)}
+	res := Result{Seed: cfg.Seed, Setup: fmt.Sprintf("nodes=%d sync=%d segment=%d election=%v faults=%v every=%v drop=%v dup=%v partitions=%v append=%d snapshot=%d retention=%d disconnects=%v producers=%d consumers=%d vandals=%d members=%d idempotent=%d expiry=%v classic=%v admins=%d changes=%v retain-ms=%d compact=%v rot=%v",
+		w.opts.nodes, w.bcfg.Sync, w.bcfg.SegmentBytes, w.bcfg.ElectionTimeout, w.opts.faults, w.opts.faultEvery, w.opts.drop, w.opts.dup, w.opts.partitions, w.bcfg.MaxAppendBytes, w.bcfg.SnapshotEvery, w.bcfg.RetentionBytes, w.opts.disconnects, w.opts.producers, w.opts.consumers, w.opts.vandals, w.opts.members, w.opts.idempotent, w.opts.expiry, w.opts.classic, w.opts.admins, w.opts.changes, w.opts.retainMs, w.opts.compact, w.opts.rot)}
 	if w.trace != nil {
 		_, _ = fmt.Fprintf(w.trace, "seed %d: %s\n", cfg.Seed, res.Setup)
 	}
@@ -243,6 +251,10 @@ func Run(cfg Config) Result {
 	for _, p := range all {
 		nd := &simNode{id: p.ID, cfg: w.bcfg, disk: simsys.NewDisk(diskRng.Fork(), simsys.DiskConfig{})}
 		nd.cfg.NodeID, nd.cfg.Port = p.ID, p.Port
+		nd.cfg.ScrubInterval = -1 // off, unless there is rot to find
+		if w.opts.rot {
+			nd.cfg.ScrubBytesPerSecond, nd.cfg.ScrubInterval = 1<<20, time.Second
+		}
 		nd.cfg.Join = p.ID > int32(w.opts.nodes) // a spare waits to be added
 		nd.cfg.Logger = w.bcfg.Logger.With("node", p.ID)
 		w.nodes = append(w.nodes, nd)
@@ -384,6 +396,11 @@ func (w *world) finalChecks() {
 	w.stats.ProducersExpired += leader.inc.n.ExpiredProducers()
 	w.stats.BytesRelocated += int(leader.inc.n.Metrics().RelocatedBytes)
 	w.stats.RecordsCompacted += int(leader.inc.n.Metrics().CompactedRecords)
+	for _, nd := range w.nodes {
+		if nd.inc != nil {
+			w.stats.ScrubbedBytes += int(nd.inc.n.Metrics().Scrubbed)
+		}
+	}
 	// A restarted leader may legitimately trim again; I6 is about replay.
 	for _, nd := range w.nodes {
 		nd.cfg.RetentionBytes, nd.cfg.RetentionTime = 0, 0
@@ -454,10 +471,14 @@ func (w *world) writable(leader *simNode) bool {
 // leader; or it records a violation and returns nil.
 func (w *world) settled() *simNode {
 	var leader *simNode
+	w.findRot()
 	agree := func() bool {
 		leader = nil
+		if w.rot.state == rotFound || w.rot.state == rotRecovered {
+			return false // a node is repairing: wait until it holds what it lost
+		}
 		for _, nd := range w.nodes {
-			if nd.inc == nil {
+			if nd.inc == nil || nd.inc.n.Raft().Recovering() {
 				return false
 			}
 			if nd.inc.n.Serving() {
@@ -480,7 +501,16 @@ func (w *world) settled() *simNode {
 		return nil
 	}
 	if !agree() {
-		w.fail("with faults stopped for %v the nodes did not all come back, elect a leader and catch up", answerBound)
+		var state []string
+		for _, nd := range w.nodes {
+			if nd.inc == nil {
+				state = append(state, fmt.Sprintf("node %d down", nd.id))
+				continue
+			}
+			r := nd.inc.n.Raft()
+			state = append(state, fmt.Sprintf("node %d %v term %d last %d commit %d recovering %v serving %v", nd.id, r.Role(), r.Term(), r.LastIndex(), r.Committed(), r.Recovering(), nd.inc.n.Serving()))
+		}
+		w.fail("with faults stopped for %v the nodes did not all come back, elect a leader and catch up (rot %d): %v", answerBound, w.rot.state, state)
 		return nil
 	}
 	lr := leader.inc.n.Raft()

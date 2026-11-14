@@ -92,6 +92,12 @@ type Config struct {
 	// CompactionMapBytes bounds the memory of the key maps of compacted
 	// partitions, per node. Default 64 MiB.
 	CompactionMapBytes int64
+	// ScrubBytesPerSecond bounds how much of the Raft log's sealed segments
+	// the scrub reads each second (default 8 MiB), and ScrubInterval how
+	// long it rests after a pass (default 24 h). Negative ScrubInterval
+	// turns it off (docs/design/b1-storage-faults.md, section 3.4).
+	ScrubBytesPerSecond int
+	ScrubInterval       time.Duration
 	// CompactionOff stops the compactor, for the simulator's check that a
 	// restart replays to the same state.
 	CompactionOff bool
@@ -184,6 +190,12 @@ func (c Config) withDefaults() Config {
 	if c.ProducerExpiry == 0 {
 		c.ProducerExpiry = 24 * time.Hour
 	}
+	if c.ScrubBytesPerSecond <= 0 {
+		c.ScrubBytesPerSecond = 8 << 20
+	}
+	if c.ScrubInterval == 0 {
+		c.ScrubInterval = 24 * time.Hour
+	}
 	if c.DeleteRetentionTime == 0 {
 		c.DeleteRetentionTime = 24 * time.Hour
 	}
@@ -233,6 +245,7 @@ const (
 	timerHeartbeat sys.TimerID = 4
 	timerLevel     sys.TimerID = 5
 	timerRetain    sys.TimerID = 6
+	timerScrub     sys.TimerID = 7
 
 	firstFreeTimer sys.TimerID = 16
 )
@@ -303,6 +316,12 @@ type Node struct {
 	// says the compactor had work at its last round. keyMaps is its soft
 	// state per compacted partition (compact.go).
 	compacting    int
+	// The scrub (scrub.go): where it goes on reading, when it may start the
+	// next pass, and what it has read.
+	scrubAt     int64
+	damageNoted bool
+	scrubRestAt sys.Instant
+	scrubbed    int64
 	compactActive bool
 	keyMaps       map[*partition]*keyMap
 	retainAt           sys.Instant
@@ -470,6 +489,7 @@ func (n *Node) OnStart() error {
 	}
 	n.clock.SetTimer(timerLevel, levelEvery)
 	n.clock.SetTimer(timerRetain, retainEvery)
+	n.clock.SetTimer(timerScrub, time.Second)
 	err := n.settle()
 	n.log.Info("started", "entries", n.raft.LastIndex()+1, "applied", n.applied, "topics", len(n.st.names), "groups", len(n.st.groups))
 	return err
@@ -546,6 +566,9 @@ func (n *Node) OnTimer(id sys.TimerID) error {
 		n.raft.OnTimer(raft.TimerHeartbeat)
 	case timerLevel:
 		n.onLevelTimer()
+	case timerScrub:
+		n.scrub()
+		n.clock.SetTimer(timerScrub, time.Second)
 	case timerRetain:
 		if n.serving && n.fatal == nil && n.st.level >= 2 {
 			n.retain() // an idle log expires too
@@ -614,6 +637,12 @@ func (n *Node) settle() error {
 		if n.applied == applied && n.serving == serving {
 			break
 		}
+	}
+	if n.fatal != nil && !n.damageNoted && errors.Is(n.fatal, storage.ErrCorrupt) {
+		// A read met damage: record it, so that the restart repairs it
+		// wherever it lies (scrub.go).
+		n.damageNoted = true
+		_ = n.raft.MarkDamage(-1) // a failure leaves the node to stop, as it would
 	}
 	return n.fatal
 }

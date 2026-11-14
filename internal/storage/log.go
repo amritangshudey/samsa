@@ -664,3 +664,100 @@ func (l *Log) Close() error {
 	}
 	return nil
 }
+
+// FirstDamage looks for damage in the sealed segments that end after offset
+// from: a frame that fails its checksum or structure, or a segment whose
+// frames do not run to the next segment's first offset. A sealed segment was
+// synced whole before its successor existed, so nothing in it can be a torn
+// write. It returns the offset where the first bad frame would start, which
+// is the end of the last good frame before it, and false if there is none.
+// The active segment is not examined: its torn tail was cut when the log was
+// opened (docs/design/b1-storage-faults.md, section 2).
+func (l *Log) FirstDamage(from int64) (offset int64, found bool, err error) {
+	if l.err != nil {
+		return 0, false, l.err
+	}
+	for i, s := range l.segs[:len(l.segs)-1] {
+		next := l.segs[i+1].base
+		if next <= from {
+			continue
+		}
+		f, err := l.disk.Open(segName(l.dir, s.base, ".log"), sys.ReadOnly)
+		if err != nil {
+			return 0, false, fmt.Errorf("open segment %d: %w", s.base, err)
+		}
+		pos, at, err := l.scan(f, s, s.size, func(int64, frameHeader) {})
+		f.Close() //nolint:errcheck // read-only handle
+		if err != nil {
+			return 0, false, err
+		}
+		if pos != s.size || at != next {
+			return at, true, nil
+		}
+	}
+	return 0, false, nil
+}
+
+// Scrub verifies the frames of the sealed segments from offset cursor on,
+// reading at most about budget bytes. It returns the offset to continue from,
+// the bytes of frames it read,
+// or -1 once it has passed the last sealed segment, and the offset of the
+// first bad frame if it found one. It changes nothing in the log.
+func (l *Log) Scrub(cursor int64, budget int) (next int64, read int, damage int64, found bool, err error) {
+	if l.err != nil {
+		return 0, 0, 0, false, l.err
+	}
+	cursor = max(cursor, l.StartOffset())
+	read = 0
+	for read < budget {
+		i := sort.Search(len(l.segs), func(i int) bool { return l.segs[i].base > cursor }) - 1
+		if i < 0 || i >= len(l.segs)-1 { // the active segment, or nothing sealed is left
+			return -1, read, 0, false, nil
+		}
+		s, end := l.segs[i], l.segs[i+1].base
+		f, err := l.disk.Open(segName(l.dir, s.base, ".log"), sys.ReadOnly)
+		if err != nil {
+			return 0, read, 0, false, fmt.Errorf("open segment %d: %w", s.base, err)
+		}
+		pos, at := int64(0), s.base
+		if j := sort.Search(len(s.index), func(j int) bool { return s.base+int64(s.index[j].rel) > cursor }); j > 0 {
+			pos, at = int64(s.index[j-1].pos), s.base+int64(s.index[j-1].rel)
+		}
+		for pos < s.size && read < budget {
+			h, err := readHeader(f, pos, s.size, l.cfg.MaxPayloadBytes)
+			if err == nil && h.base != at {
+				err = errBadFrame
+			}
+			if err == nil && at+int64(h.count) <= cursor {
+				// Before the cursor: a read does not check these either.
+				pos += headerSize + h.length
+				at += int64(h.count)
+				continue
+			}
+			if err == nil {
+				_, err = readPayload(f, pos, h)
+			}
+			if errors.Is(err, errBadFrame) {
+				f.Close() //nolint:errcheck // read-only handle
+				return 0, read, at, true, nil
+			}
+			if err != nil {
+				f.Close() //nolint:errcheck // read-only handle
+				return 0, read, 0, false, err
+			}
+			read += int(headerSize + h.length)
+			pos += headerSize + h.length
+			at += int64(h.count)
+		}
+		f.Close() //nolint:errcheck // read-only handle
+		if pos >= s.size {
+			if at != end {
+				return 0, read, at, true, nil
+			}
+			cursor = end
+			continue
+		}
+		return max(at, cursor), read, 0, false, nil // out of budget inside the segment
+	}
+	return cursor, read, 0, false, nil
+}
