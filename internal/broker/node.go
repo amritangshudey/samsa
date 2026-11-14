@@ -76,10 +76,10 @@ type Config struct {
 	// the oldest segments (docs/design/a1-snapshots.md, section 3). Zero
 	// keeps everything.
 	RetentionBytes int64
-	// RetentionMs and RetentionBytesPerPartition are the retention of a
+	// RetentionTime and RetentionBytesPerPartition are the retention of a
 	// topic that sets no retention.ms or retention.bytes (design C2). Zero
 	// keeps everything.
-	RetentionMs                time.Duration
+	RetentionTime                time.Duration
 	RetentionBytesPerPartition int64
 	// RetentionSlack is how many times the live data the log may grow to
 	// before the cleaner copies live batches out of its head segment.

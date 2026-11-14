@@ -39,7 +39,7 @@ configs, which Samsa read and dropped until now.
   cannot read (ADR 0024).
 - **DescribeConfigs** reports a topic's own value with source
   DYNAMIC_TOPIC_CONFIG (1), and the three as writable.
-- **The broker default for `retention.ms` is "forever"** (`-retention-ms
+- **The broker default for `retention.ms` is "forever"** (`-retention-time
   0`), not Kafka's 7 days. The design said 7 days. Changing it would make
   an upgrade start deleting data that the old build kept. Operators who
   want Kafka's default set the flag.

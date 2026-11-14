@@ -57,7 +57,7 @@ that the log cannot back stops the node.
 **Per-topic retention** ([design](design/c2-retention-compaction.md),
 ADR 0026, ADR 0027; `broker/retain.go`). At format level 2, the topic
 configs `retention.ms` and `retention.bytes` are state. The flags
-`-retention-ms` and `-retention-bytes-per-partition` give the defaults. The
+`-retention-time` and `-retention-bytes-per-partition` give the defaults. The
 leader looks every second:
 
 - **Expiry:** it proposes a DeleteRecords for every partition whose

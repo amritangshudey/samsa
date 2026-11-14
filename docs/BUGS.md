@@ -588,7 +588,7 @@ would happen against Kafka too (not tested against Kafka).
   not a replay that went wrong. The check already turned off
   `-retention-bytes` for M8; the cleaner and the topic expiry are new
   sources of the same thing.
-- **Fix:** the final restart also turns off `-retention-ms` and sets the
+- **Fix:** the final restart also turns off `-retention-time` and sets the
   slack to infinity, so the cleaner never runs.
 
 ### M13. I6 hashed the state while the cleaner's proposals were in flight (C2)

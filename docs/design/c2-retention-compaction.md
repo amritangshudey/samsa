@@ -103,7 +103,7 @@ sequential, and usually still in the page cache when the log is small.
   configs and by IncrementalAlterConfigs (API 44), and reported by
   DescribeConfigs. Wire versions are checked against Kafka's schemas
   before coding (rule 5) and recorded in the ADR.
-- **Broker defaults** apply to topics that set nothing: `-retention-ms`
+- **Broker defaults** apply to topics that set nothing: `-retention-time`
   (default 7 days, as Kafka's `log.retention.hours=168`) and
   `-retention-bytes-per-partition` (default unlimited).
 - **`-retention-bytes` keeps its meaning,** a bound on the whole log on
@@ -171,7 +171,7 @@ What changed from the plan above, and why:
   batch reference once per look (`retainEvery`, one second), which also
   computes expiry. Keeping a running sum at apply would touch four
   commands and the snapshot for a number only the leader needs.
-- **`-retention-ms` defaults to forever,** not 7 days (ADR 0027): an
+- **`-retention-time` defaults to forever,** not 7 days (ADR 0027): an
   upgrade must not start deleting what the old build kept.
 - **Expiry and cleaning run on a timer** as well as after apply. Before
   that, an idle partition never expired, because nothing was applied.

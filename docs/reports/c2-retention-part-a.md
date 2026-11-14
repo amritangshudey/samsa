@@ -13,7 +13,7 @@ built"). ADR 0026 (copy forward), ADR 0027 (topic configs).
     versions 0–1), which followers forward to the leader.
   - Reported by DescribeConfigs with source DYNAMIC_TOPIC_CONFIG.
 - **Broker defaults:**
-  - `-retention-ms` and `-retention-bytes-per-partition` apply to topics
+  - `-retention-time` and `-retention-bytes-per-partition` apply to topics
     that set nothing. Both default to keeping everything.
   - `-retention-slack` defaults to 2.
   - `-retention-bytes` is now a safety limit on the whole log.
@@ -150,7 +150,7 @@ kafka-configs.sh --bootstrap-server localhost:9092 --alter --entity-type topics 
   limit cuts it.
 - **Batches without timestamps** (-1) never expire by time and hold back
   those behind them (a `shortcut:` in the code).
-- **`-retention-ms` defaults to forever,** not Kafka's 7 days (ADR 0027).
+- **`-retention-time` defaults to forever,** not Kafka's 7 days (ADR 0027).
 - **Compaction** (`cleanup.policy=compact`) is part (b).
 
 ## Ten questions

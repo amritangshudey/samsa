@@ -293,7 +293,7 @@ var mutations = []mutationCase{
 	{"delete segments before a snapshot covers them", func(c *broker.Config) { c.UnsafeTrimEarly, c.RetentionBytes = true, 8<<10 }},
 	{"let retention move a partition's start back", func(c *broker.Config) { c.UnsafeTrimResetsStart, c.RetentionBytes = true, 8<<10 }},
 	{"trim the head segment without copying its live batches", func(c *broker.Config) {
-		c.UnsafeTrimLive, c.RetentionMs, c.RetentionBytes = true, time.Second, 0
+		c.UnsafeTrimLive, c.RetentionTime, c.RetentionBytes = true, time.Second, 0
 	}},
 }
 

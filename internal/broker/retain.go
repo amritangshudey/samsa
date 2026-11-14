@@ -67,7 +67,7 @@ func (n *Node) expireRecords(now sys.Instant) {
 	nowMs := int64(now) / int64(time.Millisecond)
 	for _, name := range n.st.names {
 		t := n.st.topics[name]
-		ms := topicLimit(t, "retention.ms", n.cfg.RetentionMs.Milliseconds())
+		ms := topicLimit(t, "retention.ms", n.cfg.RetentionTime.Milliseconds())
 		maxBytes := topicLimit(t, "retention.bytes", n.cfg.RetentionBytesPerPartition)
 		if ms < 0 && maxBytes < 0 {
 			continue

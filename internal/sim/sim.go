@@ -175,7 +175,7 @@ func Run(cfg Config) Result {
 	w.opts.changes = w.opts.nodes > 1 && pick.Chance(0.5)     // drawn last, so older seeds keep their other choices
 	w.opts.retainMs = []int64{0, 0, 1000, 3000}[pick.Intn(4)] // last again
 	if w.opts.retainMs > 0 {
-		w.bcfg.RetentionMs = time.Duration(w.opts.retainMs) * time.Millisecond
+		w.bcfg.RetentionTime = time.Duration(w.opts.retainMs) * time.Millisecond
 		w.bcfg.RetentionSlack = []float64{1.5, 2}[pick.Intn(2)]
 	}
 	if cfg.Calm {
@@ -183,7 +183,7 @@ func Run(cfg Config) Result {
 	}
 	if cfg.Mutate != nil {
 		cfg.Mutate(&w.bcfg)
-		w.opts.retainMs = w.bcfg.RetentionMs.Milliseconds()
+		w.opts.retainMs = w.bcfg.RetentionTime.Milliseconds()
 	}
 	strict := w.bcfg.Sync == broker.SyncAlways
 	if w.opts.nodes > 1 && !strict {
@@ -371,7 +371,7 @@ func (w *world) finalChecks() {
 	w.stats.BytesRelocated += int(leader.inc.n.Metrics().RelocatedBytes)
 	// A restarted leader may legitimately trim again; I6 is about replay.
 	for _, nd := range w.nodes {
-		nd.cfg.RetentionBytes, nd.cfg.RetentionMs = 0, 0
+		nd.cfg.RetentionBytes, nd.cfg.RetentionTime = 0, 0
 		nd.cfg.RetentionSlack = math.Inf(1) // and may clean again
 	}
 	for _, power := range []bool{false, true} {

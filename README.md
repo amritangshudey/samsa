@@ -29,7 +29,7 @@ Topics are never created automatically, hence the `topic` tool. `-sync
 always` (the default) acknowledges a write only after fsync; `interval` and
 `never` trade that for speed, on a single node only: a cluster needs `always`.
 Topics set `retention.ms` and `retention.bytes` (per partition) at
-creation or with `kafka-configs.sh --alter`; `-retention-ms` and
+creation or with `kafka-configs.sh --alter`; `-retention-time` and
 `-retention-bytes-per-partition` are the defaults for topics that set none
 (default: keep everything). Consumers below a partition's new start get
 `OFFSET_OUT_OF_RANGE`. Live data is copied forward out of the oldest
