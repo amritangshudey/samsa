@@ -144,6 +144,8 @@ func (n *Node) describeConfigs(c *conn, req *wire.DescribeConfigsRequest) *wire.
 	static := wire.ConfigSourceStaticBroker
 	topicConfigs := []wire.ConfigEntry{
 		{Name: "cleanup.policy", Value: "delete", Source: wire.ConfigSourceDefault, Type: list},
+		{Name: "delete.retention.ms", Value: strconv.FormatInt(n.cfg.DeleteRetentionTime.Milliseconds(), 10), Source: static, Type: long},
+		{Name: "min.compaction.lag.ms", Value: "0", Source: wire.ConfigSourceDefault, Type: long},
 		{Name: "max.message.bytes", Value: maxBatch, Source: static, Type: integer},
 		{Name: "retention.bytes", Value: "-1", Source: wire.ConfigSourceDefault, Type: long}, // per partition; the log-wide bound is log.retention.bytes
 		{Name: "retention.ms", Value: "-1", Source: wire.ConfigSourceDefault, Type: long},
@@ -311,6 +313,8 @@ func (n *Node) alterConfigs(c *conn, h wire.RequestHeader, req *wire.Incremental
 			changes, out.ErrorMessage = configChanges(res.Configs)
 			if out.ErrorMessage != "" {
 				out.ErrorCode = wire.ErrInvalidConfig
+			} else if need := changesLevel(changes); n.levelRefused(need) != "" && n.knowsLeader() {
+				out.ErrorCode, out.ErrorMessage = wire.ErrUnsupportedVersion, n.levelRefused(need)
 			}
 		}
 		if res.Type == wire.ResourceTopic {

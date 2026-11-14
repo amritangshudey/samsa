@@ -78,6 +78,8 @@ func run() error {
 	retention := flag.Int64("retention-bytes", 0, "a safety limit on the whole log on disk: past it, the oldest data goes even if its topic would keep it (0: none)")
 	retentionTime := flag.Duration("retention-time", 0, "how long a topic without retention.ms keeps records (0: forever)")
 	retentionPart := flag.Int64("retention-bytes-per-partition", 0, "how many bytes a partition of a topic without retention.bytes keeps (0: no limit)")
+	deleteRetention := flag.Duration("delete-retention-time", 0, "how long a tombstone of a compacted topic without delete.retention.ms is kept once it is the latest record of its key (0: 24h)")
+	mapBytes := flag.Int64("compaction-map-bytes", 0, "memory for the key maps of compacted partitions; a partition with more keys is not compacted (0: 64 MiB)")
 	slack := flag.Float64("retention-slack", 2, "how many times the live data the log may grow to before live batches are copied forward and the oldest segment freed")
 	producerExpiry := flag.Duration("producer-expiry", 24*time.Hour, "forget an idempotent producer after it writes nothing for this long (negative: never)")
 	logLevel := flag.String("log-level", "info", "debug, info, warn or error")
@@ -227,6 +229,7 @@ func run() error {
 		NodeID: int32(*nodeID), Host: host, Port: int32(port), Peers: peers, Join: *join,
 		Sync: policy, SyncInterval: *syncInterval, Logger: logger, RetentionBytes: *retention, ProducerExpiry: *producerExpiry,
 		RetentionTime: *retentionTime, RetentionBytesPerPartition: *retentionPart, RetentionSlack: *slack,
+		DeleteRetentionTime: *deleteRetention, CompactionMapBytes: *mapBytes,
 		Faults: faults, SASL: sasl, Authorization: auth,
 	}
 	if auth != nil && sasl == nil {

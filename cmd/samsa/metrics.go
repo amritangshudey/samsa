@@ -79,6 +79,7 @@ func writeMetrics(w io.Writer, m broker.Metrics) {
 	metric("samsa_connections_dropped_total", "counter", "Client connections closed by the node for bad input or limits.", m.Dropped)
 	metric("samsa_faults_injected_total", "counter", "Faults injected on purpose (-faults).", m.Faults)
 	metric("samsa_relocated_bytes_total", "counter", "Bytes the retention cleaner copied forward while this node led.", m.RelocatedBytes)
+	metric("samsa_compacted_records_total", "counter", "Records the key compactor removed while this node led.", m.CompactedRecords)
 	metric("samsa_forced_retention_bytes_total", "counter", "Live bytes dropped because live data alone exceeded -retention-bytes.", m.ForcedRetentionBytes)
 	metric("samsa_connections", "gauge", "Client connections open.", m.Open)
 	metric("samsa_raft_leader", "gauge", "1 if this node is the Raft leader.", b(m.Leader))

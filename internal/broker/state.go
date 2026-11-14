@@ -12,6 +12,7 @@ import (
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/amritangshudey/samsa/internal/raft"
 	"github.com/amritangshudey/samsa/internal/scram"
@@ -43,14 +44,18 @@ const (
 	// Topic configurations and the cleaner (docs/design/c2-retention-compaction.md).
 	cmdTopicConfigs byte = 16
 	cmdRelocate     byte = 17
+	// Key compaction (docs/design/c2b-compaction.md).
+	cmdCompact byte = 18
 )
 
 // formatLevel is the highest cluster format level this build reads and
 // writes. Level 0 is v0.2.0's formats; level 1 adds the ACL, credential,
 // forwarding and level commands, and Raft configuration entries; level 2
-// topic configurations, relocated batches and state snapshot version 8.
+// topic configurations, relocated batches and state snapshot version 8;
+// level 3 compaction: cmdCompact, and the config values compact,
+// delete.retention.ms and min.compaction.lag.ms.
 // Raise it with every change to what the log or a snapshot may hold.
-const formatLevel = 2
+const formatLevel = 3
 
 // errBadCommand marks a command in the log that cannot be decoded. The log
 // is checksummed, so this means a bug or a newer on-disk format, and the
@@ -71,7 +76,47 @@ func encodeCreateTopic(name string, partitions int32, configs map[string]string)
 
 // topicConfigKeys are the topic configurations Samsa keeps (design C2,
 // section 3).
-var topicConfigKeys = []string{"cleanup.policy", "retention.bytes", "retention.ms"}
+var topicConfigKeys = []string{"cleanup.policy", "delete.retention.ms", "min.compaction.lag.ms", "retention.bytes", "retention.ms"}
+
+// configLevel is the format level a config setting needs: 2 for
+// retention, 3 for compaction.
+func configLevel(name, value string) byte {
+	if name == "delete.retention.ms" || name == "min.compaction.lag.ms" || name == "cleanup.policy" && value != "delete" {
+		return 3
+	}
+	return 2
+}
+
+// changesLevel is the format level a topic config command needs.
+func changesLevel(changes []configChange) byte {
+	need := byte(2)
+	for _, c := range changes {
+		v := c.value
+		if c.delete {
+			v = "delete" // removing a setting needs no more than retention did
+		}
+		need = max(need, configLevel(c.name, v))
+	}
+	return need
+}
+
+// configsLevel is the format level a topic's initial configs need.
+func configsLevel(configs map[string]string) byte {
+	need := byte(2)
+	for k, v := range configs {
+		need = max(need, configLevel(k, v))
+	}
+	return need
+}
+
+// compacts reports whether a topic's cleanup.policy includes compact, and
+// deletes whether it includes delete: the default, and the only one before
+// level 3. A topic with both is expired and compacted.
+func compacts(t *topic) bool { return strings.Contains(t.configs["cleanup.policy"], "compact") }
+func deletes(t *topic) bool {
+	p, ok := t.configs["cleanup.policy"]
+	return !ok || strings.Contains(p, "delete")
+}
 
 // checkTopicConfig returns why value is not acceptable for name, or "".
 func checkTopicConfig(name, value string) string {
@@ -80,9 +125,15 @@ func checkTopicConfig(name, value string) string {
 		if v, err := strconv.ParseInt(value, 10, 64); err != nil || v < -1 {
 			return fmt.Sprintf("Invalid value %s for configuration %s: must be an integer of at least -1", value, name)
 		}
+	case "delete.retention.ms", "min.compaction.lag.ms":
+		if v, err := strconv.ParseInt(value, 10, 64); err != nil || v < 0 {
+			return fmt.Sprintf("Invalid value %s for configuration %s: must be an integer of at least 0", value, name)
+		}
 	case "cleanup.policy":
-		if value != "delete" {
-			return fmt.Sprintf("Invalid value %s for configuration cleanup.policy: only delete is supported", value)
+		switch value {
+		case "delete", "compact", "compact,delete", "delete,compact":
+		default:
+			return fmt.Sprintf("Invalid value %s for configuration cleanup.policy: must be delete, compact or compact,delete", value)
 		}
 	default:
 		return "Unknown topic config name: " + name
@@ -151,6 +202,21 @@ func readTopicConfigs(r *wire.Reader) (string, []configChange, bool) {
 func encodeRelocate(topic string, partition int32, base, from int64, batch []byte) []byte {
 	w := wire.Writer{B: make([]byte, 0, 1+2+len(topic)+4+16+len(batch))}
 	w.Int8(int8(cmdRelocate))
+	w.String(false, topic)
+	w.Int32(partition)
+	w.Int64(base)
+	w.Int64(from)
+	w.B = append(w.B, batch...)
+	return w.B
+}
+
+// encodeCompact replaces the batch a partition references at base, read at
+// log index from, with batch, which holds only some of its records and
+// keeps its offsets; an empty batch removes the reference
+// (docs/design/c2b-compaction.md, section 3.3).
+func encodeCompact(topic string, partition int32, base, from int64, batch []byte) []byte {
+	w := wire.Writer{B: make([]byte, 0, 1+2+len(topic)+4+16+len(batch))}
+	w.Int8(int8(cmdCompact))
 	w.String(false, topic)
 	w.Int32(partition)
 	w.Int64(base)
@@ -512,6 +578,7 @@ func (s *state) partition(name string, index int32) *partition {
 // proposed it.
 type result struct {
 	errCode    int16
+	applied    bool       // Compact: the batch was replaced
 	baseOffset int64      // Append: offset assigned to the batch's first record; DeleteRecords: the new start
 	acls       []wire.ACL // DeleteAcls: the ACLs removed
 	// origin and tag are set for a forwarded command: the node that is
@@ -656,6 +723,9 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 					}
 				}
 				p.batches = slices.Delete(p.batches, 0, drop)
+				if drop == 0 && !s.trimResetsStart {
+					continue // nothing of this partition went: compaction may have left the first batch after the start
+				}
 				// Only up: a DeleteRecords may have put it inside the first batch.
 				start := p.next
 				if len(p.batches) > 0 {
@@ -828,16 +898,55 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 		// copy is never referenced.
 		if p := s.partition(name, part); p != nil {
 			i, found := slices.BinarySearchFunc(p.batches, base, func(b batchRef, base int64) int { return cmp.Compare(b.base, base) })
-			// The copy must span the same offsets as the batch it replaces.
+			// The copy must stay within the offsets of the batch it
+			// replaces. A batch the cleaner already compacted has gaps, so
+			// the count may be less than the span.
 			end := p.next
 			if found && i+1 < len(p.batches) {
 				end = p.batches[i+1].base
 			}
-			if found && int64(info.Count) != end-base {
+			if found && (int64(info.Count) > end-base || base+int64(wire.BatchLastOffsetDelta(r.Rest())) >= end) {
 				return result{}, fmt.Errorf("%w: relocate of %d records over offsets %d to %d at index %d", errBadCommand, info.Count, base, end, index)
 			}
 			if found && p.batches[i].logIndex == from {
 				p.batches[i].logIndex, p.batches[i].size = index, int32(raft.EntryBytes(len(cmd)))
+			}
+		}
+		return result{}, nil
+
+	case cmdCompact:
+		name, part, base, from := r.String(false), r.Int32(), r.Int64(), r.Int64()
+		rest := r.Rest()
+		var info wire.BatchInfo
+		if len(rest) > 0 {
+			var code int16
+			info, code = wire.ParseCompacted(rest, len(rest))
+			if code != wire.ErrNone || info.Size != len(rest) {
+				return result{}, fmt.Errorf("%w: compacted batch at index %d", errBadCommand, index)
+			}
+		}
+		if r.Err() != nil || from >= index || s.level < 3 {
+			return result{}, fmt.Errorf("%w: compact at index %d", errBadCommand, index)
+		}
+		// As for a relocation, only a batch still referenced where the
+		// leader read it changes.
+		if p := s.partition(name, part); p != nil {
+			i, found := slices.BinarySearchFunc(p.batches, base, func(b batchRef, base int64) int { return cmp.Compare(b.base, base) })
+			if found && p.batches[i].logIndex == from {
+				end := p.next
+				if i+1 < len(p.batches) {
+					end = p.batches[i+1].base
+				}
+				switch {
+				case len(rest) == 0:
+					p.batches = slices.Delete(p.batches, i, i+1)
+					return result{applied: true}, nil
+				case base+int64(wire.BatchLastOffsetDelta(rest)) >= end:
+					return result{}, fmt.Errorf("%w: compacted batch at index %d reaches offset %d, past %d", errBadCommand, index, base+int64(wire.BatchLastOffsetDelta(rest)), end-1)
+				default:
+					p.batches[i].logIndex, p.batches[i].size = index, int32(raft.EntryBytes(len(cmd)))
+					return result{applied: true}, nil
+				}
 			}
 		}
 		return result{}, nil
@@ -896,13 +1005,13 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 // appendBatch returns the record batch inside an Append or Relocate
 // command, or nil.
 func appendBatch(cmd []byte) []byte {
-	if len(cmd) == 0 || cmd[0] != cmdAppend && cmd[0] != cmdRelocate {
+	if len(cmd) == 0 || cmd[0] != cmdAppend && cmd[0] != cmdRelocate && cmd[0] != cmdCompact {
 		return nil
 	}
 	r := wire.NewReader(cmd[1:])
 	r.String(false)
 	r.Int32()
-	if cmd[0] == cmdRelocate {
+	if cmd[0] == cmdRelocate || cmd[0] == cmdCompact {
 		r.Int64() // base
 		r.Int64() // the log index it was copied from
 	}

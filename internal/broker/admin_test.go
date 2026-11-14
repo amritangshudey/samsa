@@ -330,7 +330,8 @@ func TestAlterConfigs(t *testing.T) {
 		{Name: "retention.ms", Operation: wire.ConfigAppend, Value: "1"},
 		set("retention.ms", "-2"),
 		set("retention.ms", "soon"),
-		set("cleanup.policy", "compact"), // part (b)
+		set("cleanup.policy", "archive"),
+		set("delete.retention.ms", "-1"),
 		set("no.such.config", "1"),
 		{Name: "retention.ms", Operation: wire.ConfigSet, Null: true},
 	} {

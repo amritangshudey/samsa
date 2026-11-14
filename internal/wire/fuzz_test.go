@@ -103,5 +103,21 @@ func FuzzBatch(f *testing.F) {
 			t.Fatalf("base offset changed validity: %d", code)
 		}
 		DecodeBatch(b) // may fail (compressed or malformed records) but must not panic
+		// The cleaner's view: splitting must not panic, and keeping every
+		// other record of a batch it accepts must give a batch it accepts,
+		// with the same last offset.
+		if recs, err := SplitBatch(b); err == nil {
+			keep := make([]bool, len(recs))
+			for i := range keep {
+				keep[i] = i%2 == 0
+			}
+			out := KeepRecords(b, recs, keep)
+			if out == nil {
+				t.Fatalf("kept %d of %d records and got no batch", (len(recs)+1)/2, len(recs))
+			}
+			if _, code := ParseCompacted(out, 1<<16); code != ErrNone || BatchLastOffsetDelta(out) != BatchLastOffsetDelta(b) {
+				t.Fatalf("rewritten batch: code %d, last offset delta %d, was %d", code, BatchLastOffsetDelta(out), BatchLastOffsetDelta(b))
+			}
+		}
 	})
 }

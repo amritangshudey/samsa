@@ -23,6 +23,8 @@ type Metrics struct {
 	// ForcedRetentionBytes the live bytes -retention-bytes dropped because
 	// live data alone exceeded it (design C2).
 	RelocatedBytes, ForcedRetentionBytes int64
+	// CompactedRecords counts the records the compactor removed as leader.
+	CompactedRecords int64
 
 	Leader, Serving                               bool
 	Term, Committed, Applied, LogStart, LastIndex int64
@@ -39,6 +41,7 @@ type counters struct {
 	requests                        [128]int64
 	bytesIn, bytesOut, conns, drops int64
 	relocatedBytes, forcedBytes     int64
+	compactedRecords                int64
 }
 
 // Metrics returns the node's counters and gauges. A node is ready when it
@@ -48,7 +51,7 @@ func (n *Node) Metrics() Metrics {
 	m := Metrics{
 		Requests: n.stats.requests, BytesIn: n.stats.bytesIn, BytesOut: n.stats.bytesOut,
 		Connections: n.stats.conns, Dropped: n.stats.drops, Open: len(n.conns), Faults: n.faults.count,
-		RelocatedBytes: n.stats.relocatedBytes, ForcedRetentionBytes: n.stats.forcedBytes,
+		RelocatedBytes: n.stats.relocatedBytes, CompactedRecords: n.stats.compactedRecords, ForcedRetentionBytes: n.stats.forcedBytes,
 		Leader: n.raft.Role() == raft.Leader, Serving: n.serving,
 		Term: n.raft.Term(), Committed: n.raft.Committed(), Applied: n.applied,
 		LogStart: n.raft.LogStart(), LastIndex: n.raft.LastIndex(), Snapshot: n.raft.SnapshotIndex(),
