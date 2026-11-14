@@ -13,10 +13,11 @@ import (
 // Version 2 adds the log start and each partition's start offset; version 3
 // each partition's idempotent producers; version 4 each producer's last
 // log index; version 5 the ACLs; version 6 the SCRAM credentials; version
-// 7 the format level. Each later field comes last, so the encoder writes
-// the oldest version that holds the state: an older build in the cluster
+// 7 the format level; version 8 topic configurations and batch sizes
+// (design C2). Each later field comes last, so the encoder writes the
+// oldest version that holds the state: an older build in the cluster
 // during a rolling upgrade can still read it (design G7).
-const snapshotVersion = 7
+const snapshotVersion = 8
 
 // encode returns the whole state machine as bytes, for a Raft snapshot
 // (docs/design/a1-snapshots.md). Maps are walked in sorted order, so equal
@@ -25,6 +26,8 @@ const snapshotVersion = 7
 func (s *state) encode() []byte {
 	version := byte(4)
 	switch {
+	case s.level >= 2:
+		version = 8
 	case s.level > 0:
 		version = 7
 	case len(s.acls) > 0 || len(s.creds) > 0:
@@ -119,6 +122,27 @@ func (s *state) encode() []byte {
 	if version >= 7 {
 		w.Int8(int8(s.level))
 	}
+	if version >= 8 {
+		var configured []string
+		for _, name := range s.names {
+			if s.topics[name].configs != nil {
+				configured = append(configured, name)
+			}
+		}
+		w.ArrayLen(false, len(configured))
+		for _, name := range configured {
+			w.String(false, name)
+			writeConfigs(&w, s.topics[name].configs)
+		}
+		// Sizes in the order of the batches above.
+		for _, name := range s.names {
+			for _, p := range s.topics[name].parts {
+				for _, b := range p.batches {
+					w.Int32(b.size)
+				}
+			}
+		}
+	}
 	return w.B
 }
 
@@ -148,7 +172,7 @@ func decodeState(b []byte) (*state, error) {
 			})
 			// The first batch holds the start: DeleteRecords can put it inside.
 			if p.start < 0 || p.start > p.next || len(p.batches) > 0 && (p.batches[0].base > p.start || p.start == p.next ||
-				len(p.batches) > 1 && p.batches[1].base <= p.start || p.batches[0].logIndex < s.logStart) {
+				len(p.batches) > 1 && p.batches[1].base <= p.start || slices.ContainsFunc(p.batches, func(b batchRef) bool { return b.logIndex < s.logStart })) {
 				bad = true
 			}
 			if v >= 3 {
@@ -250,6 +274,28 @@ func decodeState(b []byte) (*state, error) {
 		level := r.Int8()
 		bad = bad || (r.Err() == nil && (level < 1 || level > formatLevel))
 		s.level = byte(level)
+	}
+	if v >= 8 {
+		last := ""
+		wire.Array(r, false, func() struct{} {
+			name := r.String(false)
+			configs, ok := readConfigs(r)
+			t := s.topics[name]
+			bad = bad || r.Err() == nil && (!ok || len(configs) == 0 || t == nil || name <= last)
+			if t != nil {
+				t.configs = configs
+			}
+			last = name
+			return struct{}{}
+		})
+		for _, name := range s.names {
+			for _, p := range s.topics[name].parts {
+				for i := range p.batches {
+					p.batches[i].size = r.Int32()
+					bad = bad || p.batches[i].size < 0
+				}
+			}
+		}
 	}
 	if r.Err() != nil || r.Len() != 0 || bad {
 		return nil, fmt.Errorf("%w: snapshot state: %w, %d bytes left, malformed %v", errBadCommand, r.Err(), r.Len(), bad)

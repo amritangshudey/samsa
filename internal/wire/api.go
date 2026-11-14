@@ -78,6 +78,7 @@ const (
 	ErrInvalidPartitions           int16 = 37
 	ErrInvalidReplicationFactor    int16 = 38
 	ErrInvalidReplicaAssignment    int16 = 39
+	ErrInvalidConfig               int16 = 40
 	ErrNotController               int16 = 41
 	ErrInvalidRequest              int16 = 42
 	ErrRequestTimedOut             int16 = 7

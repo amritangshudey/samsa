@@ -313,6 +313,23 @@ func (n *Node) adopt(st *state) {
 	st.noFencing, st.noSequences = n.cfg.UnsafeNoFencing, n.cfg.UnsafeNoSequenceCheck
 	st.keepOffsetsOnDelete, st.trimResetsStart = n.cfg.UnsafeKeepOffsetsOnDelete, n.cfg.UnsafeTrimResetsStart
 	n.st = st
+	// A snapshot older than version 8 has no batch sizes; the cleaner's
+	// sum of live bytes needs them. A failed read leaves 0: fetch reports
+	// a read failure of committed data itself.
+	for _, name := range st.names {
+		for _, p := range st.topics[name].parts {
+			for i, b := range p.batches {
+				if b.size != 0 {
+					continue
+				}
+				if cmd, _, err := n.raft.Read(b.logIndex); err == nil {
+					if info, ok := wire.PeekBatch(appendBatch(cmd)); ok {
+						p.batches[i].size = int32(info.Size)
+					}
+				}
+			}
+		}
+	}
 }
 
 // raftEnv is the node as Raft sees it.
@@ -894,6 +911,9 @@ func (n *Node) dispatch(c *conn, frame []byte) {
 	case wire.KeyDeleteRecords:
 		m := &wire.DeleteRecordsRequest{}
 		req, handle = m, func() { n.deleteRecords(c, h, m) }
+	case wire.KeyIncrementalAlterConfigs:
+		m := &wire.IncrementalAlterConfigsRequest{}
+		req, handle = m, func() { n.alterConfigs(c, h, m) }
 	case wire.KeyDescribeConfigs:
 		m := &wire.DescribeConfigsRequest{}
 		req, handle = m, func() { n.respond(c, h, n.describeConfigs(c, m)) }

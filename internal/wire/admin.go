@@ -256,6 +256,7 @@ const (
 
 // Config sources, as DescribeConfigs reports them.
 const (
+	ConfigSourceDynamicTopic int8 = 1
 	ConfigSourceStaticBroker int8 = 4
 	ConfigSourceDefault      int8 = 5
 )

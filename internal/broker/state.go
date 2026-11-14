@@ -11,6 +11,7 @@ import (
 	"hash/crc32"
 	"slices"
 	"sort"
+	"strconv"
 
 	"github.com/amritangshudey/samsa/internal/scram"
 	"github.com/amritangshudey/samsa/internal/wire"
@@ -38,23 +39,108 @@ const (
 	cmdForwarded        byte = 14
 	// The cluster's format level (docs/design/g7-rolling-upgrade.md).
 	cmdSetLevel byte = 15
+	// Topic configurations and the cleaner (docs/design/c2-retention-compaction.md).
+	cmdTopicConfigs byte = 16
+	cmdRelocate     byte = 17
 )
 
 // formatLevel is the highest cluster format level this build reads and
 // writes. Level 0 is v0.2.0's formats; level 1 adds the ACL, credential,
-// forwarding and level commands, and Raft configuration entries. Raise it
-// with every change to what the log or a snapshot may hold.
-const formatLevel = 1
+// forwarding and level commands, and Raft configuration entries; level 2
+// topic configurations, relocated batches and state snapshot version 8.
+// Raise it with every change to what the log or a snapshot may hold.
+const formatLevel = 2
 
 // errBadCommand marks a command in the log that cannot be decoded. The log
 // is checksummed, so this means a bug or a newer on-disk format, and the
 // node refuses to continue.
 var errBadCommand = errors.New("broker: undecodable command in log")
 
-func encodeCreateTopic(name string, partitions int32) []byte {
+// encodeCreateTopic creates a topic. Configs, at format level 2, come
+// after the partition count: an older build never sees them.
+func encodeCreateTopic(name string, partitions int32, configs map[string]string) []byte {
 	w := wire.Writer{B: []byte{cmdCreateTopic}}
 	w.String(false, name)
 	w.Int32(partitions)
+	if len(configs) > 0 {
+		writeConfigs(&w, configs)
+	}
+	return w.B
+}
+
+// topicConfigKeys are the topic configurations Samsa keeps (design C2,
+// section 3).
+var topicConfigKeys = []string{"cleanup.policy", "retention.bytes", "retention.ms"}
+
+// checkTopicConfig returns why value is not acceptable for name, or "".
+func checkTopicConfig(name, value string) string {
+	switch name {
+	case "retention.ms", "retention.bytes":
+		if v, err := strconv.ParseInt(value, 10, 64); err != nil || v < -1 {
+			return fmt.Sprintf("Invalid value %s for configuration %s: must be an integer of at least -1", value, name)
+		}
+	case "cleanup.policy":
+		if value != "delete" {
+			return fmt.Sprintf("Invalid value %s for configuration cleanup.policy: only delete is supported", value)
+		}
+	default:
+		return "Unknown topic config name: " + name
+	}
+	return ""
+}
+
+func writeConfigs(w *wire.Writer, configs map[string]string) {
+	keys := sortedKeys(configs)
+	w.ArrayLen(false, len(keys))
+	for _, k := range keys {
+		w.String(false, k)
+		w.String(false, configs[k])
+	}
+}
+
+// readConfigs reads what writeConfigs wrote, and reports whether every
+// entry is valid, sorted and unique.
+func readConfigs(r *wire.Reader) (map[string]string, bool) {
+	configs, ok, last := map[string]string{}, true, ""
+	wire.Array(r, false, func() struct{} {
+		k, v := r.String(false), r.String(false)
+		if r.Err() == nil && (checkTopicConfig(k, v) != "" || len(configs) > 0 && k <= last) {
+			ok = false
+		}
+		configs[k], last = v, k
+		return struct{}{}
+	})
+	return configs, ok
+}
+
+// configChange is one change of a cmdTopicConfigs: a set, or a delete.
+type configChange struct {
+	name, value string
+	delete      bool
+}
+
+func encodeTopicConfigs(topic string, changes []configChange) []byte {
+	w := wire.Writer{B: []byte{cmdTopicConfigs}}
+	w.String(false, topic)
+	w.ArrayLen(false, len(changes))
+	for _, c := range changes {
+		w.String(false, c.name)
+		w.Bool(c.delete)
+		w.String(false, c.value)
+	}
+	return w.B
+}
+
+// encodeRelocate copies a batch that the partition references at log index
+// from to the end of the log (design C2, section 3).
+func encodeRelocate(topic string, partition int32, base, from int64, batch []byte) []byte {
+	w := wire.Writer{B: make([]byte, 0, 1+2+len(topic)+4+16+len(batch))}
+	w.Int8(int8(cmdRelocate))
+	w.String(false, topic)
+	w.Int32(partition)
+	w.Int64(base)
+	w.Int64(from)
+	w.B = append(w.B, batch...)
 	return w.B
 }
 
@@ -94,8 +180,11 @@ func encodeAppend(topic string, partition int32, batch []byte) []byte {
 // batchRef locates one record batch of a partition in the command log.
 type batchRef struct {
 	base         int64 // partition offset of the batch's first record
-	logIndex     int64 // index of the Append command holding the batch
+	logIndex     int64 // index of the Append or Relocate command holding the batch
 	maxTimestamp int64
+	// size is the batch's length in bytes, for the cleaner. It is not
+	// hashed; 0 means unknown, after a snapshot older than version 8.
+	size int32
 }
 
 type partition struct {
@@ -205,6 +294,9 @@ func encodeTrim(cut int64) []byte {
 type topic struct {
 	name  string
 	parts []*partition
+	// configs holds the topic's own configurations, checked by
+	// checkTopicConfig; nil if it has none.
+	configs map[string]string
 }
 
 // state is the broker's state machine. It changes only in apply, which is a
@@ -431,6 +523,13 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 			return result{errCode: wire.ErrTopicAlreadyExists}, nil
 		}
 		t := &topic{name: name, parts: make([]*partition, parts)}
+		if r.Len() > 0 {
+			configs, ok := readConfigs(r)
+			if r.Err() != nil || r.Len() != 0 || !ok {
+				return result{}, fmt.Errorf("%w: create topic configs at index %d", errBadCommand, index)
+			}
+			t.configs = configs
+		}
 		for i := range t.parts {
 			t.parts[i] = &partition{}
 		}
@@ -463,7 +562,7 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 			}
 		}
 		base := p.next
-		p.batches = append(p.batches, batchRef{base: base, logIndex: index, maxTimestamp: info.MaxTimestamp})
+		p.batches = append(p.batches, batchRef{base: base, logIndex: index, maxTimestamp: info.MaxTimestamp, size: int32(info.Size)})
 		p.next += int64(info.Count)
 		if idempotent {
 			p.remember(info, base, index)
@@ -530,8 +629,17 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 		s.logStart = cut
 		for _, name := range s.names {
 			for _, p := range s.topics[name].parts {
-				keep := sort.Search(len(p.batches), func(i int) bool { return p.batches[i].logIndex >= cut })
-				p.batches = slices.Delete(p.batches, 0, keep)
+				// Relocated batches are out of log order. The cleaner moves
+				// every live batch above the cut first; when the global
+				// bound cuts through live data, every batch up to the last
+				// one below the cut goes, so that offsets stay dense.
+				drop := 0
+				for i, b := range p.batches {
+					if b.logIndex < cut {
+						drop = i + 1
+					}
+				}
+				p.batches = slices.Delete(p.batches, 0, drop)
 				// Only up: a DeleteRecords may have put it inside the first batch.
 				start := p.next
 				if len(p.batches) > 0 {
@@ -669,6 +777,63 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 		res.origin, res.tag = origin, uint64(tag)
 		return res, err
 
+	case cmdTopicConfigs:
+		name := r.String(false)
+		changes := wire.Array(r, false, func() configChange {
+			return configChange{name: r.String(false), delete: r.Bool(), value: r.String(false)}
+		})
+		if r.Err() != nil || r.Len() != 0 {
+			return result{}, fmt.Errorf("%w: topic configs at index %d", errBadCommand, index)
+		}
+		for _, c := range changes {
+			if !slices.Contains(topicConfigKeys, c.name) || !c.delete && checkTopicConfig(c.name, c.value) != "" {
+				return result{}, fmt.Errorf("%w: topic config %s=%s at index %d", errBadCommand, c.name, c.value, index)
+			}
+		}
+		t := s.topics[name]
+		if t == nil {
+			return result{errCode: wire.ErrUnknownTopicOrPartition}, nil
+		}
+		for _, c := range changes {
+			switch {
+			case c.delete:
+				delete(t.configs, c.name)
+			case t.configs == nil:
+				t.configs = map[string]string{c.name: c.value}
+			default:
+				t.configs[c.name] = c.value
+			}
+		}
+		if len(t.configs) == 0 {
+			t.configs = nil
+		}
+		return result{}, nil
+
+	case cmdRelocate:
+		name, part, base, from := r.String(false), r.Int32(), r.Int64(), r.Int64()
+		info, ok := wire.PeekBatch(r.Rest())
+		if r.Err() != nil || !ok || from >= index {
+			return result{}, fmt.Errorf("%w: relocate at index %d", errBadCommand, index)
+		}
+		// Only a batch still referenced where the leader read it moves.
+		// Otherwise it expired, was deleted or moved meanwhile, and the
+		// copy is never referenced.
+		if p := s.partition(name, part); p != nil {
+			i, found := slices.BinarySearchFunc(p.batches, base, func(b batchRef, base int64) int { return cmp.Compare(b.base, base) })
+			// The copy must span the same offsets as the batch it replaces.
+			end := p.next
+			if found && i+1 < len(p.batches) {
+				end = p.batches[i+1].base
+			}
+			if found && int64(info.Count) != end-base {
+				return result{}, fmt.Errorf("%w: relocate of %d records over offsets %d to %d at index %d", errBadCommand, info.Count, base, end, index)
+			}
+			if found && p.batches[i].logIndex == from {
+				p.batches[i].logIndex, p.batches[i].size = index, int32(info.Size)
+			}
+		}
+		return result{}, nil
+
 	case cmdSetLevel:
 		level := r.Int8()
 		switch {
@@ -720,14 +885,19 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 	return result{}, fmt.Errorf("%w: unknown type %d at index %d", errBadCommand, cmd[0], index)
 }
 
-// appendBatch returns the record batch inside an Append command, or nil.
+// appendBatch returns the record batch inside an Append or Relocate
+// command, or nil.
 func appendBatch(cmd []byte) []byte {
-	if len(cmd) == 0 || cmd[0] != cmdAppend {
+	if len(cmd) == 0 || cmd[0] != cmdAppend && cmd[0] != cmdRelocate {
 		return nil
 	}
 	r := wire.NewReader(cmd[1:])
 	r.String(false)
 	r.Int32()
+	if cmd[0] == cmdRelocate {
+		r.Int64() // base
+		r.Int64() // the log index it was copied from
+	}
 	if r.Err() != nil {
 		return nil
 	}
@@ -751,6 +921,10 @@ func (s *state) hash() uint32 {
 	for _, name := range s.names { // sorted: never iterate the map
 		t := s.topics[name]
 		sum = crc32.Update(sum, table, []byte(name))
+		for _, k := range sortedKeys(t.configs) { // none before level 2: older hashes unchanged
+			add(int64(len(k)), int64(len(t.configs[k])))
+			sum = crc32.Update(sum, table, []byte(k+t.configs[k]))
+		}
 		add(int64(len(t.parts)))
 		for _, p := range t.parts {
 			add(p.next, p.start, int64(len(p.batches)))

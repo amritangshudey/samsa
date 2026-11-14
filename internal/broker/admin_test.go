@@ -183,7 +183,7 @@ func TestTrimKeepsDeleteRecordsStart(t *testing.T) {
 	for _, reset := range []bool{false, true} {
 		s := newState()
 		s.trimResetsStart = reset
-		cmds := [][]byte{encodeCreateTopic("t", 1)}
+		cmds := [][]byte{encodeCreateTopic("t", 1, nil)}
 		for range 3 {
 			cmds = append(cmds, encodeAppend("t", 0, batch("a", "b", "c")))
 		}
@@ -211,7 +211,7 @@ func TestDescribeConfigs(t *testing.T) {
 		{Type: wire.ResourceBroker, Name: "7"},
 	}}, &resp)
 	r := resp.Results
-	if len(r) != 4 || len(r[0].Configs) != 1 || r[0].Configs[0].Value != "1073741824" || !r[0].Configs[0].ReadOnly {
+	if len(r) != 4 || len(r[0].Configs) != 1 || r[0].Configs[0].Value != "-1" || r[0].Configs[0].ReadOnly {
 		t.Fatalf("topic keys: %+v", r)
 	}
 	if r[1].ErrorCode != wire.ErrUnknownTopicOrPartition || r[3].ErrorCode != wire.ErrInvalidRequest {
@@ -266,5 +266,139 @@ func TestDescribeCluster(t *testing.T) {
 	h.call(1, wire.KeyDescribeCluster, 2, &wire.DescribeClusterRequest{EndpointType: wire.EndpointControllers}, &resp)
 	if resp.ErrorCode != wire.ErrUnsupportedEndpointType {
 		t.Fatalf("controllers: %+v", resp)
+	}
+}
+
+// IncrementalAlterConfigs sets and deletes topic configs, all of a
+// resource or none of it, and DescribeConfigs reports them.
+func TestAlterConfigs(t *testing.T) {
+	h := newHarness(t, Config{})
+	h.open(1)
+	h.createTopic(1, "t", 1)
+	alter := func(validate bool, res ...wire.AlterConfigsResource) []wire.AlterConfigsResult {
+		t.Helper()
+		var resp wire.IncrementalAlterConfigsResponse
+		h.call(1, wire.KeyIncrementalAlterConfigs, 1, &wire.IncrementalAlterConfigsRequest{Resources: res, ValidateOnly: validate}, &resp)
+		if len(resp.Results) != len(res) {
+			t.Fatalf("%d results for %d resources", len(resp.Results), len(res))
+		}
+		return resp.Results
+	}
+	set := func(name, value string) wire.AlterableConfig {
+		return wire.AlterableConfig{Name: name, Operation: wire.ConfigSet, Value: value}
+	}
+	topic := func(name string, cs ...wire.AlterableConfig) wire.AlterConfigsResource {
+		return wire.AlterConfigsResource{Type: wire.ResourceTopic, Name: name, Configs: cs}
+	}
+	describe := func() map[string]wire.ConfigEntry {
+		t.Helper()
+		var resp wire.DescribeConfigsResponse
+		h.call(1, wire.KeyDescribeConfigs, 4, &wire.DescribeConfigsRequest{Resources: []wire.DescribeConfigsResource{{Type: wire.ResourceTopic, Name: "t"}}}, &resp)
+		m := map[string]wire.ConfigEntry{}
+		for _, e := range resp.Results[0].Configs {
+			m[e.Name] = e
+		}
+		return m
+	}
+
+	if r := alter(true, topic("t", set("retention.ms", "60000"))); r[0].ErrorCode != 0 {
+		t.Fatalf("validate only: %+v", r)
+	}
+	if e := describe()["retention.ms"]; e.Value != "-1" {
+		t.Fatalf("validate only changed the config: %+v", e)
+	}
+	r := alter(false,
+		topic("t", set("retention.ms", "60000"), set("retention.bytes", "1000")),
+		topic("missing", set("retention.ms", "1")),
+		topic("t", set("retention.ms", "1")),
+		wire.AlterConfigsResource{Type: wire.ResourceBroker, Name: "1"},
+	)
+	want := []int16{0, wire.ErrUnknownTopicOrPartition, wire.ErrInvalidRequest, wire.ErrInvalidRequest}
+	for i, w := range want {
+		if r[i].ErrorCode != w {
+			t.Fatalf("result %d: %+v, want error %d", i, r[i], w)
+		}
+	}
+	d := describe()
+	if e := d["retention.ms"]; e.Value != "60000" || e.Source != wire.ConfigSourceDynamicTopic || e.ReadOnly {
+		t.Fatalf("retention.ms: %+v", e)
+	}
+	if e := d["retention.bytes"]; e.Value != "1000" {
+		t.Fatalf("retention.bytes: %+v", e)
+	}
+	for _, bad := range []wire.AlterableConfig{
+		{Name: "retention.ms", Operation: wire.ConfigAppend, Value: "1"},
+		set("retention.ms", "-2"),
+		set("retention.ms", "soon"),
+		set("cleanup.policy", "compact"), // part (b)
+		set("no.such.config", "1"),
+		{Name: "retention.ms", Operation: wire.ConfigSet, Null: true},
+	} {
+		// The valid change beside it must not apply either.
+		if r := alter(false, topic("t", set("retention.bytes", "5"), bad)); r[0].ErrorCode != wire.ErrInvalidConfig {
+			t.Fatalf("%+v: %+v, want INVALID_CONFIG", bad, r[0])
+		}
+	}
+	if e := describe()["retention.bytes"]; e.Value != "1000" {
+		t.Fatalf("a refused resource applied part of its changes: %+v", e)
+	}
+	alter(false, topic("t", wire.AlterableConfig{Name: "retention.ms", Operation: wire.ConfigDelete}))
+	if e := describe()["retention.ms"]; e.Value != "-1" || e.Source != wire.ConfigSourceDefault {
+		t.Fatalf("after delete: %+v", e)
+	}
+	// The configs are state: they survive a restart.
+	h.start()
+	h.open(1)
+	if e := describe()["retention.bytes"]; e.Value != "1000" {
+		t.Fatalf("after restart: %+v", e)
+	}
+}
+
+// CreateTopics keeps the configs Samsa knows, refuses bad values, and
+// refuses configs below format level 2.
+func TestCreateTopicConfigs(t *testing.T) {
+	h := newHarness(t, Config{})
+	h.open(1)
+	h.createTopic(1, "first", 1) // the single node raises its level meanwhile
+	if h.node.st.level < 2 {
+		t.Fatalf("level %d", h.node.st.level)
+	}
+	create := func(name string, cs ...wire.TopicConfig) int16 {
+		t.Helper()
+		var resp wire.CreateTopicsResponse
+		h.call(1, wire.KeyCreateTopics, 4, &wire.CreateTopicsRequest{Topics: []wire.CreateTopic{{Name: name, NumPartitions: 1, ReplicationFactor: 1, Configs: cs}}}, &resp)
+		return resp.Topics[0].ErrorCode
+	}
+	if code := create("t", wire.TopicConfig{Name: "retention.ms", Value: "1000"}, wire.TopicConfig{Name: "segment.ms", Value: "1"}, wire.TopicConfig{Name: "retention.bytes", Null: true}); code != 0 {
+		t.Fatalf("create: %d", code)
+	}
+	if c := h.node.st.topics["t"].configs; len(c) != 1 || c["retention.ms"] != "1000" {
+		t.Fatalf("configs %v", c)
+	}
+	if code := create("u", wire.TopicConfig{Name: "retention.ms", Value: "-5"}); code != wire.ErrInvalidConfig || h.node.st.topics["u"] != nil {
+		t.Fatalf("bad value: %d", code)
+	}
+	h.node.st.level = 1
+	if code := create("v", wire.TopicConfig{Name: "retention.ms", Value: "1"}); code != wire.ErrUnsupportedVersion {
+		t.Fatalf("below level 2: %d", code)
+	}
+	if code := create("w"); code != 0 {
+		t.Fatalf("no configs below level 2: %d", code)
+	}
+}
+
+// A state from a snapshot older than version 8 gets its batch sizes from
+// the log.
+func TestAdoptFillsSizes(t *testing.T) {
+	h := newHarness(t, Config{})
+	h.open(1)
+	h.createTopic(1, "t", 1)
+	h.produce(1, "t", 0, "a", "b")
+	p := h.node.st.topics["t"].parts[0]
+	want := p.batches[0].size
+	p.batches[0].size = 0
+	h.node.adopt(h.node.st)
+	if want <= 0 || p.batches[0].size != want {
+		t.Fatalf("size %d, want %d", p.batches[0].size, want)
 	}
 }
