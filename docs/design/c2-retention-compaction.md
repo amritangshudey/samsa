@@ -218,7 +218,10 @@ not work as a mutation; see review question 1.
 
 ## 4. Design, part (b): compaction
 
-Designed in full after part (a) is merged; the outline:
+**Superseded by `docs/design/c2b-compaction.md`**, written after part (a)
+merged. The outline below is kept as first written; two things changed:
+the key map is not in the state machine, and a compressed batch cannot
+be put in a compacted topic.
 
 - A compacted partition's live records are the newest of each key. A
   tombstone (null value) is live for `delete.retention.ms`.
