@@ -1,0 +1,43 @@
+# systemd unit for one Samsa node. Install it as /etc/systemd/system/samsa.service,
+# put the binary at /usr/local/bin/samsa and the settings in /etc/samsa/samsa.conf
+# (key = value lines, one per flag; see docs/guides/configuration.md), then
+#   useradd --system --no-create-home --shell /usr/sbin/nologin samsa
+#   systemctl daemon-reload && systemctl enable --now samsa
+[Unit]
+Description=Samsa, a Kafka-compatible broker
+Documentation=https://github.com/amritangshudey/samsa
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=samsa
+Group=samsa
+ExecStart=/usr/local/bin/samsa -config /etc/samsa/samsa.conf
+# SIGTERM is a graceful stop: the leader hands over, then exits.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+# A node that stops on a fault it can repair (damaged data on disk, a failed
+# sync) must come back: its next start does the repair. Not for a stop by
+# `systemctl stop`.
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=65536
+
+# The data directory is the only thing the process may write.
+StateDirectory=samsa
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

@@ -28,14 +28,16 @@ type Disk struct {
 // ErrInUse is returned by OpenDisk for a directory another process holds.
 var ErrInUse = errors.New("data directory is in use by another process")
 
-// OpenDisk returns a Disk rooted at dir, creating dir if needed. It takes
+// OpenDisk returns a Disk rooted at dir, creating dir if needed. What it
+// creates is readable by its owner only: the log holds the records, the
+// password verifiers and the ACLs. It takes
 // an exclusive lock on dir/LOCK, so that two processes never share a data
 // directory; the lock goes with the process, however it ends.
 func OpenDisk(dir string) (*Disk, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create data directory: %w", err)
 	}
-	lock, err := os.OpenFile(filepath.Join(dir, "LOCK"), os.O_RDWR|os.O_CREATE, 0o644)
+	lock, err := os.OpenFile(filepath.Join(dir, "LOCK"), os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open lock file: %w", err)
 	}
@@ -74,7 +76,7 @@ func (d *Disk) Open(name string, flag sys.OpenFlag) (sys.File, error) {
 	case sys.Create:
 		mode = os.O_RDWR | os.O_CREATE
 	}
-	f, err := d.root.OpenFile(name, mode, 0o644)
+	f, err := d.root.OpenFile(name, mode, 0o600)
 	if err != nil {
 		return nil, notExist(err)
 	}
@@ -82,7 +84,7 @@ func (d *Disk) Open(name string, flag sys.OpenFlag) (sys.File, error) {
 }
 
 // MkdirAll implements sys.Disk.
-func (d *Disk) MkdirAll(dir string) error { return d.root.MkdirAll(dir, 0o755) }
+func (d *Disk) MkdirAll(dir string) error { return d.root.MkdirAll(dir, 0o700) }
 
 // Remove implements sys.Disk.
 func (d *Disk) Remove(name string) error { return notExist(d.root.Remove(name)) }

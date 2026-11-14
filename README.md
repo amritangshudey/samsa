@@ -173,6 +173,17 @@ APIs and versions: [ADR 0006](docs/adr/0006-api-versions.md) (produce,
 fetch, metadata, offsets, topics) and [ADR 0008](docs/adr/0008-group-api-versions.md)
 (groups) and [ADR 0016](docs/adr/0016-admin-api-versions.md) (admin), each with the versions the three clients were seen to use.
 
+## Running it
+
+`make image` builds an 18 MB container image of the binary alone;
+`packaging/samsa.service` and `packaging/samsa.conf` are a systemd unit and a
+sample configuration for one node of three. The runbook
+(`docs/guides/runbook.md`) covers bringing a cluster up, what to watch,
+rolling upgrades, replacing a node and what to do when something is wrong;
+`docs/guides/configuration.md` covers `-profile` and `samsa doctor`; the
+author's security review, with what it found and what is open, is
+`docs/reports/g8-security-review.md`.
+
 ## What is not supported
 
 Transactions (a transactional producer is refused with `INVALID_REQUEST`),
