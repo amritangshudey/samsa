@@ -41,6 +41,11 @@ each key: a record without a key and a compressed batch are refused on such
 a topic, a tombstone (null value) goes after `delete.retention.ms`, and a
 record younger than `min.compaction.lag.ms` is left alone (ADR 0029,
 `-delete-retention-time`, `-compaction-map-bytes`).
+A scrub reads the sealed segments of the Raft log (`-scrub-bytes-per-second`,
+`-scrub-interval`): a node that finds damaged data stops, and its next start
+cuts the damage out and fetches it again from the others, voting for nobody
+until it has it back (ADR 0030; the active segment and a cluster of one are
+not covered).
 `-producer-expiry` (default 24h) is how long an idempotent producer may
 write nothing before it is forgotten. If it comes back, its next batch
 is refused with `OUT_OF_ORDER_SEQUENCE_NUMBER`, and the Java client starts

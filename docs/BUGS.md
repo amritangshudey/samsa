@@ -426,6 +426,39 @@ for how much that is worth.
 - **Fix:** the read skips a first batch whose last offset is below the
   offset.
 
+### B1-1. A recovering node waited for entries that were never committed (B1, before merge)
+
+- **Seed:** 417 (`make sim SEED=417`), three voters, one damaged.
+- **Reported as:** "with faults stopped for 10s the nodes did not all come
+  back, elect a leader and catch up".
+- **Root cause:** the first design ended recovery when the node's commit
+  reached the end of the log it had held. Part of that log was uncommitted
+  entries that the elected leader never had, so the commit index could never
+  reach it, and with the other voters unable to elect without the recovering
+  one, nothing moved.
+- **Fix:** recovery also ends when the leader's AppendEntries carries no
+  entries beyond what the node holds.
+
+### B1-2. Damage under a snapshot restarted the node for ever (B1, before merge)
+
+- **Seeds:** 6, 61, 62 and others in the first 500.
+- **Reported as:** "node 3 stopped with an error no fault explains: the raft
+  log is damaged".
+- **Root cause:** the first design repaired only what the start-up scan
+  read, which begins after the snapshot. The scrub read the whole log, found
+  damage below it, stopped the node, and the restart found nothing to repair.
+  And damage under the snapshot is not harmless here: the log is the data
+  store, and clients read batches back from it.
+- **Fix:** a durable `damaged` marker, and for damage under the snapshot a
+  repair that empties the log and the snapshot file.
+
+### B1-3. A snapshot's last entry that was damaged stopped the start (B1)
+
+- **Seed:** 1240.
+- **Root cause:** `checkSnapshot` reads the entry at the snapshot index and
+  failed with `ErrCorrupt` before any repair ran.
+- **Fix:** that failure runs the repair and starts again.
+
 ## Bugs in the simulator and tests
 
 ### M8. I6 blamed the broker for a Trim proposed after the final restart (A1 part b)
@@ -669,3 +702,23 @@ would happen against Kafka too (not tested against Kafka).
   orphaned.
 - **Fix:** such a tombstone, read in the final pass, is counted as a record
   of its key at its offset.
+
+### M16. The final log comparison read damage that nobody had found yet (B1)
+
+- **Seeds:** 321, 323, 417 and others in the first 500.
+- **Reported as:** "S2: nodes 5 and 1 differ at log index 520 (storage:
+  corrupt data ...)".
+- **Root cause:** S2 reads every entry of every node when a run settles.
+  Damage injected shortly before the end had not yet been found by the scrub,
+  so the comparison met it.
+- **Fix:** when a run settles, the scrub is run once more on the damaged
+  node, the node restarts and repairs, and the comparison waits until no
+  node is recovering.
+
+### M17. The simulator damaged a cluster that had no minority (B1)
+
+- **Seed:** 417, voters 2 after a membership change.
+- **Reported as:** the nodes never elected a leader.
+- **Root cause:** with a voter removed, two voters remained, and one of them
+  was recovering. A configuration of two has no minority to lose.
+- **Fix:** damage and membership changes are not combined in one run.
