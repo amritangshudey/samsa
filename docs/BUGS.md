@@ -203,6 +203,48 @@ for how much that is worth.
   made a cluster of one a state the cluster can pass through, not only
   start in.
 
+### S10. The log was cut below the newest snapshot's start (A1, exposed by C2)
+
+- **Seeds:** 371, 363 and 710 (`make sim SEED=371`), single nodes with
+  `-sync never`, power losses and sync failures.
+- **Invariant:** "node 1 stopped with an error no fault explains: read
+  committed batch at log index 40: storage: offset out of range: 40 not
+  in [47, 278]".
+- **Root cause:** after applying entries, the node compacts the Raft log
+  to the state's log start, then saves a snapshot if a Trim is pending.
+  Compaction was bounded by the newest snapshot's *index*, not by that
+  snapshot's *log start*. So:
+  1. Trim(47) applies; the state's start is 47.
+  2. Compaction deletes the segments below 47. The newest snapshot on
+     disk, at index 253, has log start 35 and references a batch at 40.
+  3. The snapshot that would cover the Trim fails on a sync fault, and
+     the node restarts from snapshot 253.
+  4. Batch 40 is gone.
+  The order has existed since A1. The cleaner's frequent trims made it
+  likely.
+- **Fix:** the node remembers the log start of the newest snapshot it
+  saved or loaded, and never compacts past it (`compactTo`).
+  `UnsafeTrimEarly` keeps the old bound, and its mutation is still
+  caught.
+
+### S11. The cleaner copied live data around without end (C2, before merge)
+
+- **Seeds:** a run of 1,000 seeds did not finish in 75 minutes; one of
+  3 minutes timed out with every stuck seed inside `clean`, called from
+  `retain` on each apply.
+- **Invariant:** none fired. Simulated time stopped advancing.
+- **Root cause:** the live bytes counted batch bytes only. The log on
+  disk also holds a 29-byte frame and entry header and the command header
+  per batch, which is a third of a 100-byte batch. Once all dead data was
+  gone, the log still looked over budget. Over the safety limit,
+  `retain` skips its one-second wait, so on a single node every apply
+  started another round in the same instant.
+- **Fix:** a batch's size is now the bytes its log entry takes on disk
+  (`raft.EntryBytes`). The cleaner starts only above slack ×
+  max(live, segment) plus one segment. Either trigger then means more
+  than a segment of the log is dead, and every round frees some of it.
+  2,000 seeds finish in 73 s.
+
 ## Bugs found by real clients
 
 ### C1. Null record set in a fetch response broke librdkafka (Phase 2)
@@ -221,6 +263,20 @@ for how much that is worth.
   tolerates. This is why the acceptance test uses three independent client
   implementations, and why the plan says to match the reference broker's
   observable behaviour, not only its specification.
+
+### C2. kafka-configs.sh --alter timed out against a cluster (C2, before merge)
+
+- **Test:** `TestKafkaCLI` (Kafka 4.4.0), `kafka-configs.sh --alter
+  --entity-type topics`: "Timed out waiting for a node assignment. Call:
+  incrementalAlterConfigs", after a request a second for 90 seconds.
+- **Root cause:** Kafka's admin client sends IncrementalAlterConfigs for a
+  topic to any broker, not to the controller. Samsa's followers answered
+  NOT_CONTROLLER. That error is retriable, but the client's retry went to
+  another follower again, as with CreateAcls before C8b.
+- **Fix:** a follower forwards the command to the leader, as it does ACL
+  changes (`forward.go`). It is idempotent, so a retried forward that
+  applies twice is harmless. The leader accepts a forwarded topic config
+  command only at format level 2. `TestAlterConfigsForwarded` covers it.
 
 ## Bugs found by the soak
 
@@ -306,6 +362,26 @@ for how much that is worth.
   mismatch at C − 1, and the leader went back to the snapshot.
 - **Fix:** InstallSnapshot carries the term at C − 1 (`prevTerm`), and the
   follower declines only if it holds that entry with that term.
+
+## Bugs found by unit tests
+
+### C2a. Steady expiry starved the retention cleaner (C2, before merge)
+
+- **Test:** `TestCleanerCopiesForward`, which writes a short-kept topic
+  and a long-kept one. The cleaner copied nothing: 62 KB of log for 4 KB
+  live.
+- **Invariant:** the log stays within slack times the live data (R10).
+- **Root cause:** one counter of retention proposals in flight was shared
+  by expiry and the cleaner. While data expired every second, an expiry
+  was always in flight at the moment the cleaner looked, so it never ran.
+- **Fix:** separate counters (`expiring`, `cleaning`). Each waits only
+  for its own proposals, which is enough not to propose the same thing
+  twice. Neither needs the other to wait: an expiry only removes
+  references, and a relocation checks at apply that its reference is
+  unchanged.
+- **Also found:** an idle partition never expired. Retention ran only
+  after apply, and with nothing written, nothing was applied. A
+  one-second timer now runs it too.
 
 ## Bugs in the simulator and tests
 
@@ -498,3 +574,30 @@ would happen against Kafka too (not tested against Kafka).
   So is a bound: a search that completes must show it reached something.
   The test that caught it compares what the two searches reach, not only
   their verdicts: both verdicts were "no violation".
+
+### M12. I6 blamed the broker for the cleaner working after the final restart (C2)
+
+- **Seed:** 2, and others with an admin client, under the mutation suite's
+  "seed fails without the mutation" check.
+- **Invariant:** I6, "after a restart the state hash is 7fcbafc7; before
+  it was 9ac7ff03".
+- **Root cause:** the same as M8. The final restart check compares the
+  state before and after a restart, but time passes while the cluster
+  settles. DeleteRecords had left dead data in the log, so the restarted
+  leader's cleaner relocated batches and trimmed. Those are new commands,
+  not a replay that went wrong. The check already turned off
+  `-retention-bytes` for M8; the cleaner and the topic expiry are new
+  sources of the same thing.
+- **Fix:** the final restart also turns off `-retention-ms` and sets the
+  slack to infinity, so the cleaner never runs.
+
+### M13. I6 hashed the state while the cleaner's proposals were in flight (C2)
+
+- **Seed:** 817 (`make sim SEED=817`), five nodes, `retain-ms=3000`.
+- **Invariant:** I6, "after a restart the state hash is 4364fda6; before
+  it was 940956cb".
+- **Root cause:** the check took the leader's state hash with relocations
+  proposed but not yet applied. They committed after the restart. Before
+  C2 the leader rarely proposed anything once clients were idle.
+- **Fix:** the check waits until the leader has applied every entry in
+  its log, then hashes and restarts every node in the same instant.
