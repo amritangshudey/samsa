@@ -99,6 +99,13 @@ func verdict(t *testing.T, b *broker, args ...string) (string, int) {
 // runPipeline starts a broker with the given faults, writes the input,
 // runs the application, stops the broker and returns the verdict.
 func runPipeline(t *testing.T, faults string, commitFirst bool) (out string, code int, log string) {
+	return runPipelineIdle(t, faults, commitFirst, 3*time.Second)
+}
+
+// runPipelineIdle is runPipeline with the time the application waits for
+// nothing new before it ends; faults that slow it down need a longer wait
+// on a slow machine.
+func runPipelineIdle(t *testing.T, faults string, commitFirst bool, idle time.Duration) (out string, code int, log string) {
 	b := startBroker(t, "-faults", faults)
 	admin := franz(t, b)
 	createTopic(t, admin, "in", 3)
@@ -113,7 +120,7 @@ func runPipeline(t *testing.T, faults string, commitFirst bool) (out string, cod
 	if err := in.ProduceSync(ctx, recs...).FirstErr(); err != nil {
 		t.Fatalf("produce the input: %v", err)
 	}
-	copyApp(t, b, commitFirst, 3*time.Second)
+	copyApp(t, b, commitFirst, idle)
 	b.kill()
 	out, code = verdict(t, b)
 	t.Logf("verdict (exit %d):\n%s", code, out)
@@ -153,4 +160,46 @@ func TestVerdictCatchesCommitBeforeProcess(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestVerdictUnderTheOtherFaults is item 23a of the production plan: the
+// fault kinds that the first release lacked. A session that expires in the
+// middle of a batch loses what a commit-before-process application had
+// committed; the correct application passes.
+func TestVerdictUnderTheOtherFaults(t *testing.T) {
+	t.Run("commit before process loses records when the session expires", func(t *testing.T) {
+		const faults = "seed=5,rate=0.2,kinds=expire"
+		var out string
+		var code int
+		for range 3 {
+			if out, code, _ = runPipeline(t, faults, true); code == 1 {
+				break
+			}
+		}
+		if code != 1 || !strings.Contains(out, "lost: group \"app\" committed past them") {
+			t.Fatalf("want a FAIL naming lost records, got exit %d:\n%s", code, out)
+		}
+	})
+	// outofrange has no run here: a consumer told its offset is out of range
+	// resets, by default to the start, and reprocesses the whole topic, which
+	// takes minutes on a slow machine. TestFaultFetches covers the answer.
+	for _, tc := range []struct{ name, faults string }{
+		{"session expiry", "seed=5,rate=0.02,kinds=expire"},
+		// A fetch with data is rare in this run (the input is read in a few
+		// big ones), so these kinds need a high rate to appear at all.
+		{"empty and slow fetches", "seed=5,rate=0.6,kinds=emptyfetch+slowfetch"},
+	} {
+		kinds := tc.faults[strings.LastIndex(tc.faults, "=")+1:]
+		t.Run("commit after process passes under "+tc.name, func(t *testing.T) {
+			out, code, log := runPipelineIdle(t, tc.faults, false, 8*time.Second)
+			if code != 0 || !strings.HasPrefix(out, "PASS") {
+				t.Fatalf("want PASS, got exit %d:\n%s", code, out)
+			}
+			for _, kind := range strings.Split(kinds, "+") {
+				if !strings.Contains(log, `msg="fault injected" kind=`+kind) {
+					t.Errorf("no %s fault was injected: the pass proves less than it says", kind)
+				}
+			}
+		})
+	}
 }

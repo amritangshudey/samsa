@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -46,7 +47,15 @@ func versionString() string {
 	return info.Main.Version
 }
 
+// doctorMode is set by `samsa doctor`: resolve the flags as a start would,
+// print what is in use and what is risky, and do not start.
+var doctorMode bool
+
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "doctor" {
+		doctorMode = true
+		os.Args = append(os.Args[:1], os.Args[2:]...)
+	}
 	if len(os.Args) > 1 && (os.Args[1] == "check" || os.Args[1] == "verdict" || os.Args[1] == "user" || os.Args[1] == "node") {
 		sub := map[string]func([]string, io.Writer) (bool, error){"check": runCheck, "verdict": runVerdict, "node": runNode,
 			"user": func(a []string, w io.Writer) (bool, error) { return runUser(a, os.Stdin, w) }}[os.Args[1]]
@@ -100,11 +109,29 @@ func run() error {
 	faultsSpec := flag.String("faults", "", "inject Kafka-level faults to test applications: seed=N[,rate=R][,kinds=lostack+notleader+rebalance] (see docs/guides/testing-applications.md)")
 	configFile := flag.String("config", "", "file of key = value lines, one per flag; flags on the command line win")
 	showVersion := flag.Bool("version", false, "print the version and exit")
+	profileName := flag.String("profile", "", "dev, test or prod: defaults for the flags you did not set (`samsa doctor` shows what is in use and what is risky)")
 	flag.Parse()
+	// Where each flag's value came from, for `samsa doctor`.
+	sources := map[string]string{}
+	flag.Visit(func(f *flag.Flag) { sources[f.Name] = "command line" })
 	if *configFile != "" {
 		if err := loadConfig(flag.CommandLine, *configFile); err != nil {
 			return err
 		}
+		flag.Visit(func(f *flag.Flag) {
+			if _, ok := sources[f.Name]; !ok {
+				sources[f.Name] = "config file"
+			}
+		})
+	}
+	if err := applyProfile(flag.CommandLine, *profileName, sources, strings.Contains(*peersText, ",") || *join); err != nil {
+		return err
+	}
+	if doctorMode {
+		if doctor(os.Stdout, flag.CommandLine, sources, *profileName) && *profileName == "prod" {
+			return errors.New("the prod profile is set and the lines above marked ! are not fit for it")
+		}
+		return nil
 	}
 	if *showVersion {
 		fmt.Println("samsa", versionString())
@@ -116,6 +143,12 @@ func run() error {
 		return fmt.Errorf("-log-level: %w", err)
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	if *profileName == "prod" {
+		var report bytes.Buffer
+		if doctor(&report, flag.CommandLine, sources, *profileName) {
+			logger.Warn("the prod profile is set, and some settings are not fit for it (run `samsa doctor` with the same flags)", "report", report.String())
+		}
+	}
 
 	policy, ok := map[string]broker.SyncPolicy{
 		"always": broker.SyncAlways, "interval": broker.SyncInterval, "never": broker.SyncNever,

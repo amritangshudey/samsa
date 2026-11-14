@@ -160,7 +160,7 @@ Blockers are written to `docs/QUESTIONS.md` as they arrive.
 | 3 Operations | part (a), admin APIs: done (`docs/reports/b4a-admin-apis.md`). Part (b), metrics, health, `samsa check`, config file: done (`docs/reports/b4b-operations.md`) |
 | 4 Black-box chaos test | done (`docs/reports/a4-chaos.md`) |
 | 5 Simulator tools | done (`docs/reports/a3-sim-tools.md`). Found: the simulator never lets an expired idempotent producer come back (expiry 15 s, runs 10 s); open, covered meanwhile by `TestJavaProducerAfterExpiry` |
-| 5b Application fault testing | done (`docs/reports/a5b-app-faults.md`, guide `docs/guides/testing-applications.md`). Three of the section 2 fault kinds (lost ack, not leader, forced rebalance); session expiry, slow or empty fetches and retention cuts are open |
+| 5b Application fault testing | done (`docs/reports/a5b-app-faults.md`, guide `docs/guides/testing-applications.md`). Three of the section 2 fault kinds (lost ack, not leader, forced rebalance); the other four (session expiry, empty and slow fetches, offsets out of range) came with item 23a (`docs/reports/a23a-fault-kinds.md`). Not done: offsets cut by an actual retention in the verdict |
 | 6 Soak | harness merged (PR 21, `make soak`); the 24 h run started 2026-11-14 00:53 IST, results to follow. Found so far: Raft memory grew 8 bytes per entry for ever (BUGS.md L1), fixed in PR 28; flat memory needs a run on the fixed build |
 | 7 TLS and SASL | done (`docs/reports/c5-tls-sasl.md`). Credentials from a file (restart to change); replicated credentials (API 51) moved to item 8b |
 | 8 ACLs | done (`docs/reports/c8-acls.md`). certificate principals not supported; forwarding added in 8b |
@@ -170,6 +170,8 @@ Blockers are written to `docs/QUESTIONS.md` as they arrive.
 | 11 Exhaustive checking | done (`docs/reports/b2-exhaustive.md`, ADR 0025): three Raft nodes, breadth-first, every schedule up to depth 10 (`go test`) and 12 (CI, with one power loss or loss per node), both configurations; no violation. `AckBeforeSync` found with its shortest counterexample, 11 events. A one-node reduction and a vacuous bound found and removed (BUGS.md M11). Bounds are short; no sound reduction yet |
 | 12 Retention and compaction | part (a), per-topic retention: done (`docs/reports/c2-retention-part-a.md`, ADR 0026, ADR 0027). `retention.ms` and `retention.bytes` per topic, set with CreateTopics or `kafka-configs.sh --alter`; live batches copied forward out of the head segment; R9 in the simulator catches `UnsafeTrimLive`. Part (b), key compaction: done (`docs/reports/c2-retention-part-b.md`, ADR 0029, format level 3); `cleanup.policy=compact` keeps the latest record of every key, C1 to C5 in the simulator, five mutations caught |
 | 13 Storage faults | done (`docs/reports/b1-storage-faults.md`, ADR 0030): scrub, `damaged` and `recovering` markers, repair from the other nodes, S7 in the simulator, three mutations caught. Limits: the active segment, the small files, a cluster of one |
+| 23a More fault kinds | done (`docs/reports/a23a-fault-kinds.md`): `expire`, `emptyfetch`, `slowfetch`, `outofrange`, opt in with `kinds=` or `kinds=all`; a sample application is caught under `expire` and passes under all |
+| 24 Profiles and doctor | done (`docs/guides/configuration.md`): `-profile dev|test|prod`, `samsa doctor` with sources and risks. A secured prod node needs eight settings, not five |
 | 14–17 | not started |
 | 18–24, 18a, 23a, 23b | planned (section 7, ADR 0028) |
 
