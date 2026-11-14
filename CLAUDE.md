@@ -26,7 +26,7 @@ in order to a deterministic state machine (ADR 0005).
 
 ## Non-goals (do not build unless asked)
 
-Tiered storage, Kafka Streams/Connect guarantees.
+Kafka Streams/Connect guarantees.
 
 **Asked for (2026-11-11):** the developer asked to make the project
 production ready with "all the features": transactions, the idempotent
@@ -34,6 +34,11 @@ producer, log compaction, ACLs/SASL/TLS and cluster membership changes are
 now in scope. Order and status: `docs/PRODUCTION.md`. The rule against
 claiming what no test shows still holds: "production ready" and "best"
 are goals, never claims.
+
+**Asked for (2026-11-15):** "make the future development plans of samsa
+in such a way that it solves the problems of kafka". Tiered and diskless
+storage in object storage are now in scope, tested locally only (ADR
+0028, `docs/PRODUCTION.md` section 7).
 
 ## Architecture rules (non-negotiable)
 
