@@ -130,6 +130,9 @@ func TestSnapshotChunksDoNotMultiply(t *testing.T) {
 	if l.LogStart() == 0 {
 		t.Fatal("nothing compacted")
 	}
+	if l.terms.from != l.LogStart()-1 { // BUGS.md L1
+		t.Fatalf("leader keeps one term per entry from %d, log starts at %d", l.terms.from, l.LogStart())
+	}
 	for range 5 { // resends while node 3 is away; each would start a chain
 		c.now += sys.Instant(50 * time.Millisecond)
 		l.OnTimer(TimerHeartbeat)
@@ -155,7 +158,24 @@ func TestSnapshotChunksDoNotMultiply(t *testing.T) {
 	if c.r(3).LastIndex() != l.LastIndex() {
 		t.Fatalf("node 3 holds %d, leader %d", c.r(3).LastIndex(), l.LastIndex())
 	}
+	if f := c.r(3); f.terms.from != f.LogStart()-1 {
+		t.Fatalf("after install node 3 keeps one term per entry from %d, log starts at %d", f.terms.from, f.LogStart())
+	}
 	if chunks > 3000/100+10 {
 		t.Fatalf("%d chunks sent for a snapshot of about 30", chunks)
 	}
 }
+
+// runsOf compresses terms[0..index] into runs.
+func runsOf(terms []int64, index int64) []termRun {
+	var runs []termRun
+	for i := int64(0); i <= index; i++ {
+		if len(runs) == 0 || runs[len(runs)-1].term != terms[i] {
+			runs = append(runs, termRun{i, terms[i]})
+		}
+	}
+	return runs
+}
+
+// expand returns the term of every entry 0..s.index.
+func (s *snapshot) expand() []int64 { t := termsOf(s.runs, s.index, 0); return t.tail }

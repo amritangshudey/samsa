@@ -206,7 +206,9 @@ Second pass on part (b):
   but the time still grows with the log, by about 30 ns an entry against
   1 100. What remains is the snapshot itself: one batch reference per
   batch ever written, and one term per entry expanded in memory. Both
-  shrink only when old batches can be dropped, which is part (b).
+  shrink only when old batches can be dropped, which is part (b). (Later:
+  part (b) dropped the batches but not the terms; the soak found it, and
+  `termIndex` now keeps terms below the log start as runs, BUGS.md L1.)
 - Storage recovery checksums the whole active segment at every start; that
   is bounded by the segment size, not by the log.
 - The simulator counts starts from a snapshot (`SnapshotStarts`) and

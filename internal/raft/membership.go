@@ -284,7 +284,7 @@ func (r *Raft) ChangeMembers(ms []Member) (int64, error) {
 		return 0, r.err
 	case r.role != Leader, r.handingOver():
 		return 0, ErrNotLeader
-	case !r.mut(MutChangeBeforeCommit) && (r.commit < 0 || r.terms[r.commit] != r.hard.term):
+	case !r.mut(MutChangeBeforeCommit) && (r.commit < 0 || r.terms.at(r.commit) != r.hard.term):
 		return 0, ErrChangePending
 	case !r.mut(MutTwoChanges) && len(r.confs) > 0 && r.confs[len(r.confs)-1].index > r.commit:
 		return 0, ErrChangePending
