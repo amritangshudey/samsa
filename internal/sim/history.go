@@ -35,6 +35,7 @@ type rec struct {
 	n        int    // records in its batch
 	state    recState
 	offset   int64 // where it was acknowledged or observed; -1 if neither
+	sent     int64 // ms, when Retention is on: its timestamp is no earlier
 	ackEpoch int   // model epoch when it was acknowledged
 	lost     bool  // seen, then removed by a permitted power-loss truncation
 	final    int   // last final pass that observed it
@@ -89,6 +90,9 @@ type Model struct {
 	topics    map[string]*topicModel
 	finalPass int
 	trimming  bool
+	// retention and clock are set by Retention: R9 is checked.
+	retention func(topic string) int64
+	clock     func() int64
 	rebatched bool
 	groups    groupModel
 }
@@ -169,8 +173,12 @@ func (m *Model) Floor(tp TP) int64 { return m.part(tp).floor }
 // the id of the first; the others follow consecutively.
 func (m *Model) Send(tp TP, n int) uint64 {
 	first := uint64(len(m.recs))
+	var sent int64
+	if m.clock != nil {
+		sent = m.clock()
+	}
 	for range n {
-		m.recs = append(m.recs, rec{tp: tp, first: first, n: n, offset: -1})
+		m.recs = append(m.recs, rec{tp: tp, first: first, n: n, offset: -1, sent: sent})
 	}
 	return first
 }
@@ -301,6 +309,31 @@ func (m *Model) Rebatched() { m.rebatched = true }
 // the end is then believed. shortcut: unchecked for those versions.
 func (m *Model) Trimming() { m.trimming = true }
 
+// Retention turns on R9: a record is gone from below the log start only
+// once it is older than its topic's retention in ms (-1: kept forever), on
+// clock. Only for histories where nothing else moves a start: no
+// DeleteRecords and no log-wide retention limit. Records stamped with
+// their send time are what the broker's expiry looks at, and the broker's
+// clock is the same clock.
+func (m *Model) Retention(ms func(topic string) int64, clock func() int64) {
+	m.retention, m.clock = ms, clock
+}
+
+// checkExpiry checks R9 for a log start moving from to to.
+func (m *Model) checkExpiry(tp TP, from, to int64) error {
+	p, ms, now := m.part(tp), m.retention(tp.Topic), m.clock()
+	for o := from; o < min(to, int64(len(p.at))); o++ {
+		id := p.at[o].id
+		if id == 0 {
+			continue
+		}
+		if r := m.recs[id]; ms < 0 || r.sent >= now-ms {
+			return fmt.Errorf("R9: %v log start moved to %d past record %d at offset %d, sent at %d ms, now %d ms, retention %d ms", tp, to, id, o, r.sent, now, ms)
+		}
+	}
+	return nil
+}
+
 // Fetched checks one partition of a fetch response. It returns the offset
 // after the last record returned, or -1 if there were none.
 func (m *Model) Fetched(f Fetch) (next int64, err error) {
@@ -328,6 +361,11 @@ func (m *Model) Fetched(f Fetch) (next int64, err error) {
 			return -1, fmt.Errorf("R1: %v fetch at %d succeeded below the log start %d", f.TP, f.Offset, f.LogStart)
 		}
 		p := m.part(f.TP)
+		if m.retention != nil && f.LogStart > p.start {
+			if err := m.checkExpiry(f.TP, p.start, f.LogStart); err != nil {
+				return -1, err
+			}
+		}
 		p.start = max(p.start, f.LogStart)
 	}
 	switch f.Err {

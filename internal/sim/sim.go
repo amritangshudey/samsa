@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"math"
 	"slices"
 	"time"
 
@@ -88,6 +89,9 @@ type options struct {
 	// changes adds spares nodes that start with no configuration and a
 	// client that adds and removes voters (voters.go, design C1).
 	changes bool
+	// retainMs is the broker's default retention.ms (0: none); t0 then
+	// keeps everything, so the cleaner has live data to copy (design C2).
+	retainMs int64
 	// Between nodes (network.go): drop and duplicate probabilities per
 	// message, and whether partition scenarios run.
 	drop, dup  float64
@@ -168,12 +172,18 @@ func Run(cfg Config) Result {
 		w.bcfg.UnsafeRaft |= raft.MutNoPreVote | raft.MutNoCheckQuorum
 	}
 	w.opts.admins = pick.Intn(2)
-	w.opts.changes = w.opts.nodes > 1 && pick.Chance(0.5) // drawn last, so older seeds keep their other choices
+	w.opts.changes = w.opts.nodes > 1 && pick.Chance(0.5)     // drawn last, so older seeds keep their other choices
+	w.opts.retainMs = []int64{0, 0, 1000, 3000}[pick.Intn(4)] // last again
+	if w.opts.retainMs > 0 {
+		w.bcfg.RetentionMs = time.Duration(w.opts.retainMs) * time.Millisecond
+		w.bcfg.RetentionSlack = []float64{1.5, 2}[pick.Intn(2)]
+	}
 	if cfg.Calm {
 		w.opts.drop, w.opts.dup = 0, 0
 	}
 	if cfg.Mutate != nil {
 		cfg.Mutate(&w.bcfg)
+		w.opts.retainMs = w.bcfg.RetentionMs.Milliseconds()
 	}
 	strict := w.bcfg.Sync == broker.SyncAlways
 	if w.opts.nodes > 1 && !strict {
@@ -192,11 +202,20 @@ func Run(cfg Config) Result {
 		w.opts.idempotent = 0
 	}
 	w.model = NewModel(strict)
-	if w.bcfg.RetentionBytes > 0 || w.opts.admins > 0 { // DeleteRecords moves the start as retention does
+	if w.bcfg.RetentionBytes > 0 || w.opts.admins > 0 || w.opts.retainMs > 0 { // DeleteRecords moves the start as retention does
 		w.model.Trimming()
 	}
-	res := Result{Seed: cfg.Seed, Setup: fmt.Sprintf("nodes=%d sync=%d segment=%d election=%v faults=%v every=%v drop=%v dup=%v partitions=%v append=%d snapshot=%d retention=%d disconnects=%v producers=%d consumers=%d vandals=%d members=%d idempotent=%d expiry=%v classic=%v admins=%d changes=%v",
-		w.opts.nodes, w.bcfg.Sync, w.bcfg.SegmentBytes, w.bcfg.ElectionTimeout, w.opts.faults, w.opts.faultEvery, w.opts.drop, w.opts.dup, w.opts.partitions, w.bcfg.MaxAppendBytes, w.bcfg.SnapshotEvery, w.bcfg.RetentionBytes, w.opts.disconnects, w.opts.producers, w.opts.consumers, w.opts.vandals, w.opts.members, w.opts.idempotent, w.opts.expiry, w.opts.classic, w.opts.admins, w.opts.changes)}
+	if w.opts.retainMs > 0 && w.bcfg.RetentionBytes == 0 && w.opts.admins == 0 {
+		// Only topic retention moves a start: R9 holds every move to it.
+		w.model.Retention(func(topic string) int64 {
+			if topic == keptTopic {
+				return -1
+			}
+			return w.opts.retainMs
+		}, func() int64 { return int64(w.now / 1e6) })
+	}
+	res := Result{Seed: cfg.Seed, Setup: fmt.Sprintf("nodes=%d sync=%d segment=%d election=%v faults=%v every=%v drop=%v dup=%v partitions=%v append=%d snapshot=%d retention=%d disconnects=%v producers=%d consumers=%d vandals=%d members=%d idempotent=%d expiry=%v classic=%v admins=%d changes=%v retain-ms=%d",
+		w.opts.nodes, w.bcfg.Sync, w.bcfg.SegmentBytes, w.bcfg.ElectionTimeout, w.opts.faults, w.opts.faultEvery, w.opts.drop, w.opts.dup, w.opts.partitions, w.bcfg.MaxAppendBytes, w.bcfg.SnapshotEvery, w.bcfg.RetentionBytes, w.opts.disconnects, w.opts.producers, w.opts.consumers, w.opts.vandals, w.opts.members, w.opts.idempotent, w.opts.expiry, w.opts.classic, w.opts.admins, w.opts.changes, w.opts.retainMs)}
 	if w.trace != nil {
 		_, _ = fmt.Fprintf(w.trace, "seed %d: %s\n", cfg.Seed, res.Setup)
 	}
@@ -342,9 +361,11 @@ func (w *world) finalChecks() {
 	// once; the cluster must come back to the state it had.
 	_, hash := leader.inc.n.StateHash()
 	w.stats.ProducersExpired += leader.inc.n.ExpiredProducers()
+	w.stats.BytesRelocated += int(leader.inc.n.Metrics().RelocatedBytes)
 	// A restarted leader may legitimately trim again; I6 is about replay.
 	for _, nd := range w.nodes {
-		nd.cfg.RetentionBytes = 0
+		nd.cfg.RetentionBytes, nd.cfg.RetentionMs = 0, 0
+		nd.cfg.RetentionSlack = math.Inf(1) // and may clean again
 	}
 	for _, power := range []bool{false, true} {
 		if power && !w.model.strict {

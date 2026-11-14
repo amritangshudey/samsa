@@ -20,6 +20,10 @@ var catalogue = []struct {
 
 const ghostTopic = "ghost"
 
+// keptTopic is created with retention.ms=-1 when the broker's default
+// retention is on: it keeps everything while the others expire.
+const keptTopic = "t0"
+
 // inCatalogue reports whether tp could ever exist. A write to anything else
 // has to be rejected.
 func inCatalogue(tp TP) bool {
@@ -323,6 +327,10 @@ func (cl *client) createTopic() {
 	}
 	epoch := m.Epoch()
 	req := &wire.CreateTopicsRequest{Topics: []wire.CreateTopic{{Name: name, NumPartitions: parts, ReplicationFactor: cl.w.replication()}}, TimeoutMs: 1000}
+	configured := name == keptTopic && cl.w.opts.retainMs > 0
+	if configured {
+		req.Topics[0].Configs = []wire.TopicConfig{{Name: "retention.ms", Value: "-1"}}
+	}
 	resp := &wire.CreateTopicsResponse{}
 	cl.request(wire.KeyCreateTopics, v, req, resp, func(ok bool) {
 		if !ok {
@@ -338,6 +346,8 @@ func (cl *client) createTopic() {
 		case !valid:
 		case code == wire.ErrNone || code == wire.ErrTopicAlreadyExists:
 			m.TopicCreated(name, epoch)
+		case code == wire.ErrUnsupportedVersion && configured:
+			// The cluster is not yet at format level 2; a later try works.
 		default:
 			cl.w.fail("creating topic %q failed with code %d", name, code)
 		}

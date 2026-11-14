@@ -76,6 +76,18 @@ type Config struct {
 	// the oldest segments (docs/design/a1-snapshots.md, section 3). Zero
 	// keeps everything.
 	RetentionBytes int64
+	// RetentionMs and RetentionBytesPerPartition are the retention of a
+	// topic that sets no retention.ms or retention.bytes (design C2). Zero
+	// keeps everything.
+	RetentionMs                time.Duration
+	RetentionBytesPerPartition int64
+	// RetentionSlack is how many times the live data the log may grow to
+	// before the cleaner copies live batches out of its head segment.
+	// Default 2 (ADR 0026).
+	RetentionSlack float64
+	// UnsafeTrimLive makes the cleaner trim the head segment without
+	// copying its live batches first.
+	UnsafeTrimLive bool
 	// ProducerExpiry is how long an idempotent producer may write nothing
 	// before every partition forgets it (docs/design/a2-idempotent-producer.md,
 	// section 7). Default 24 h; negative never expires.
@@ -153,6 +165,9 @@ func (c Config) withDefaults() Config {
 	if c.SyncInterval <= 0 {
 		c.SyncInterval = time.Second
 	}
+	if c.RetentionSlack == 0 {
+		c.RetentionSlack = 2
+	}
 	if c.ProducerExpiry == 0 {
 		c.ProducerExpiry = 24 * time.Hour
 	}
@@ -198,6 +213,7 @@ const (
 	timerElection  sys.TimerID = 3
 	timerHeartbeat sys.TimerID = 4
 	timerLevel     sys.TimerID = 5
+	timerRetain    sys.TimerID = 6
 
 	firstFreeTimer sys.TimerID = 16
 )
@@ -258,6 +274,10 @@ type Node struct {
 	// trimmedAt is the index of the last Trim applied (-1: none since the
 	// last restore); trimProposed the highest cut this node proposed.
 	trimmedAt, trimProposed int64
+	// expiring and cleaning count the retention proposals in flight;
+	// retainAt is when the leader next looks at retention (retain.go).
+	expiring, cleaning int
+	retainAt           sys.Instant
 	// expirySamples are (time, applied index) pairs the serving leader
 	// wrote down, oldest first: soft state, so a new leader starts empty
 	// and expiry is only ever late.
@@ -409,6 +429,7 @@ func (n *Node) OnStart() error {
 		n.clock.SetTimer(timerSync, n.cfg.SyncInterval)
 	}
 	n.clock.SetTimer(timerLevel, levelEvery)
+	n.clock.SetTimer(timerRetain, retainEvery)
 	err := n.settle()
 	n.log.Info("started", "entries", n.raft.LastIndex()+1, "applied", n.applied, "topics", len(n.st.names), "groups", len(n.st.groups))
 	return err
@@ -485,6 +506,11 @@ func (n *Node) OnTimer(id sys.TimerID) error {
 		n.raft.OnTimer(raft.TimerHeartbeat)
 	case timerLevel:
 		n.onLevelTimer()
+	case timerRetain:
+		if n.serving && n.fatal == nil && n.st.level >= 2 {
+			n.retain() // an idle log expires too
+		}
+		n.clock.SetTimer(timerRetain, retainEvery)
 	default:
 		if fn := n.timers[id]; fn != nil {
 			delete(n.timers, id)
@@ -568,6 +594,7 @@ func (n *Node) lead() {
 		n.serving, n.servingTerm = true, term
 		n.trimProposed = n.st.logStart // a Trim proposed in an earlier term may have been lost
 		n.expirySamples = nil
+		n.expiring, n.cleaning = 0, 0 // proposals of an earlier term are never answered
 		n.startGroups()
 		n.log.Info("serving as leader", "term", term, "applied", n.applied)
 		n.levelProposed = false
@@ -707,7 +734,9 @@ func (n *Node) advance() {
 		n.raft.SaveSnapshot(n.applied-1, n.st.encode())
 		n.raft.Compact(n.st.logStart)
 	}
-	if n.serving && n.cfg.RetentionBytes > 0 && n.fatal == nil {
+	if n.serving && n.fatal == nil && n.st.level >= 2 {
+		n.retain()
+	} else if n.serving && n.cfg.RetentionBytes > 0 && n.fatal == nil {
 		if cut := n.raft.RetentionCut(n.cfg.RetentionBytes); cut > n.st.logStart && cut > n.trimProposed {
 			n.trimProposed = cut
 			n.propose(encodeTrim(cut), func(result) {})

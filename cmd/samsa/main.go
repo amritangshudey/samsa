@@ -75,7 +75,10 @@ func run() error {
 	nodeID := flag.Int("node-id", 1, "this node's id")
 	peersText := flag.String("peers", "", "every node of the cluster, this one included, as id=clientHost:port/peerHost:port,... (default: a cluster of this node alone)")
 	join := flag.Bool("join", false, "with -peers: join a running cluster instead of founding one; -peers names this node and the current voters, and `samsa node add` makes it a voter")
-	retention := flag.Int64("retention-bytes", 0, "keep about this many bytes of log, deleting the oldest segments (0: keep everything)")
+	retention := flag.Int64("retention-bytes", 0, "a safety limit on the whole log on disk: past it, the oldest data goes even if its topic would keep it (0: none)")
+	retentionMs := flag.Duration("retention-ms", 0, "how long a topic without retention.ms keeps records (0: forever)")
+	retentionPart := flag.Int64("retention-bytes-per-partition", 0, "how many bytes a partition of a topic without retention.bytes keeps (0: no limit)")
+	slack := flag.Float64("retention-slack", 2, "how many times the live data the log may grow to before live batches are copied forward and the oldest segment freed")
 	producerExpiry := flag.Duration("producer-expiry", 24*time.Hour, "forget an idempotent producer after it writes nothing for this long (negative: never)")
 	logLevel := flag.String("log-level", "info", "debug, info, warn or error")
 	metricsListen := flag.String("metrics-listen", "", "address to serve /metrics, /healthz and /readyz on over HTTP (default: none)")
@@ -217,9 +220,13 @@ func run() error {
 	} else if *join {
 		return errors.New("-join needs -peers: the addresses of this node and the current voters")
 	}
+	if *slack <= 1 {
+		return errors.New("-retention-slack must be above 1: at 1 or below, every segment is always over budget")
+	}
 	cfg := broker.Config{
 		NodeID: int32(*nodeID), Host: host, Port: int32(port), Peers: peers, Join: *join,
 		Sync: policy, SyncInterval: *syncInterval, Logger: logger, RetentionBytes: *retention, ProducerExpiry: *producerExpiry,
+		RetentionMs: *retentionMs, RetentionBytesPerPartition: *retentionPart, RetentionSlack: *slack,
 		Faults: faults, SASL: sasl, Authorization: auth,
 	}
 	if auth != nil && sasl == nil {

@@ -537,6 +537,7 @@ func TestFetchLongPoll(t *testing.T) {
 		t.Fatalf("at the deadline: %+v", resp)
 	}
 	h.advance(time.Second)
+	delete(h.clock.timers, timerRetain) // periodic, unrelated to fetches
 	if len(h.net.sent[1]) != 0 || len(h.node.parked) != 0 || len(h.clock.timers) != 0 {
 		t.Fatal("fetch answered twice or left state behind")
 	}
@@ -723,6 +724,7 @@ func TestSyncPolicies(t *testing.T) {
 	corr := h.send(1, wire.KeyCreateTopics, 4, &wire.CreateTopicsRequest{Topics: []wire.CreateTopic{{Name: "t", NumPartitions: 1, ReplicationFactor: 1}}})
 	var ct wire.CreateTopicsResponse
 	delete(h.clock.timers, timerLevel) // armed at start, unrelated to syncing
+	delete(h.clock.timers, timerRetain)
 	if !h.recv(1, wire.KeyCreateTopics, 4, corr, &ct) || len(h.clock.timers) != 0 {
 		t.Fatal("SyncNever did not answer immediately")
 	}
@@ -743,6 +745,7 @@ func TestSyncPolicies(t *testing.T) {
 	}
 	h.advance(100 * time.Millisecond)
 	delete(h.clock.timers, timerLevel)
+	delete(h.clock.timers, timerRetain)
 	if len(h.clock.timers) != 1 {
 		t.Fatal("SyncInterval timer not re-armed")
 	}

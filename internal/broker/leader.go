@@ -135,12 +135,6 @@ func refusal(req wire.Message) wire.Message {
 			}
 		}
 		return resp
-	case *wire.IncrementalAlterConfigsRequest:
-		resp := &wire.IncrementalAlterConfigsResponse{}
-		for _, res := range m.Resources {
-			resp.Results = append(resp.Results, wire.AlterConfigsResult{ErrorCode: wire.ErrNotController, ErrorMessage: "this node is not the leader", Type: res.Type, Name: res.Name})
-		}
-		return resp
 	case *wire.DescribeGroupsRequest:
 		resp := &wire.DescribeGroupsResponse{}
 		for _, g := range m.Groups {
@@ -150,7 +144,7 @@ func refusal(req wire.Message) wire.Message {
 	}
 	// APIVersions, Metadata, FindCoordinator, DescribeConfigs,
 	// DescribeCluster and DescribeAcls are answered by every node, and
-	// CreateAcls and DeleteAcls forwarded to the leader (forward.go); ListGroups by every node,
+	// CreateAcls, DeleteAcls and IncrementalAlterConfigs forwarded to the leader (forward.go); ListGroups by every node,
 	// empty unless it serves.
 	return nil
 }

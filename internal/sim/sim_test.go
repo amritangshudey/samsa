@@ -135,7 +135,7 @@ func TestSim(t *testing.T) {
 			"leaders elected": total.Leaders, "requests refused by a non-leader": total.NotLeader, "replica comparisons": total.ReplicasCompared, "partitions": total.Partitions,
 			"starts from a snapshot": total.SnapshotStarts, "log trims": total.Trims, "snapshots installed": total.Installs,
 			"idempotent records acknowledged": total.IdempotentAcked, "idempotent retries": total.Retries, "producer ids": total.ProducerIDs, "producers expired": total.ProducersExpired, "leadership handovers": total.Handovers,
-			"records deleted": total.RecordDeletes, "partitions added": total.PartitionsAdded, "topics deleted": total.TopicsDeleted,
+			"records deleted": total.RecordDeletes, "partitions added": total.PartitionsAdded, "topics deleted": total.TopicsDeleted, "bytes relocated": total.BytesRelocated,
 			"faults on the serving leader": total.LeaderFaults, "leaders isolated": total.LeaderIsolated, "terms without a leader": total.TermsWithoutLeader,
 		} {
 			if n < *seeds/10 {
@@ -292,6 +292,9 @@ var mutations = []mutationCase{
 	{"expire producers without waiting", func(c *broker.Config) { c.UnsafeExpireEarly = true }},
 	{"delete segments before a snapshot covers them", func(c *broker.Config) { c.UnsafeTrimEarly, c.RetentionBytes = true, 8<<10 }},
 	{"let retention move a partition's start back", func(c *broker.Config) { c.UnsafeTrimResetsStart, c.RetentionBytes = true, 8<<10 }},
+	{"trim the head segment without copying its live batches", func(c *broker.Config) {
+		c.UnsafeTrimLive, c.RetentionMs, c.RetentionBytes = true, time.Second, 0
+	}},
 }
 
 // addStats adds every counter of s to total.

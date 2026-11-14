@@ -8,7 +8,7 @@ import (
 	"github.com/amritangshudey/samsa/internal/wire"
 )
 
-// Forwarding ACL changes from a follower to the leader
+// Forwarding ACL and topic config changes from a follower to the leader
 // (docs/design/c8b-credentials-forwarding.md, section 3).
 //
 // Broker messages share the peer channel with Raft's. Raft messages start
@@ -30,7 +30,8 @@ type forward struct {
 }
 
 // proposeOrForward proposes cmd if this node serves, and otherwise asks
-// the leader to. Only idempotent ACL commands come here.
+// the leader to. Only idempotent commands come here: ACL changes and topic
+// configs, which may apply twice if a forward is retried.
 func (n *Node) proposeOrForward(cmd []byte, done func(result)) {
 	if n.canRead() {
 		n.propose(cmd, done)
@@ -80,7 +81,11 @@ func (n *Node) onBrokerMessage(from sys.NodeID, msg []byte) {
 			n.log.Warn("dropped a malformed forwarded command", "from", uint64(from))
 			return
 		}
-		if !n.canRead() || n.levelRefused(1) != "" { // cmdForwarded is level 1
+		need := byte(1) // cmdForwarded is level 1
+		if cmd[0] == cmdTopicConfigs {
+			need = 2
+		}
+		if !n.canRead() || n.levelRefused(need) != "" {
 			n.net.SendPeer(from, binary.BigEndian.AppendUint64([]byte{brokerMsg, msgForwardRefused}, tag))
 			return
 		}
@@ -90,7 +95,8 @@ func (n *Node) onBrokerMessage(from sys.NodeID, msg []byte) {
 	}
 }
 
-// validForwarded reports whether cmd is an ACL command that apply accepts.
+// validForwarded reports whether cmd is an ACL or topic config command
+// that apply accepts.
 func validForwarded(cmd []byte) bool {
 	if len(cmd) == 0 {
 		return false
@@ -103,6 +109,9 @@ func validForwarded(cmd []byte) bool {
 	case cmdDeleteACLs:
 		f := readFilter(r)
 		return r.Err() == nil && r.Len() == 0 && validFilter(f)
+	case cmdTopicConfigs:
+		_, _, ok := readTopicConfigs(r)
+		return ok
 	}
 	return false
 }

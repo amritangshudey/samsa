@@ -131,6 +131,20 @@ func encodeTopicConfigs(topic string, changes []configChange) []byte {
 	return w.B
 }
 
+// readTopicConfigs reads the body of a cmdTopicConfigs and reports
+// whether all of it is valid.
+func readTopicConfigs(r *wire.Reader) (string, []configChange, bool) {
+	name := r.String(false)
+	changes := wire.Array(r, false, func() configChange {
+		return configChange{name: r.String(false), delete: r.Bool(), value: r.String(false)}
+	})
+	ok := r.Err() == nil && r.Len() == 0
+	for _, c := range changes {
+		ok = ok && slices.Contains(topicConfigKeys, c.name) && (c.delete || checkTopicConfig(c.name, c.value) == "")
+	}
+	return name, changes, ok
+}
+
 // encodeRelocate copies a batch that the partition references at log index
 // from to the end of the log (design C2, section 3).
 func encodeRelocate(topic string, partition int32, base, from int64, batch []byte) []byte {
@@ -770,7 +784,7 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 
 	case cmdForwarded:
 		origin, tag, inner := r.Int32(), r.Int64(), r.Rest()
-		if r.Err() != nil || len(inner) == 0 || (inner[0] != cmdCreateACL && inner[0] != cmdDeleteACLs) {
+		if r.Err() != nil || len(inner) == 0 || (inner[0] != cmdCreateACL && inner[0] != cmdDeleteACLs && inner[0] != cmdTopicConfigs) {
 			return result{}, fmt.Errorf("%w: forwarded command at index %d", errBadCommand, index)
 		}
 		res, err := s.apply(index, inner)
@@ -778,17 +792,9 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 		return res, err
 
 	case cmdTopicConfigs:
-		name := r.String(false)
-		changes := wire.Array(r, false, func() configChange {
-			return configChange{name: r.String(false), delete: r.Bool(), value: r.String(false)}
-		})
-		if r.Err() != nil || r.Len() != 0 {
+		name, changes, ok := readTopicConfigs(r)
+		if !ok {
 			return result{}, fmt.Errorf("%w: topic configs at index %d", errBadCommand, index)
-		}
-		for _, c := range changes {
-			if !slices.Contains(topicConfigKeys, c.name) || !c.delete && checkTopicConfig(c.name, c.value) != "" {
-				return result{}, fmt.Errorf("%w: topic config %s=%s at index %d", errBadCommand, c.name, c.value, index)
-			}
 		}
 		t := s.topics[name]
 		if t == nil {

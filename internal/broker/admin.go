@@ -305,7 +305,7 @@ func (n *Node) alterConfigs(c *conn, h wire.RequestHeader, req *wire.Incremental
 			out.ErrorCode = wire.ErrTopicAuthorizationFailed
 		case n.st.topics[res.Name] == nil:
 			out.ErrorCode, out.ErrorMessage = wire.ErrUnknownTopicOrPartition, "no such topic"
-		case n.levelRefused(2) != "":
+		case n.levelRefused(2) != "" && n.knowsLeader(): // without one, a follower's level may lag
 			out.ErrorCode, out.ErrorMessage = wire.ErrUnsupportedVersion, n.levelRefused(2)
 		default:
 			changes, out.ErrorMessage = configChanges(res.Configs)
@@ -320,7 +320,7 @@ func (n *Node) alterConfigs(c *conn, h wire.RequestHeader, req *wire.Incremental
 			continue
 		}
 		add()
-		n.propose(encodeTopicConfigs(res.Name, changes), func(r result) {
+		n.proposeOrForward(encodeTopicConfigs(res.Name, changes), func(r result) {
 			out.ErrorCode = r.errCode
 			done()
 		})

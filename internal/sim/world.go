@@ -68,6 +68,9 @@ type Stats struct {
 	// Admin operations acknowledged: DeleteRecords, partitions added,
 	// topics deleted.
 	RecordDeletes, PartitionsAdded, TopicsDeleted int
+	// Bytes the cleaner copied forward, as counted by the nodes leading at
+	// the end (design C2).
+	BytesRelocated int
 	// Coverage of states that are hard to reach (docs/design/a3-sim-tools.md,
 	// 2.3): a fault that hit the serving leader, a partition that isolated
 	// it, and terms that ended without electing anyone (split votes, or a

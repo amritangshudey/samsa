@@ -481,3 +481,36 @@ func TestTruncatePrefixAndReset(t *testing.T) {
 		t.Fatalf("after power loss: [%d, %d), want [500, 501)", l.StartOffset(), l.EndOffset())
 	}
 }
+
+// SizeFrom and SegmentEnd describe the segments from an offset on, as the
+// retention cleaner sees them.
+func TestSizeFromAndSegmentEnd(t *testing.T) {
+	disk := simsys.NewDisk(simsys.NewRand(1), simsys.DiskConfig{})
+	l, err := Open(disk, "log", Config{SegmentBytes: 100, MaxPayloadBytes: 40, SyncBytes: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 30 {
+		if _, err := l.Append([]byte(fmt.Sprintf("record %02d", i)), 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(l.segs) < 3 {
+		t.Fatalf("%d segments, want at least 3", len(l.segs))
+	}
+	total := l.SizeFrom(0)
+	second := l.segs[1].base
+	if got := l.SegmentEnd(0); got != second {
+		t.Fatalf("SegmentEnd(0) = %d, want %d", got, second)
+	}
+	if got := l.SegmentEnd(second - 1); got != second {
+		t.Fatalf("SegmentEnd(%d) = %d, want %d", second-1, got, second)
+	}
+	if got := l.SizeFrom(second); got != total-l.segs[0].size {
+		t.Fatalf("SizeFrom(%d) = %d, want %d", second, got, total-l.segs[0].size)
+	}
+	last := l.segs[len(l.segs)-1].base
+	if l.SegmentEnd(last) != -1 || l.SizeFrom(l.EndOffset()) != l.segs[len(l.segs)-1].size {
+		t.Fatal("the active segment has an end, or SizeFrom past it is wrong")
+	}
+}

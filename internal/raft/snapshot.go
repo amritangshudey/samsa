@@ -192,6 +192,19 @@ func (r *Raft) RetentionCut(maxBytes int64) int64 {
 	return min(r.log.CutFor(maxBytes), r.commit+1)
 }
 
+// LogBytesFrom returns the bytes the log keeps on disk from the segment
+// holding index on.
+func (r *Raft) LogBytesFrom(index int64) int64 { return r.log.SizeFrom(index) }
+
+// SegmentEnd returns the first index after the segment holding index, or
+// -1 while that segment is the one being written or not all committed.
+func (r *Raft) SegmentEnd(index int64) int64 {
+	if end := r.log.SegmentEnd(index); end >= 0 && end <= r.commit+1 {
+		return end
+	}
+	return -1
+}
+
 // The install marker: the snapshot a follower is installing, and the index
 // its log starts at. Its presence means the node is installing.
 const (

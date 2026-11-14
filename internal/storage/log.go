@@ -619,6 +619,28 @@ func (l *Log) CutFor(maxBytes int64) int64 {
 	return l.segs[i].base
 }
 
+// SizeFrom returns the bytes of the segments that hold offset and after.
+func (l *Log) SizeFrom(offset int64) int64 {
+	var total int64
+	for i, s := range l.segs {
+		if i == len(l.segs)-1 || l.segs[i+1].base > offset {
+			total += s.size
+		}
+	}
+	return total
+}
+
+// SegmentEnd returns the base of the segment after the one that holds
+// offset, or -1 if offset is in the active segment.
+func (l *Log) SegmentEnd(offset int64) int64 {
+	for i := 0; i < len(l.segs)-1; i++ {
+		if l.segs[i+1].base > offset {
+			return l.segs[i+1].base
+		}
+	}
+	return -1
+}
+
 // StartOffset returns the offset of the first record in the log.
 func (l *Log) StartOffset() int64 { return l.segs[0].base }
 
