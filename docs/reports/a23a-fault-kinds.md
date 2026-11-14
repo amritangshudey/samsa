@@ -29,8 +29,9 @@ or `kinds=all`.
 | | |
 |---|---|
 | Unit tests | each kind at rate 1 (`TestFaultFetches`, `TestFaultExpire`), the spec (`kinds=all`) |
-| Sample app, commit before process, `seed=5,rate=0.2,kinds=expire` | FAIL: records lost, listed (first run of the test) |
-| Sample app, commit after process, `seed=5,rate=0.03,kinds=all` | PASS, and all four new kinds appear in the broker log |
+| Sample app, commit before process, `seed=5,rate=0.2,kinds=expire` | FAIL: records lost, listed |
+| Sample app, commit after process, `kinds=expire` at 0.02, and `emptyfetch+slowfetch` at 0.6 | PASS, and each kind appears in the broker log (28 s for the three runs). The high rate is because the input is read in a few large fetches, so few requests can be faulted |
+| `outofrange` | unit test only: a consumer told its offset is out of range resets, by default to the start, and reprocesses the whole topic, which took 108 s in one run and is too slow and too variable for CI |
 | Faults off | no draw; the simulator suite is unchanged |
 
 ## What is untested or weak
