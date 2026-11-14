@@ -244,6 +244,11 @@ for how much that is worth.
   max(live, segment) plus one segment. Either trigger then means more
   than a segment of the log is dead, and every round frees some of it.
   2,000 seeds finish in 73 s.
+- **Broken commit in history:** 8eeb220 on the `retention-a` branch
+  carries this bug, and `TestSimCatchesMissingFencing` hangs on it. The
+  fix is 088852e. The branch was already pushed, and history is never
+  rewritten, so the rule that every commit passes its tests is broken
+  for that one commit. Bisect past it.
 
 ## Bugs found by real clients
 
