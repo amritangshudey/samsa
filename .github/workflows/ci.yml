@@ -42,6 +42,21 @@ jobs:
       - if: github.event_name == 'schedule'
         run: go test ./internal/sim -count=1 -v -timeout 5h -run '^TestSim$' -seeds=30000 -base-seed=$(( $(date +%s) / 86400 * 30000 ))
 
+  # Exhaustive search of three Raft nodes (docs/design/b2-exhaustive.md)
+  # at larger bounds, and the shortest counterexample of a mutation.
+  exhaustive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      # Larger bounds than go test's (depth 10); about 4 minutes on 10 cores.
+      - run: go test ./internal/raft -count=1 -timeout 60m -run '^TestExhaustive$' -explore-depth 12
+      - run: go test ./internal/raft -count=1 -timeout 60m -run '^TestExhaustive$' -explore-depth 12 -explore-crashes 1 -explore-mode classic
+      - run: go test ./internal/raft -count=1 -timeout 60m -run '^TestExhaustive$' -explore-depth 12 -explore-drops 1 -explore-mode classic
+      - run: go test ./internal/raft -count=1 -v -timeout 60m -run '^TestExhaustiveShortest$' -explore-shortest
+
   lint:
     runs-on: ubuntu-latest
     steps:

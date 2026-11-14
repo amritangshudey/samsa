@@ -34,6 +34,9 @@ type tnode struct {
 	// armedAt is when each timer was last armed, for tests that move the
 	// clock themselves (hardening_test.go).
 	armedAt map[Timer]sys.Instant
+	// now is this node's own clock, used instead of the cluster's when
+	// cluster.ownClocks is set (explore_test.go).
+	now sys.Instant
 }
 
 func (n *tnode) Send(to sys.NodeID, msg []byte) {
@@ -44,14 +47,19 @@ func (n *tnode) SetTimer(t Timer, _ time.Duration) {
 	if n.armedAt == nil {
 		n.armedAt = map[Timer]sys.Instant{}
 	}
-	n.armedAt[t] = n.c.now
+	n.armedAt[t] = n.Now()
 	if t == TimerElection {
 		n.arms++
 	}
 }
 func (n *tnode) CancelTimer(t Timer) { n.armed[t] = false }
 func (n *tnode) Rand() uint64        { return n.c.rng.Uint64() }
-func (n *tnode) Now() sys.Instant    { return n.c.now }
+func (n *tnode) Now() sys.Instant {
+	if n.c.ownClocks {
+		return n.now
+	}
+	return n.c.now
+}
 
 // cluster is a set of Raft nodes with no network and no clock: the test
 // decides which message is delivered and which timer fires.
@@ -68,6 +76,9 @@ type cluster struct {
 	// manualFlush stops run from flushing nodes, for tests about what
 	// happens before entries are durable.
 	manualFlush bool
+	// ownClocks gives every node its own clock (tnode.now): the exhaustive
+	// search moves one node's time at a time.
+	ownClocks bool
 }
 
 func newCluster(t *testing.T, n int, mutate func(*Config)) *cluster {
