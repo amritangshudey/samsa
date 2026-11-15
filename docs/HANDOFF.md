@@ -87,7 +87,7 @@ worktree; then tags (v0.3 and onward, after checking CHANGELOG-style notes in
    CreateTopics v5 to 7, DeleteTopics v6. State needs a topic id per topic
    (snapshot and format level change). Needed by 18 and 22.
 2. **18 KIP-848 consumer groups** (ConsumerGroupHeartbeat 68, Describe 69;
-   server-side range and uniform assignors), then **24b** nothing; **22 share
+   server-side range and uniform assignors), then **22 share
    groups** (75 to 78) after 18; **15 transactions**; **23b** fault testing for
    them.
 3. **20 and 21 object storage:** design and prototype first, one design for
