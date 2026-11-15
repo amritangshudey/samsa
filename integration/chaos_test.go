@@ -16,6 +16,7 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
+	"github.com/twmb/franz-go/pkg/kversion"
 
 	"github.com/amritangshudey/samsa/internal/sim"
 )
@@ -88,7 +89,9 @@ func (c *chaosCluster) client(opts ...kgo.Opt) *kgo.Client {
 	for id := int32(1); id <= 3; id++ {
 		seeds = append(seeds, c.clients[id].addr())
 	}
-	cl, err := kgo.NewClient(append([]kgo.Opt{kgo.SeedBrokers(seeds...)}, opts...)...)
+	// Fetch v10 at most: from v11 a follower answers too, from what it has
+	// applied (KIP-392), and this test holds every answer to a leader's.
+	cl, err := kgo.NewClient(append([]kgo.Opt{kgo.SeedBrokers(seeds...), kgo.MaxVersions(kversion.V2_2_0())}, opts...)...)
 	if err != nil {
 		c.t.Fatal(err)
 	}
