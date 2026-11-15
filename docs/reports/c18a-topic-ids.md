@@ -85,11 +85,13 @@ ADR 0032.
   Fixed by comparing the unacknowledged tombstone's in-flight end time against
   `r.sent` (`oldTombUntil[k] >= r.sent`), and added seed 951 to
   `internal/sim/regressions.txt`.
-- **BUGS.md C3:** on Ubuntu 24.04 (`librdkafka` 2.3.0), `kcat` failed SASL
-  authentication with `SASL Handshake not supported by broker` because
-  `librdkafka` < 2.10 checks that the broker's advertised `SaslHandshake` range
-  overlaps `[0, 0]`. Fixed by setting `AdvertisedMin: 0` on `KeySaslHandshake`
-  while keeping `Min: 1`.
+- **BUGS.md C3:** on Ubuntu 24.04 (`librdkafka` 2.3.0), `kcat` failed SASL/SCRAM
+  because (1) `librdkafka` < 2.10 checks that the broker's advertised
+  `SaslHandshake` range overlaps `[0, 0]`, and (2) `librdkafka` <= 2.6.0
+  duplicates the client nonce in `client-final-message-without-proof`
+  (`confluentinc/librdkafka#4895`, `KAFKA-17805`). Fixed by setting
+  `AdvertisedMin: 0` on `KeySaslHandshake` and accepting the duplicated client
+  nonce prefix in `scram.Server.Final`.
 
 ## How to run it
 

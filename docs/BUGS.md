@@ -283,23 +283,27 @@ for how much that is worth.
   applies twice is harmless. The leader accepts a forwarded topic config
   command only at format level 2. `TestAlterConfigsForwarded` covers it.
 
-### C3. Advertising SaslHandshake from version 1 broke librdkafka < 2.10 (C18a, before merge)
+### C3. SASL/SCRAM failed against librdkafka 2.3.0 on Ubuntu 24.04 (C18a, before merge)
 
 - **Test:** `TestACLsOtherClients/kcat` and `TestTLSAndSASLOtherClients/kcat`
   on Ubuntu 24.04 (`librdkafka` 2.3.0).
-- **Symptom:** `librdkafka` aborted immediately after `ApiVersions` v3 with
-  `Failed to initialize SASL authentication: SASL Handshake not supported by
-  broker (required by mechanism SCRAM-SHA-256)`.
-- **Root cause:** in `librdkafka` before 2.10 (`rdkafka_feature.c`),
-  `RD_KAFKA_FEATURE_SASL_HANDSHAKE` is enabled only if the broker's advertised
-  `SaslHandshake` range overlaps `[0, 0]` (`librdkafka` 2.10 widened the check
-  to `[0, RD_KAFKAP_RPC_VERSION_MAX]`). Samsa advertised `1..1`, so `librdkafka`
-  2.3.0 cleared `RD_KAFKA_FEATURE_SASL_HANDSHAKE` even though it sends
-  `SaslHandshake` version 1 once enabled.
+- **Symptom:** first, `librdkafka` aborted immediately after `ApiVersions` v3
+  with `Failed to initialize SASL authentication: SASL Handshake not supported
+  by broker (required by mechanism SCRAM-SHA-256)`. Second, once `SaslHandshake`
+  was sent, `SaslAuthenticate` failed with `wrong SCRAM proof`.
+- **Root cause:** two bugs in older `librdkafka` releases:
+  1. In `librdkafka` before 2.10 (`rdkafka_feature.c`),
+     `RD_KAFKA_FEATURE_SASL_HANDSHAKE` is enabled only if the broker's
+     advertised `SaslHandshake` range overlaps `[0, 0]`. Samsa advertised
+     `1..1`, so `librdkafka` 2.3.0 cleared `RD_KAFKA_FEATURE_SASL_HANDSHAKE`
+     even though it sends `SaslHandshake` version 1 once enabled.
+  2. In `librdkafka` <= 2.6.0 (`rdkafka_sasl_scram.c`,
+     `confluentinc/librdkafka#4895`), `client-final-message-without-proof`
+     concatenated the client nonce a second time (`r=<cnonce><cnonce><snonce>`),
+     which Apache Kafka worked around in `ScramSaslServer.java` (`KAFKA-17805`).
 - **Fix:** `KeySaslHandshake` advertises `AdvertisedMin: 0` in `ApiVersions`
-  (matching Kafka's `SaslHandshakeRequest.json` `"validVersions": "0-1"` and
-  Samsa's existing `AdvertisedMin: 0` on `KeyProduce` for `KAFKA-18659`), while
-  `Min: 1` continues to reject version 0 requests.
+  while `Min: 1` continues to reject version 0 requests, and `scram.Server.Final`
+  accepts both `r=<cnonce><snonce>` and `r=<cnonce><cnonce><snonce>`.
 
 ## Bugs found by the soak
 
