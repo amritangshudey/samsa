@@ -33,9 +33,10 @@ settings). Guide: `docs/guides/configuration.md`.
 
 ## What does not meet the plan
 
-- The plan said **a prod node needs at most five settings**. A secured node
-  of a three-node cluster needs eight: `-profile`, `-node-id`, `-data`,
-  `-peers`, `-tls-cert`, `-tls-key`, `-sasl-mechanisms`, `-sasl-users`. Peers,
+- The plan said **a prod node needs at most five settings**. A node of a
+  three-node cluster that `doctor` finds nothing risky in needs eleven:
+  `-profile`, `-node-id`, `-data`, `-peers`, the three `-peer-tls-*`, `-tls-cert`,
+  `-tls-key`, `-sasl-mechanisms`, `-sasl-users`. Peers,
   security and storage each need their own.
 - **"Every flag documented with its default and when to change it"** is
   `samsa -h` for the default and meaning, and the guide's table by group for
@@ -61,4 +62,4 @@ settings). Guide: `docs/guides/configuration.md`.
 8. **Does a profile change the on-disk format?** No.
 9. **What happens with `-profile` in the config file?** It works: the file is
    read before profiles apply.
-10. **Why eight settings, not five?** See the section above.
+10. **Why eleven settings, not five?** See the section above.

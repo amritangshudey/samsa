@@ -14,6 +14,7 @@ func testFlags() *flag.FlagSet {
 	fs.String("scrub-interval", "0s", "")
 	fs.String("producer-expiry", "24h0m0s", "")
 	fs.String("peers", "", "")
+	fs.String("peer-tls-cert", "", "")
 	fs.String("tls-cert", "", "")
 	fs.String("sasl-mechanisms", "", "")
 	fs.String("profile", "", "")
@@ -67,6 +68,11 @@ func TestDoctorReportsSourcesAndRisks(t *testing.T) {
 	_ = fs.Set("tls-cert", "x.pem")
 	_ = fs.Set("sasl-mechanisms", "SCRAM-SHA-256")
 	_ = fs.Set("peers", "1=a:1/b:2,2=c:3/d:4,3=e:5/f:6")
+	out.Reset()
+	if !doctor(&out, fs, map[string]string{}, "prod") || !strings.Contains(out.String(), "nodes do not authenticate each other") {
+		t.Fatalf("a cluster with plain peer traffic is not reported:\n%s", out.String())
+	}
+	_ = fs.Set("peer-tls-cert", "peer.pem")
 	out.Reset()
 	if doctor(&out, fs, map[string]string{}, "prod") {
 		t.Fatalf("a secured three-node cluster is reported as risky:\n%s", out.String())

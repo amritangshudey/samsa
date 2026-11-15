@@ -79,6 +79,9 @@ func risk(name, value string, v map[string]string) string {
 		if value == "" || !strings.Contains(value, ",") {
 			return "! a single node: nothing to fail over to, nothing to repair damage from"
 		}
+		if v["peer-tls-cert"] == "" {
+			return "! nodes do not authenticate each other: anyone who can reach a peer port can send Raft messages"
+		}
 	case "scrub-interval":
 		if strings.HasPrefix(value, "-") {
 			return "damaged data on disk is found only when something reads it"

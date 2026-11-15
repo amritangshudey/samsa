@@ -36,16 +36,19 @@ $ samsa doctor -profile prod -data /var/lib/samsa
 
 ## What a production node needs
 
-Eight settings for a secured node of a three-node cluster:
+Eleven settings for a node of a three-node cluster that `samsa doctor` finds nothing risky in:
 
 ```
 -profile prod  -node-id 1  -data /var/lib/samsa
 -peers 1=h1:9092/h1:9093,2=h2:9092/h2:9093,3=h3:9092/h3:9093
 -tls-cert node.pem  -tls-key node.key
+-peer-tls-cert peer.pem  -peer-tls-key peer.key  -peer-tls-ca ca.pem
 -sasl-mechanisms SCRAM-SHA-256  -sasl-users users.txt
 ```
 
-The plan said five; peers, security and storage each need their own flags.
+The plan said five; peers, client security, peer security and storage each
+need their own flags. (A plaintext peer port lets anyone who can reach it
+send Raft messages: `doctor` marks it.)
 The rest (retention, compaction, scrub) have defaults, and topics set their
 own retention and cleanup policy (`kafka-configs.sh --alter`).
 

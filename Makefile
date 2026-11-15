@@ -23,7 +23,7 @@ VERSION ?=
 LDFLAGS := -ldflags "-X main.version=$(VERSION)"
 PLATFORMS := darwin/arm64 darwin/amd64 linux/arm64 linux/amd64
 
-.PHONY: soak build test race lint fuzz integration chaos sim shrink bench release
+.PHONY: soak build test race lint fuzz integration chaos sim shrink bench release image
 
 build:
 	CGO_ENABLED=0 go build -trimpath $(LDFLAGS) -o bin/samsa ./cmd/samsa
@@ -41,6 +41,14 @@ release:
 		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath $(LDFLAGS) -o dist/samsa-$(VERSION)-$$os-$$arch ./cmd/samsa || exit 1; \
 	done
 	cd dist && shasum -a 256 samsa-$(VERSION)-* > SHA256SUMS-$(VERSION)
+
+# A container image of the Linux binary (packaging/Dockerfile): the base is
+# scratch, so nothing is pulled. IMGARCH defaults to this machine's.
+IMGARCH ?= $(shell go env GOARCH)
+image:
+	mkdir -p dist
+	CGO_ENABLED=0 GOOS=linux GOARCH=$(IMGARCH) go build -trimpath $(LDFLAGS) -o dist/samsa-linux-$(IMGARCH) ./cmd/samsa
+	docker build -f packaging/Dockerfile --build-arg BIN=dist/samsa-linux-$(IMGARCH) -t samsa:$(or $(VERSION),dev) .
 
 test:
 	go vet ./...
