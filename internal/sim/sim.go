@@ -240,7 +240,7 @@ func Run(cfg Config) Result {
 	}
 
 	for id := int32(1); id <= int32(w.opts.nodes); id++ {
-		w.bcfg.Peers = append(w.bcfg.Peers, broker.Peer{ID: id, Host: "sim", Port: 9091 + id})
+		w.bcfg.Peers = append(w.bcfg.Peers, broker.Peer{ID: id, Host: "sim", Port: 9091 + id, Rack: fmt.Sprintf("r%d", id%3)})
 	}
 	all := slices.Clone(w.bcfg.Peers)
 	if w.opts.changes {

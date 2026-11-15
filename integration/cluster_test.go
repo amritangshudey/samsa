@@ -33,14 +33,28 @@ func freeAddr(t *testing.T) string {
 // fresh data directory, with args added to each node's flags.
 func startCluster(t *testing.T, n int, args ...string) *cluster {
 	t.Helper()
+	return startClusterWith(t, n, nil, nil, args...)
+}
+
+// startClusterWith is startCluster with a rack for each node (`id=...@rack`
+// in -peers; none if racks is nil) and flags for single nodes.
+func startClusterWith(t *testing.T, n int, racks []string, perNode func(id int32) []string, args ...string) *cluster {
+	t.Helper()
 	c := &cluster{t: t, nodes: map[int32]*broker{}}
 	var peers []string
 	for id := int32(1); id <= int32(n); id++ {
 		c.nodes[id] = &broker{t: t, addr: freeAddr(t), dir: t.TempDir()}
-		peers = append(peers, fmt.Sprintf("%d=%s/%s", id, c.nodes[id].addr, freeAddr(t)))
+		peer := fmt.Sprintf("%d=%s/%s", id, c.nodes[id].addr, freeAddr(t))
+		if racks != nil {
+			peer += "@" + racks[id-1]
+		}
+		peers = append(peers, peer)
 	}
 	for id, b := range c.nodes {
 		b.args = append([]string{"-node-id", fmt.Sprint(id), "-peers", strings.Join(peers, ",")}, args...)
+		if perNode != nil {
+			b.args = append(b.args, perNode(id)...)
+		}
 		b.start()
 	}
 	t.Cleanup(func() {

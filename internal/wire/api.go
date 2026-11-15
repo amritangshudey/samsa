@@ -88,6 +88,7 @@ const (
 	ErrUnsupportedForMessageFormat int16 = 43
 	ErrUnsupportedCompressionType  int16 = 76
 	ErrOutOfOrderSequenceNumber    int16 = 45
+	ErrOffsetNotAvailable          int16 = 78
 	ErrInvalidProducerEpoch        int16 = 47
 	ErrMemberIDRequired            int16 = 79
 	ErrGroupMaxSizeReached         int16 = 81

@@ -78,6 +78,9 @@ type Stats struct {
 	// damage that was made, that stopped a node, and that a restarted node
 	// cut out and fetched back; ScrubbedBytes is what the scrub read.
 	DamageInjected, DamageFound, DamageRepaired, ScrubbedBytes int
+	// FollowerReads counts fetches a follower answered with records, and
+	// PreferredReplicas the answers that named a replica in the consumer's rack.
+	FollowerReads, PreferredReplicas int
 	// Coverage of states that are hard to reach (docs/design/a3-sim-tools.md,
 	// 2.3): a fault that hit the serving leader, a partition that isolated
 	// it, and terms that ended without electing anyone (split votes, or a
@@ -96,7 +99,12 @@ type simNode struct {
 	inc       *incarnation // nil while the node is down
 	powerLost bool         // the disk must be restarted before the node
 	term      int64        // S5: the highest term seen on this node, ever
-	vote      sys.NodeID   // S5: whom it voted for in that term, if voted
+	// serving and servEpoch: whether the node served as leader at the last
+	// monitor call, and how many times that changed. A client compares the
+	// epoch at send and at receipt: if it moved, who answered is not known.
+	serving   bool
+	servEpoch int
+	vote      sys.NodeID // S5: whom it voted for in that term, if voted
 	voted     bool
 }
 

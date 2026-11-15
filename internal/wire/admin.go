@@ -776,7 +776,7 @@ func (m *DescribeClusterResponse) Decode(r *Reader, v int16) {
 	m.ControllerID = r.Int32()
 	m.Brokers = Array(r, true, func() Broker {
 		b := Broker{NodeID: r.Int32(), Host: r.String(true), Port: r.Int32()}
-		r.NullableString(true) // Rack
+		b.Rack, _ = r.NullableString(true)
 		if v >= 2 {
 			r.Bool() // IsFenced
 		}
@@ -802,7 +802,11 @@ func (m *DescribeClusterResponse) Encode(w *Writer, v int16) {
 		w.Int32(b.NodeID)
 		w.String(true, b.Host)
 		w.Int32(b.Port)
-		w.NullString(true)
+		if b.Rack == "" {
+			w.NullString(true)
+		} else {
+			w.String(true, b.Rack)
+		}
 		if v >= 2 {
 			w.Bool(false)
 		}

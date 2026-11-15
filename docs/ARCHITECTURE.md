@@ -95,6 +95,13 @@ under the snapshot). While `recovering` exists the node grants no vote and
 does not campaign; it ends when the node holds what it held, or the leader
 has nothing more for it.
 
+**Fetch from a follower** ([design](design/c19-follower-fetch.md), ADR 0031;
+`broker/follower.go`). From Fetch v11 a follower that has heard its leader,
+is not recovering and is not receiving a snapshot answers from applied state;
+the leader names a caught-up replica in the consumer's rack and sends no
+records. A follower answers OFFSET_NOT_AVAILABLE for an offset it has not
+applied.
+
 Below level 2, retention is the global trim alone, as described next.
 
 **Retention** ([design](design/a1-snapshots.md), section 3). When its log

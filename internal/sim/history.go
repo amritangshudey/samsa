@@ -300,6 +300,14 @@ type Fetch struct {
 	HW       int64
 	LogStart int64 // -1 below Fetch v5, which does not carry it
 	Records  []byte
+	// Follower is set when a node that was not the leader answered
+	// (KIP-392): what it applied may lag, so nothing is held to the floor
+	// or to what the leader has told others, but every record it returns
+	// is checked as any other.
+	Follower bool
+	// Redirected is set when the answer names another node to read from
+	// and carries no records.
+	Redirected bool
 }
 
 // Start returns the highest log start offset reported for tp: retention
@@ -348,18 +356,23 @@ func (m *Model) Fetched(f Fetch) (next int64, err error) {
 	if m.stale(f.Epoch) {
 		return -1, nil
 	}
-	if f.Deleted && f.Err != wire.ErrUnknownTopicOrPartition {
+	if f.Deleted && f.Err != wire.ErrUnknownTopicOrPartition && !f.Follower {
 		return -1, fmt.Errorf("D1: %v was deleted, but a fetch sent afterwards was answered with code %d", f.TP, f.Err)
 	}
 	switch f.Err {
 	case wire.ErrNone:
 	case wire.ErrUnknownTopicOrPartition:
-		if f.Known {
+		if f.Known && !f.Follower {
 			return -1, fmt.Errorf("I1: %v was created but the broker does not know it", f.TP)
 		}
 		return -1, nil
+	case wire.ErrOffsetNotAvailable:
+		if !f.Follower {
+			return -1, fmt.Errorf("I2: the leader answered OFFSET_NOT_AVAILABLE to a fetch of %v at %d", f.TP, f.Offset)
+		}
+		return -1, nil // it has not applied that far: the consumer waits
 	}
-	if f.LogStart >= 0 && (f.Err == wire.ErrNone || f.Err == wire.ErrOffsetOutOfRange) {
+	if f.LogStart >= 0 && !f.Follower && (f.Err == wire.ErrNone || f.Err == wire.ErrOffsetOutOfRange) {
 		switch {
 		case f.LogStart < f.Start:
 			return -1, fmt.Errorf("R1: %v log start went back from %d to %d", f.TP, f.Start, f.LogStart)
@@ -390,7 +403,7 @@ func (m *Model) Fetched(f Fetch) (next int64, err error) {
 	if !m.possible(f.TP) {
 		return -1, fmt.Errorf("I4: fetch of %v succeeded, but nobody created it", f.TP)
 	}
-	if f.HW < f.Floor {
+	if f.HW < f.Floor && !f.Follower {
 		return -1, fmt.Errorf("I1/I3: %v high watermark %d is below %d, which was acknowledged or seen before the request", f.TP, f.HW, f.Floor)
 	}
 	if f.Offset < 0 || f.Offset > f.HW {
@@ -426,7 +439,7 @@ func (m *Model) Fetched(f Fetch) (next int64, err error) {
 	if next > f.HW {
 		return -1, fmt.Errorf("I2: %v returned records up to %d beyond its high watermark %d", f.TP, next-1, f.HW)
 	}
-	if next == -1 && f.MustProgress && f.Offset < f.HW && m.compact[f.TP.Topic] == nil { // a compacted partition may end in a gap
+	if next == -1 && f.MustProgress && f.Offset < f.HW && !f.Redirected && m.compact[f.TP.Topic] == nil { // a compacted partition may end in a gap
 		return -1, fmt.Errorf("I2: %v fetch at %d returned nothing although the high watermark is %d", f.TP, f.Offset, f.HW)
 	}
 	p := m.part(f.TP)

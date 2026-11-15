@@ -46,6 +46,9 @@ A scrub reads the sealed segments of the Raft log (`-scrub-bytes-per-second`,
 cuts the damage out and fetches it again from the others, voting for nobody
 until it has it back (ADR 0030; the active segment and a cluster of one are
 not covered).
+A node's rack goes after its peer address (`-peers 1=h:9092/h:9093@rack-a,...`):
+a consumer that sets `client.rack` is then told to read from a node in its
+own rack (KIP-392, ADR 0031).
 `-producer-expiry` (default 24h) is how long an idempotent producer may
 write nothing before it is forgotten. If it comes back, its next batch
 is refused with `OUT_OF_ORDER_SEQUENCE_NUMBER`, and the Java client starts

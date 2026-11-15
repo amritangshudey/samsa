@@ -78,6 +78,9 @@ type client struct {
 	fetchMin int16         // lowest Fetch version to use
 	idem     *idemProducer // idempotent producers: the session
 	adm      *adminState   // admin clients: doomedTopic's life (admin.go)
+	// softPin is set when pin was chosen by a leader naming a replica in the
+	// client's rack: the client goes back to any node after a while.
+	softPin bool
 }
 
 // tick is the client's heartbeat: connect, misbehave, or issue a request.
@@ -85,6 +88,9 @@ func (cl *client) tick() {
 	w := cl.w
 	if w.quiet {
 		return
+	}
+	if cl.softPin && cl.rng.Chance(0.03) {
+		cl.pin, cl.softPin = nil, false
 	}
 	switch {
 	case cl.c == nil:
@@ -500,6 +506,7 @@ func (cl *client) consume() {
 		MaxWaitMs: []int32{0, 0, 5, 50, 500}[cl.rng.Intn(5)],
 		MinBytes:  []int32{0, 1, 1, 1000}[cl.rng.Intn(4)],
 		MaxBytes:  []int32{1, 300, 1 << 20}[cl.rng.Intn(3)],
+		RackID:    []string{"", "", "r0", "r1", "r2"}[cl.rng.Intn(5)],
 	}
 	var asked []Fetch
 	for _, tp := range cl.distinctTPs(1 + cl.rng.Intn(3)) {
@@ -531,6 +538,13 @@ func (cl *client) fetch(req *wire.FetchRequest, asked []Fetch, each func(f Fetch
 	w := cl.w
 	resp := &wire.FetchResponse{}
 	version := max(cl.version(wire.KeyFetch), cl.fetchMin)
+	var node *simNode
+	var epoch0 int
+	var serving0 bool
+	if cl.c != nil && cl.c.inc != nil {
+		node = cl.c.inc.node
+		epoch0, serving0 = node.servEpoch, node.serving
+	}
 	cl.request(wire.KeyFetch, version, req, resp, func(ok bool) {
 		if !ok {
 			return
@@ -540,6 +554,12 @@ func (cl *client) fetch(req *wire.FetchRequest, asked []Fetch, each func(f Fetch
 			return
 		}
 		bytesSoFar := 0
+		// Not the leader now, or possibly not then: the node's role moved
+		// between the request and this answer. Then the answer is held only to
+		// what holds of a follower's, and a redirect is not judged.
+		follower := node != nil && (node.servEpoch != epoch0 || node.inc == nil || !node.inc.n.Serving())
+		certainFollower := follower && node != nil && node.servEpoch == epoch0 && !serving0 && node.inc != nil
+		var moveTo *simNode
 		for i, f := range asked {
 			t := resp.Topics[i]
 			if t.Name != f.TP.Topic || len(t.Partitions) != 1 || t.Partitions[0].Index != f.TP.Part {
@@ -548,6 +568,24 @@ func (cl *client) fetch(req *wire.FetchRequest, asked []Fetch, each func(f Fetch
 			}
 			p := t.Partitions[0]
 			f.Err, f.HW, f.Records, f.MustProgress, f.LogStart = p.ErrorCode, p.HighWatermark, p.Records, bytesSoFar == 0, -1
+			f.Follower = follower
+			if p.HasPreferred {
+				// KIP-392: the leader names a replica in the consumer's rack and sends no records.
+				nd := w.node(p.PreferredReadReplica)
+				switch {
+				case certainFollower:
+					w.fail("a follower named a preferred read replica for %v", f.TP)
+					return
+				case nd == nil || fmt.Sprintf("r%d", nd.id%3) != req.RackID:
+					w.fail("preferred read replica %d for rack %q is not in that rack", p.PreferredReadReplica, req.RackID)
+					return
+				case len(p.Records) != 0 || p.ErrorCode != wire.ErrNone:
+					w.fail("a fetch that names a preferred replica carries records or an error: %+v", p)
+					return
+				}
+				moveTo, f.Redirected = nd, true
+				w.stats.PreferredReplicas++
+			}
 			if version >= 5 {
 				f.LogStart = p.LogStartOffset
 			}
@@ -563,6 +601,13 @@ func (cl *client) fetch(req *wire.FetchRequest, asked []Fetch, each func(f Fetch
 				w.stats.RecordsRead += int(next - max(f.Offset, 0))
 			}
 			each(f, next)
+			if certainFollower && next >= 0 {
+				w.stats.FollowerReads++
+			}
+		}
+		if moveTo != nil && cl.pin == nil {
+			cl.pin, cl.softPin = moveTo, true // read from there from now on
+			cl.hangUp()
 		}
 	})
 }

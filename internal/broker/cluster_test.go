@@ -18,7 +18,7 @@ type trio struct {
 
 func newTrio(t *testing.T) *trio {
 	tr := &trio{t: t, h: map[sys.NodeID]*harness{}}
-	peers := []Peer{{1, "host1", 9092, "host1:9192"}, {2, "host2", 9092, "host2:9192"}, {3, "host3", 9092, "host3:9192"}}
+	peers := []Peer{{ID: 1, Host: "host1", Port: 9092, PeerAddr: "host1:9192", Rack: "r1"}, {ID: 2, Host: "host2", Port: 9092, PeerAddr: "host2:9192", Rack: "r2"}, {ID: 3, Host: "host3", Port: 9092, PeerAddr: "host3:9192", Rack: "r3"}}
 	for _, p := range peers {
 		tr.h[sys.NodeID(p.ID)] = &harness{t: t, cfg: Config{NodeID: p.ID, Host: p.Host, Port: p.Port, Peers: peers},
 			disk: simsys.NewDisk(simsys.NewRand(uint64(p.ID)), simsys.DiskConfig{}), rand: simsys.NewRand(uint64(10 + p.ID))}
@@ -135,7 +135,18 @@ func TestOnlyTheLeaderServes(t *testing.T) {
 	var pr wire.ProduceResponse
 	follower.call(1, wire.KeyProduce, 8, produceReq("t", 0, batch("x")), &pr)
 	var fr wire.FetchResponse
-	follower.call(1, wire.KeyFetch, 11, fetchReq("t", 0, 0, 500, 1), &fr)
+	follower.call(1, wire.KeyFetch, 10, fetchReq("t", 0, 0, 500, 1), &fr) // below v11, a consumer is sent to the leader
+	// From v11 (KIP-392), a follower that has heard its leader answers from
+	// what it has applied.
+	var fr11 wire.FetchResponse
+	follower.call(1, wire.KeyFetch, 11, fetchReq("t", 0, 0, 0, 1), &fr11)
+	if p := fr11.Topics[0].Partitions[0]; p.ErrorCode != 0 || p.HighWatermark != 2 || len(p.Records) == 0 {
+		t.Fatalf("Fetch v11 on a follower: %+v", p)
+	}
+	follower.call(1, wire.KeyFetch, 11, fetchReq("t", 0, 5, 0, 1), &fr11)
+	if p := fr11.Topics[0].Partitions[0]; p.ErrorCode != wire.ErrOffsetNotAvailable {
+		t.Fatalf("a follower asked for an offset it has not applied: %+v, want OFFSET_NOT_AVAILABLE", p)
+	}
 	var lo wire.ListOffsetsResponse
 	follower.call(1, wire.KeyListOffsets, 5, &wire.ListOffsetsRequest{Topics: []wire.ListOffsetsTopic{{Name: "t", Partitions: []wire.ListOffsetsPartition{{Index: 0, Timestamp: wire.TimestampLatest}}}}}, &lo)
 	follower.call(1, wire.KeyCreateTopics, 4, &wire.CreateTopicsRequest{Topics: []wire.CreateTopic{{Name: "u", NumPartitions: 1, ReplicationFactor: -1}}}, &ct)
@@ -381,5 +392,68 @@ func TestGracefulStopHandsOver(t *testing.T) {
 	commit(next, wire.KeyProduce, 8, produceReq("t", 0, batch("b")), &pr)
 	if p := pr.Topics[0].Partitions[0]; p.ErrorCode != 0 || p.BaseOffset != 1 {
 		t.Fatalf("produce on the new leader: %+v", p)
+	}
+}
+
+// KIP-392: the leader names a caught-up replica in the consumer's rack and
+// sends no records; it serves a consumer in its own rack itself; a replica
+// that has not caught up is not named.
+func TestLeaderNamesAReplicaInTheConsumersRack(t *testing.T) {
+	tr := newTrio(t)
+	tr.elect(1, 1, 2, 3)
+	lead := tr.h[1]
+	lead.open(1)
+	lead.send(1, wire.KeyCreateTopics, 4, &wire.CreateTopicsRequest{Topics: []wire.CreateTopic{{Name: "t", NumPartitions: 1, ReplicationFactor: 3}}})
+	tr.deliver(1, 2, 3)
+	lead.send(1, wire.KeyProduce, 8, produceReq("t", 0, batch("a", "b")))
+	tr.deliver(1, 2, 3)
+	lead.must(lead.node.OnTimer(timerHeartbeat))
+	tr.deliver(1, 2, 3)
+
+	ask := func(rack string) wire.FetchPartitionResponse {
+		t.Helper()
+		req := fetchReq("t", 0, 0, 0, 1)
+		req.RackID = rack
+		var resp wire.FetchResponse
+		lead.call(9, wire.KeyFetch, 11, req, &resp)
+		return resp.Topics[0].Partitions[0]
+	}
+	lead.open(9)
+	if p := ask("r2"); !p.HasPreferred || p.PreferredReadReplica != 2 || len(p.Records) != 0 || p.ErrorCode != 0 {
+		t.Fatalf("a consumer in rack r2: %+v, want node 2 named and no records", p)
+	}
+	if p := ask("r1"); p.HasPreferred || len(p.Records) == 0 {
+		t.Fatalf("a consumer in the leader's own rack: %+v, want its records", p)
+	}
+	if p := ask("nowhere"); p.HasPreferred || len(p.Records) == 0 {
+		t.Fatalf("a consumer in a rack with no replica: %+v", p)
+	}
+	if p := ask(""); p.HasPreferred || len(p.Records) == 0 {
+		t.Fatalf("a consumer that names no rack: %+v", p)
+	}
+	// Node 3 falls behind: three more writes reach only 1 and 2.
+	for range 3 {
+		lead.send(1, wire.KeyProduce, 8, produceReq("t", 0, batch("c")))
+		tr.deliver(1, 2)
+	}
+	lead.must(lead.node.OnTimer(timerHeartbeat))
+	tr.deliver(1, 2)
+	if p := ask("r3"); p.HasPreferred {
+		t.Fatalf("a replica that has not caught up was named: %+v", p)
+	}
+	if p := ask("r2"); !p.HasPreferred || p.PreferredReadReplica != 2 {
+		t.Fatalf("the caught-up replica is no longer named: %+v", p)
+	}
+	// The named replica serves, and a consumer ahead of it is told to wait.
+	var resp wire.FetchResponse
+	tr.h[2].open(1)
+	tr.h[2].call(1, wire.KeyFetch, 11, fetchReq("t", 0, 0, 0, 1), &resp)
+	if p := resp.Topics[0].Partitions[0]; p.ErrorCode != 0 || len(p.Records) == 0 {
+		t.Fatalf("the replica's answer: %+v", p)
+	}
+	tr.h[3].open(1)
+	tr.h[3].call(1, wire.KeyFetch, 11, fetchReq("t", 0, 5, 0, 1), &resp)
+	if p := resp.Topics[0].Partitions[0]; p.ErrorCode != wire.ErrOffsetNotAvailable {
+		t.Fatalf("a lagging replica asked for offset 5: %+v, want OFFSET_NOT_AVAILABLE", p)
 	}
 }

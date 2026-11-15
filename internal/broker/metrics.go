@@ -29,6 +29,9 @@ type Metrics struct {
 	Recovering bool
 	Repaired   int
 	Scrubbed   int64
+	// FollowerFetchBytes is the record bytes this node answered fetches
+	// with while it was not the leader.
+	FollowerFetchBytes int64
 	// CompactedRecords counts the records the compactor removed as leader.
 	CompactedRecords int64
 
@@ -48,6 +51,7 @@ type counters struct {
 	bytesIn, bytesOut, conns, drops int64
 	relocatedBytes, forcedBytes     int64
 	compactedRecords                int64
+	followerFetchBytes              int64
 }
 
 // Metrics returns the node's counters and gauges. A node is ready when it
@@ -58,7 +62,7 @@ func (n *Node) Metrics() Metrics {
 		Requests: n.stats.requests, BytesIn: n.stats.bytesIn, BytesOut: n.stats.bytesOut,
 		Connections: n.stats.conns, Dropped: n.stats.drops, Open: len(n.conns), Faults: n.faults.count,
 		Recovering: n.raft.Recovering(), Repaired: n.raft.Repaired(), Scrubbed: n.scrubbed,
-		RelocatedBytes: n.stats.relocatedBytes, CompactedRecords: n.stats.compactedRecords, ForcedRetentionBytes: n.stats.forcedBytes,
+		RelocatedBytes: n.stats.relocatedBytes, CompactedRecords: n.stats.compactedRecords, FollowerFetchBytes: n.stats.followerFetchBytes, ForcedRetentionBytes: n.stats.forcedBytes,
 		Leader: n.raft.Role() == raft.Leader, Serving: n.serving,
 		Term: n.raft.Term(), Committed: n.raft.Committed(), Applied: n.applied,
 		LogStart: n.raft.LogStart(), LastIndex: n.raft.LastIndex(), Snapshot: n.raft.SnapshotIndex(),

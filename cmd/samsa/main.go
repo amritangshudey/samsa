@@ -82,7 +82,7 @@ func run() error {
 	syncMode := flag.String("sync", "always", "when a write is acknowledged: always (after fsync), interval (before fsync, synced on a timer), never")
 	syncInterval := flag.Duration("sync-interval", time.Second, "fsync period for -sync=interval")
 	nodeID := flag.Int("node-id", 1, "this node's id")
-	peersText := flag.String("peers", "", "every node of the cluster, this one included, as id=clientHost:port/peerHost:port,... (default: a cluster of this node alone)")
+	peersText := flag.String("peers", "", "every node of the cluster, this one included, as id=clientHost:port/peerHost:port[@rack],... (default: a cluster of this node alone); a rack lets consumers that name theirs read from a node in it")
 	join := flag.Bool("join", false, "with -peers: join a running cluster instead of founding one; -peers names this node and the current voters, and `samsa node add` makes it a voter")
 	retention := flag.Int64("retention-bytes", 0, "a safety limit on the whole log on disk: past it, the oldest data goes even if its topic would keep it (0: none)")
 	retentionTime := flag.Duration("retention-time", 0, "how long a topic without retention.ms keeps records (0: forever)")
@@ -318,6 +318,7 @@ func parsePeers(text string) ([]broker.Peer, map[sys.NodeID]string, error) {
 	for _, item := range strings.Split(text, ",") {
 		idText, rest, ok := strings.Cut(item, "=")
 		client, peer, ok2 := strings.Cut(rest, "/")
+		peer, rack, _ := strings.Cut(peer, "@") // an optional rack
 		id, err := strconv.ParseInt(idText, 10, 32)
 		if !ok || !ok2 || err != nil || id < 0 {
 			return nil, nil, fmt.Errorf("%q is not id=clientHost:port/peerHost:port", item)
@@ -336,7 +337,7 @@ func parsePeers(text string) ([]broker.Peer, map[sys.NodeID]string, error) {
 		if _, dup := addrs[sys.NodeID(id)]; dup {
 			return nil, nil, fmt.Errorf("node %d appears twice", id)
 		}
-		peers = append(peers, broker.Peer{ID: int32(id), Host: host, Port: int32(port), PeerAddr: peer})
+		peers = append(peers, broker.Peer{ID: int32(id), Host: host, Port: int32(port), PeerAddr: peer, Rack: rack})
 		addrs[sys.NodeID(id)] = peer
 	}
 	return peers, addrs, nil
