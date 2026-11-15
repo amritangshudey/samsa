@@ -788,3 +788,24 @@ would happen against Kafka too (not tested against Kafka).
   `ErrorCode == ErrNone`; in `admin.go`, when a retried `CreateTopics` v7
   receives `ErrTopicAlreadyExists` after a dropped connection, it queries
   `Metadata` v12 to read the existing topic's `TopicID`.
+
+### M20. C1 ordered an unacknowledged tombstone by send id instead of its in-flight window (C18a)
+
+- **Seed:** 951, in the 3,000-seed CI run on PR #40.
+- **Reported as:** `C1: record 13376, acknowledged at tc/0 offset 1730 with key key-6, is gone, and nothing later of the key is left to replace it`.
+- **Root cause:** M14 fixed `checkCompactedFinal` to order acknowledged
+  tombstones by offset (`oldTombAt`), but still ordered tombstones whose
+  acknowledgement never arrived by record id (`oldTombID[k] > id`). Here one
+  producer sent tombstone 13359 for `key-6` at 9.958 s and a second producer
+  sent record 13376 for `key-6` at 9.962 s. Record 13376 arrived at leader
+  node 2 first (offset 1730) and was acknowledged at 10.012 s; tombstone 13359
+  arrived at leader node 2 second (offset 1733), replicated to a quorum, and
+  became `recUnknown` when node 2 stepped down at 10.012 s before answering
+  that connection. During quiesce the cleaner removed record 13376 (superseded
+  by tombstone 13359) and then removed tombstone 13359 once
+  `delete.retention.ms` elapsed. Because `13359 < 13376`, `oldTombID` assumed
+  the tombstone had preceded record 13376.
+- **Fix:** `Model.Unknown` records the clock instant `end` when a record's
+  request ends without an answer, and `checkCompactedFinal` tracks
+  `oldTombUntil[k]`, the latest time an unacknowledged old tombstone of key `k`
+  remained in flight (`oldTombUntil[k] >= r.sent`).

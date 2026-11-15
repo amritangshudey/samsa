@@ -36,6 +36,7 @@ type rec struct {
 	state    recState
 	offset   int64 // where it was acknowledged or observed; -1 if neither
 	sent     int64 // ms, when Retention is on: its timestamp is no earlier
+	end      int64 // ms, when Unknown was recorded
 	ackEpoch int   // model epoch when it was acknowledged
 	lost     bool  // seen, then removed by a permitted power-loss truncation
 	final    int   // last final pass that observed it
@@ -249,8 +250,12 @@ func (m *Model) Rejected(first uint64, n int) error {
 // Unknown records that the client will never learn what happened to the n
 // records from first.
 func (m *Model) Unknown(first uint64, n int) {
+	var end int64
+	if m.clock != nil {
+		end = m.clock()
+	}
 	for id := first; id < first+uint64(n); id++ {
-		m.recs[id].state = recUnknown
+		m.recs[id].state, m.recs[id].end = recUnknown, end
 	}
 }
 

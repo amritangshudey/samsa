@@ -77,6 +77,14 @@ ADR 0032.
   `TopicID` on `TOPIC_ALREADY_EXISTS` as well as `ErrNone`. Fixed to check
   `TopicID` only on `ErrNone` and query `Metadata` v12 when `admin.go` meets
   `TOPIC_ALREADY_EXISTS` after a dropped connection.
+- **BUGS.md M20:** seed 951 in the 3,000-seed CI run exposed the remaining half
+  of M14 in `checkCompactedFinal`: an unacknowledged tombstone (`13359`, sent at
+  9.958 s, connection closed at 10.012 s) arrived at the leader after a
+  concurrently sent put (`13376`, sent at 9.962 s, offset 1730), superseded it,
+  and expired during quiesce, while `oldTombID` compared send IDs (`13359 > 13376`).
+  Fixed by comparing the unacknowledged tombstone's in-flight end time against
+  `r.sent` (`oldTombUntil[k] >= r.sent`), and added seed 951 to
+  `internal/sim/regressions.txt`.
 
 ## How to run it
 
