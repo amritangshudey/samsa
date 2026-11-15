@@ -304,6 +304,7 @@ var mutations = []mutationCase{
 	{"remove a tombstone before delete.retention.ms", func(c *broker.Config) { c.UnsafeCompact = broker.UnsafeTombstoneEarly }},
 	{"remove a tombstone while older records of its key remain", func(c *broker.Config) { c.UnsafeCompact = broker.UnsafeTombstoneOrphan }},
 	{"tell keys apart by their first byte", func(c *broker.Config) { c.UnsafeCompact = broker.UnsafeCompactWrongKey }},
+	{"reuse a deleted topic's id when recreating it", func(c *broker.Config) { c.UnsafeReuseTopicID = true }},
 }
 
 // addStats adds every counter of s to total.

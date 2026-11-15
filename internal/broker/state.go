@@ -5,6 +5,7 @@ package broker
 
 import (
 	"cmp"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -53,9 +54,10 @@ const (
 // forwarding and level commands, and Raft configuration entries; level 2
 // topic configurations, relocated batches and state snapshot version 8;
 // level 3 compaction: cmdCompact, and the config values compact,
-// delete.retention.ms and min.compaction.lag.ms.
+// delete.retention.ms and min.compaction.lag.ms; level 4 topic IDs in
+// cmdCreateTopic, cmdDeleteTopic and state snapshot version 9 (ADR 0032).
 // Raise it with every change to what the log or a snapshot may hold.
-const formatLevel = 3
+const formatLevel = 4
 
 // errBadCommand marks a command in the log that cannot be decoded. The log
 // is checksummed, so this means a bug or a newer on-disk format, and the
@@ -63,15 +65,30 @@ const formatLevel = 3
 var errBadCommand = errors.New("broker: undecodable command in log")
 
 // encodeCreateTopic creates a topic. Configs, at format level 2, come
-// after the partition count: an older build never sees them.
-func encodeCreateTopic(name string, partitions int32, configs map[string]string) []byte {
+// after the partition count; a non-zero topic ID, at format level 4, comes
+// after the configs: an older build never sees them.
+func encodeCreateTopic(name string, partitions int32, configs map[string]string, id ...wire.UUID) []byte {
 	w := wire.Writer{B: []byte{cmdCreateTopic}}
 	w.String(false, name)
 	w.Int32(partitions)
-	if len(configs) > 0 {
+	hasID := len(id) > 0 && id[0] != (wire.UUID{})
+	if len(configs) > 0 || hasID {
 		writeConfigs(&w, configs)
 	}
+	if hasID {
+		w.UUID(id[0])
+	}
 	return w.B
+}
+
+// topicUUID derives a deterministic RFC 4122 version 4 UUID from a topic
+// name, for topics created before the cluster reached format level 4.
+func topicUUID(name string) (u wire.UUID) {
+	sum := sha256.Sum256([]byte("samsa-topic-id:" + name))
+	copy(u[:], sum[:16])
+	u[6] = (u[6] & 0x0f) | 0x40
+	u[8] = (u[8] & 0x3f) | 0x80
+	return u
 }
 
 // topicConfigKeys are the topic configurations Samsa keeps (design C2,
@@ -225,9 +242,12 @@ func encodeCompact(topic string, partition int32, base, from int64, batch []byte
 	return w.B
 }
 
-func encodeDeleteTopic(name string) []byte {
+func encodeDeleteTopic(name string, id ...wire.UUID) []byte {
 	w := wire.Writer{B: []byte{cmdDeleteTopic}}
 	w.String(false, name)
+	if len(id) > 0 && id[0] != (wire.UUID{}) {
+		w.UUID(id[0])
+	}
 	return w.B
 }
 
@@ -375,6 +395,7 @@ func encodeTrim(cut int64) []byte {
 
 type topic struct {
 	name  string
+	id    wire.UUID // non-zero from format level 4 (ADR 0032)
 	parts []*partition
 	// configs holds the topic's own configurations, checked by
 	// checkTopicConfig; nil if it has none.
@@ -389,7 +410,8 @@ type state struct {
 	// cut of the latest Trim applied.
 	logStart int64
 	topics   map[string]*topic
-	names    []string // sorted, for deterministic listing
+	byID     map[wire.UUID]string // non-zero topic ID -> topic name
+	names    []string             // sorted, for deterministic listing
 	groups   map[string]*group
 	// acls are the ACLs in the order they were created, without duplicates.
 	acls []wire.ACL
@@ -401,16 +423,23 @@ type state struct {
 	// noFencing is Config.UnsafeNoFencing, noSequences
 	// Config.UnsafeNoSequenceCheck: deliberate bugs.
 	noFencing, noSequences bool
-	// keepOffsetsOnDelete and trimResetsStart are Config.UnsafeKeepOffsets-
-	// OnDelete and Config.UnsafeTrimResetsStart: deliberate bugs.
-	keepOffsetsOnDelete, trimResetsStart bool
+	// keepOffsetsOnDelete, trimResetsStart and reuseTopicID are deliberate
+	// bugs from Config.
+	keepOffsetsOnDelete, trimResetsStart, reuseTopicID bool
+	deletedIDs                                         map[string]wire.UUID
 	// expired counts the producers this replica forgot since it started or
 	// restored a snapshot. Diagnostic only: not hashed, not in snapshots.
 	expired int
 }
 
 func newState() *state {
-	return &state{topics: map[string]*topic{}, groups: map[string]*group{}, creds: map[string][]scram.Credential{}}
+	return &state{
+		topics:     map[string]*topic{},
+		byID:       map[wire.UUID]string{},
+		groups:     map[string]*group{},
+		creds:      map[string][]scram.Credential{},
+		deletedIDs: map[string]wire.UUID{},
+	}
 }
 
 // member is one consumer in a group generation.
@@ -580,6 +609,7 @@ type result struct {
 	errCode    int16
 	applied    bool       // Compact: the batch was replaced
 	baseOffset int64      // Append: offset assigned to the batch's first record; DeleteRecords: the new start
+	topicID    wire.UUID  // CreateTopic: the topic's UUID
 	acls       []wire.ACL // DeleteAcls: the ACLs removed
 	// origin and tag are set for a forwarded command: the node that is
 	// waiting for this result, and how it knows its request.
@@ -608,10 +638,30 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 		t := &topic{name: name, parts: make([]*partition, parts)}
 		if r.Len() > 0 {
 			configs, ok := readConfigs(r)
+			var id wire.UUID
+			if r.Len() > 0 {
+				id = r.UUID()
+				ok = ok && s.level >= 4 && id != (wire.UUID{}) && s.byID[id] == ""
+			}
 			if r.Err() != nil || r.Len() != 0 || !ok {
 				return result{}, fmt.Errorf("%w: create topic configs at index %d", errBadCommand, index)
 			}
-			t.configs = configs
+			if len(configs) > 0 {
+				t.configs = configs
+			}
+			t.id = id
+		}
+		if s.level >= 4 && t.id == (wire.UUID{}) {
+			t.id = topicUUID(name)
+			if s.byID[t.id] != "" {
+				return result{}, fmt.Errorf("%w: duplicate topic id at index %d", errBadCommand, index)
+			}
+		}
+		if s.reuseTopicID && s.deletedIDs[name] != (wire.UUID{}) && s.byID[s.deletedIDs[name]] == "" {
+			t.id = s.deletedIDs[name]
+		}
+		if t.id != (wire.UUID{}) {
+			s.byID[t.id] = name
 		}
 		for i := range t.parts {
 			t.parts[i] = &partition{}
@@ -621,7 +671,7 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 		s.names = append(s.names, "")
 		copy(s.names[at+1:], s.names[at:])
 		s.names[at] = name
-		return result{}, nil
+		return result{topicID: t.id}, nil
 
 	case cmdAppend:
 		name, part := r.String(false), r.Int32()
@@ -742,11 +792,29 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 
 	case cmdDeleteTopic:
 		name := r.String(false)
-		if r.Err() != nil {
+		var id wire.UUID
+		if r.Len() > 0 {
+			id = r.UUID()
+			if s.level < 4 || id == (wire.UUID{}) {
+				return result{}, fmt.Errorf("%w: delete topic id at index %d", errBadCommand, index)
+			}
+		}
+		if r.Err() != nil || r.Len() != 0 {
 			return result{}, fmt.Errorf("%w: delete topic at index %d", errBadCommand, index)
 		}
-		if s.topics[name] == nil {
+		t := s.topics[name]
+		if t == nil {
+			if id != (wire.UUID{}) {
+				return result{errCode: wire.ErrUnknownTopicID}, nil
+			}
 			return result{errCode: wire.ErrUnknownTopicOrPartition}, nil // two deletes raced
+		}
+		if id != (wire.UUID{}) && t.id != id {
+			return result{errCode: wire.ErrUnknownTopicID}, nil // recreated since delete was proposed
+		}
+		if t.id != (wire.UUID{}) {
+			delete(s.byID, t.id)
+			s.deletedIDs[name] = t.id
 		}
 		delete(s.topics, name)
 		at := sort.SearchStrings(s.names, name)
@@ -960,6 +1028,15 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 			return result{}, fmt.Errorf("the log at index %d requires format level %d, and this build reads at most %d: run a newer release", index, level, formatLevel)
 		}
 		s.level = max(s.level, byte(level))
+		if s.level >= 4 {
+			for _, name := range s.names {
+				t := s.topics[name]
+				if t.id == (wire.UUID{}) {
+					t.id = topicUUID(name)
+					s.byID[t.id] = name
+				}
+			}
+		}
 		return result{}, nil
 
 	case cmdExpireProducers:
@@ -1038,6 +1115,9 @@ func (s *state) hash() uint32 {
 	for _, name := range s.names { // sorted: never iterate the map
 		t := s.topics[name]
 		sum = crc32.Update(sum, table, []byte(name))
+		if t.id != (wire.UUID{}) { // zero before level 4: older hashes unchanged
+			sum = crc32.Update(sum, table, t.id[:])
+		}
 		for _, k := range sortedKeys(t.configs) { // none before level 2: older hashes unchanged
 			add(int64(len(k)), int64(len(t.configs[k])))
 			sum = crc32.Update(sum, table, []byte(k+t.configs[k]))

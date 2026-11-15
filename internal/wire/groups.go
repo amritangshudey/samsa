@@ -171,7 +171,7 @@ func (m *OffsetFetchRequest) Decode(r *Reader, v int16) {
 		return
 	}
 	for ; n > 0 && r.Err() == nil; n-- {
-		m.Topics = append(m.Topics, OffsetFetchTopic{Name: r.String(false), Partitions: readInt32s(r)})
+		m.Topics = append(m.Topics, OffsetFetchTopic{Name: r.String(false), Partitions: readInt32s(r, false)})
 	}
 }
 
@@ -185,7 +185,7 @@ func (m *OffsetFetchRequest) Encode(w *Writer, v int16) {
 	w.ArrayLen(false, len(m.Topics))
 	for _, t := range m.Topics {
 		w.String(false, t.Name)
-		writeInt32s(w, t.Partitions)
+		writeInt32s(w, false, t.Partitions)
 	}
 }
 

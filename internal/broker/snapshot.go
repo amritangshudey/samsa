@@ -14,10 +14,10 @@ import (
 // each partition's idempotent producers; version 4 each producer's last
 // log index; version 5 the ACLs; version 6 the SCRAM credentials; version
 // 7 the format level; version 8 topic configurations and batch sizes
-// (design C2). Each later field comes last, so the encoder writes the
-// oldest version that holds the state: an older build in the cluster
-// during a rolling upgrade can still read it (design G7).
-const snapshotVersion = 8
+// (design C2); version 9 topic IDs (ADR 0032). Each later field comes last,
+// so the encoder writes the oldest version that holds the state: an older
+// build in the cluster during a rolling upgrade can still read it (design G7).
+const snapshotVersion = 9
 
 // encode returns the whole state machine as bytes, for a Raft snapshot
 // (docs/design/a1-snapshots.md). Maps are walked in sorted order, so equal
@@ -26,6 +26,8 @@ const snapshotVersion = 8
 func (s *state) encode() []byte {
 	version := byte(4)
 	switch {
+	case s.level >= 4:
+		version = 9
 	case s.level >= 2:
 		version = 8
 	case s.level > 0:
@@ -141,6 +143,11 @@ func (s *state) encode() []byte {
 					w.Int32(b.size)
 				}
 			}
+		}
+	}
+	if version >= 9 {
+		for _, name := range s.names {
+			w.UUID(s.topics[name].id)
 		}
 	}
 	return w.B
@@ -297,6 +304,15 @@ func decodeState(b []byte) (*state, error) {
 					bad = bad || p.batches[i].size < 0
 				}
 			}
+		}
+	}
+	bad = bad || (v >= 9) != (s.level >= 4)
+	if v >= 9 {
+		for _, name := range s.names {
+			id := r.UUID()
+			bad = bad || r.Err() == nil && (id == (wire.UUID{}) || s.byID[id] != "")
+			s.topics[name].id = id
+			s.byID[id] = name
 		}
 	}
 	if r.Err() != nil || r.Len() != 0 || bad {

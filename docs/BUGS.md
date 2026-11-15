@@ -480,6 +480,24 @@ for how much that is worth.
   the rack, which is only in the configuration, was dropped.
 - **Fix:** the rack is read from the configuration either way.
 
+### C18a-1. ApiVersionsRequest v5 failed on the second connection once ClusterId was known (C18a)
+
+- **Found by:** `TestFranzGoRoundTripAndRestart`, `TestJavaClientRoundTrip`,
+  and `TestTopicIDIncarnationAndFetchByID` (`closing connection ...
+  reason="malformed request body: key 18 version 5"`).
+- **Root cause:** `ApiVersionsRequest` v5 (KIP-1242) adds `ClusterId` (compact
+  nullable string) and `NodeId` (`int32`, default `-1`) before the tagged
+  fields. On a client's bootstrap connection `ClusterId` is null (`0x00`),
+  which `r.Tags(true)` read as zero tagged fields and ignored the trailing 5
+  bytes. Once `Metadata` answered `ClusterId = "samsa"`, the client's next
+  connection sent `"samsa"`, which `r.Tags(true)` tried to parse as 6 tagged
+  fields.
+- **Fix:** `APIVersionsRequest.Decode` and `Encode` read and write `ClusterId`
+  and `NodeId` at version 5+.
+- **Lesson:** `r.Tags(true)` stops at the end of the tag list without checking
+  for trailing bytes, so a missing nullable field whose bootstrap value is
+  `0x00` looks like an empty tag section until a client sends a non-null value.
+
 ## Bugs in the simulator and tests
 
 ### M8. I6 blamed the broker for a Trim proposed after the final restart (A1 part b)
@@ -757,3 +775,16 @@ would happen against Kafka too (not tested against Kafka).
   leader's rules only if the node was serving at the request and at the
   receipt with no change between; to the follower's rules only if it was not
   serving throughout; to the lesser ones otherwise.
+
+### M19. The simulator expected CreateTopics v7 to return a TopicID on TOPIC_ALREADY_EXISTS (C18a)
+
+- **Seeds:** 1, 2, 3, 4, 6 and 129 others in the first 200-seed run.
+- **Reported as:** `CreateTopics v7 for "t2" returned a zero topic id`.
+- **Root cause:** `client.createTopic` required `resp.Topics[0].TopicID != UUID{}`
+  whenever `ErrorCode` was `ErrNone` or `ErrTopicAlreadyExists`. On
+  `ErrTopicAlreadyExists`, the broker (matching Kafka) returns the zero UUID
+  because the request did not create the topic.
+- **Fix:** `client.createTopic` requires a non-zero `TopicID` only when
+  `ErrorCode == ErrNone`; in `admin.go`, when a retried `CreateTopics` v7
+  receives `ErrTopicAlreadyExists` after a dropped connection, it queries
+  `Metadata` v12 to read the existing topic's `TopicID`.

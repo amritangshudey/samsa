@@ -24,23 +24,8 @@ func (n *Node) metadata(c *conn, req *wire.MetadataRequest) *wire.MetadataRespon
 		resp.Brokers = append(resp.Brokers, wire.Broker{NodeID: p.ID, Host: p.Host, Port: p.Port, Rack: p.Rack})
 		all = append(all, p.ID)
 	}
-	names := req.Topics
-	if req.AllTopics {
-		names = n.st.names
-	}
-	for _, name := range names {
-		t := n.st.topics[name]
-		if !n.may(c, opDescribe, resTopic, name) {
-			if !req.AllTopics {
-				resp.Topics = append(resp.Topics, wire.TopicMetadata{ErrorCode: wire.ErrTopicAuthorizationFailed, Name: name})
-			}
-			continue
-		}
-		if t == nil {
-			resp.Topics = append(resp.Topics, wire.TopicMetadata{ErrorCode: wire.ErrUnknownTopicOrPartition, Name: name})
-			continue
-		}
-		tm := wire.TopicMetadata{Name: name}
+	addTopic := func(t *topic) {
+		tm := wire.TopicMetadata{Name: t.name, TopicID: t.id}
 		for i := range t.parts {
 			pm := wire.PartitionMetadata{Index: int32(i), Leader: leader.ID, Replicas: all, ISR: all}
 			if !known {
@@ -49,6 +34,47 @@ func (n *Node) metadata(c *conn, req *wire.MetadataRequest) *wire.MetadataRespon
 			tm.Partitions = append(tm.Partitions, pm)
 		}
 		resp.Topics = append(resp.Topics, tm)
+	}
+	if req.AllTopics {
+		for _, name := range n.st.names {
+			if n.may(c, opDescribe, resTopic, name) {
+				addTopic(n.st.topics[name])
+			}
+		}
+		return resp
+	}
+	count := max(len(req.Topics), len(req.TopicIDs))
+	for i := range count {
+		var name string
+		if i < len(req.Topics) {
+			name = req.Topics[i]
+		}
+		var id wire.UUID
+		if i < len(req.TopicIDs) {
+			id = req.TopicIDs[i]
+		}
+		if id != (wire.UUID{}) {
+			realName := n.st.byID[id]
+			switch {
+			case realName == "":
+				resp.Topics = append(resp.Topics, wire.TopicMetadata{ErrorCode: wire.ErrUnknownTopicID, Name: name, TopicID: id})
+			case !n.may(c, opDescribe, resTopic, realName):
+				resp.Topics = append(resp.Topics, wire.TopicMetadata{ErrorCode: wire.ErrTopicAuthorizationFailed, Name: name, TopicID: id})
+			default:
+				addTopic(n.st.topics[realName])
+			}
+			continue
+		}
+		if !n.may(c, opDescribe, resTopic, name) {
+			resp.Topics = append(resp.Topics, wire.TopicMetadata{ErrorCode: wire.ErrTopicAuthorizationFailed, Name: name})
+			continue
+		}
+		t := n.st.topics[name]
+		if t == nil {
+			resp.Topics = append(resp.Topics, wire.TopicMetadata{ErrorCode: wire.ErrUnknownTopicOrPartition, Name: name})
+			continue
+		}
+		addTopic(t)
 	}
 	return resp
 }
@@ -79,10 +105,11 @@ func (n *Node) createTopics(c *conn, h wire.RequestHeader, req *wire.CreateTopic
 			n.respond(c, h, resp)
 		}
 	}
+	rf := int16(len(n.raft.Members()))
 	seen := map[string]bool{}
 	for i, t := range req.Topics {
 		res := &resp.Topics[i]
-		res.Name = t.Name
+		res.Name, res.NumPartitions, res.ReplicationFactor = t.Name, -1, -1
 		parts := t.NumPartitions
 		if parts == -1 {
 			parts = 1 // "broker default"
@@ -110,7 +137,7 @@ func (n *Node) createTopics(c *conn, h wire.RequestHeader, req *wire.CreateTopic
 			res.ErrorCode, res.ErrorMessage = wire.ErrInvalidRequest, "manual replica assignment is not supported"
 		case parts < 1 || parts > n.cfg.MaxPartitions:
 			res.ErrorCode, res.ErrorMessage = wire.ErrInvalidPartitions, "partition count out of range"
-		case t.ReplicationFactor != -1 && int(t.ReplicationFactor) != len(n.raft.Members()):
+		case t.ReplicationFactor != -1 && t.ReplicationFactor != rf:
 			res.ErrorCode, res.ErrorMessage = wire.ErrInvalidReplicationFactor, "every node holds every partition: the replication factor is the cluster size"
 		case n.st.topics[t.Name] != nil:
 			res.ErrorCode, res.ErrorMessage = wire.ErrTopicAlreadyExists, "topic already exists"
@@ -118,16 +145,32 @@ func (n *Node) createTopics(c *conn, h wire.RequestHeader, req *wire.CreateTopic
 			res.ErrorCode, res.ErrorMessage = wire.ErrInvalidConfig, configErr
 		case len(configs) > 0 && n.levelRefused(configsLevel(configs)) != "":
 			res.ErrorCode, res.ErrorMessage = wire.ErrUnsupportedVersion, n.levelRefused(configsLevel(configs))
+		case h.Version >= 7 && n.levelRefused(4) != "":
+			res.ErrorCode, res.ErrorMessage = wire.ErrUnsupportedVersion, n.levelRefused(4)
 		}
 		seen[t.Name] = true
-		if res.ErrorCode != wire.ErrNone || req.ValidateOnly {
+		if res.ErrorCode != wire.ErrNone {
 			continue
 		}
+		if req.ValidateOnly {
+			res.NumPartitions, res.ReplicationFactor = parts, rf
+			res.Configs = n.createdTopicConfigs(configs)
+			continue
+		}
+		var id wire.UUID
+		if n.st.level >= 4 {
+			id = n.newUUID()
+		}
 		pending++
-		n.propose(encodeCreateTopic(t.Name, parts, configs), func(r result) {
+		n.propose(encodeCreateTopic(t.Name, parts, configs, id), func(r result) {
 			res.ErrorCode = r.errCode
-			if r.errCode == wire.ErrTopicAlreadyExists {
+			switch r.errCode {
+			case wire.ErrTopicAlreadyExists:
 				res.ErrorMessage = "topic already exists"
+			case wire.ErrNone:
+				res.TopicID = r.topicID
+				res.NumPartitions, res.ReplicationFactor = parts, rf
+				res.Configs = n.createdTopicConfigs(configs)
 			}
 			done()
 		})
@@ -277,7 +320,7 @@ type parkedFetch struct {
 }
 
 func (n *Node) fetch(c *conn, h wire.RequestHeader, req *wire.FetchRequest) {
-	resp, size, failed := n.buildFetch(c, req)
+	resp, size, failed := n.buildFetch(c, h.Version, req)
 	if !n.serving {
 		n.stats.followerFetchBytes += int64(size)
 		n.log.Debug("fetch answered by a follower", "bytes", size, "failed", failed, "rack", req.RackID)
@@ -343,18 +386,18 @@ func (n *Node) completeFetch(f *parkedFetch) {
 		n.respond(f.c, f.h, refusal(f.req))
 		return
 	}
-	resp, _, _ := n.buildFetch(f.c, f.req)
+	resp, _, _ := n.buildFetch(f.c, f.h.Version, f.req)
 	n.respond(f.c, f.h, resp)
 }
 
 // wakeFetches answers the parked fetches that newly applied data satisfies.
 func (n *Node) wakeFetches() {
 	for _, f := range append([]*parkedFetch(nil), n.parked...) { // completeFetch edits n.parked
-		if f.c.closed || f.slow || !n.hasNewData(f.req) {
+		if f.c.closed || f.slow || !n.hasNewData(f.h.Version, f.req) {
 			continue
 		}
 		if f.req.MinBytes > 1 {
-			if _, size, failed := n.buildFetch(f.c, f.req); !failed && size < int(f.req.MinBytes) {
+			if _, size, failed := n.buildFetch(f.c, f.h.Version, f.req); !failed && size < int(f.req.MinBytes) {
 				continue
 			}
 		}
@@ -364,10 +407,14 @@ func (n *Node) wakeFetches() {
 
 // hasNewData reports whether any partition of req has records at or past
 // the offset asked for, without reading them.
-func (n *Node) hasNewData(req *wire.FetchRequest) bool {
+func (n *Node) hasNewData(v int16, req *wire.FetchRequest) bool {
 	for _, t := range req.Topics {
+		name := t.Name
+		if v >= 13 {
+			name = n.st.byID[t.TopicID]
+		}
 		for _, q := range t.Partitions {
-			if p := n.st.partition(t.Name, q.Index); p != nil && p.next > q.Offset {
+			if p := n.st.partition(name, q.Index); p != nil && p.next > q.Offset {
 				return true
 			}
 		}
@@ -378,19 +425,28 @@ func (n *Node) hasNewData(req *wire.FetchRequest) bool {
 // buildFetch reads what req asks for from applied state. It returns the
 // response, the number of record bytes in it, and whether any partition
 // reported an error (in which case the response should not be delayed).
-func (n *Node) buildFetch(c *conn, req *wire.FetchRequest) (resp *wire.FetchResponse, size int, failed bool) {
+func (n *Node) buildFetch(c *conn, v int16, req *wire.FetchRequest) (resp *wire.FetchResponse, size int, failed bool) {
 	resp = &wire.FetchResponse{}
 	budget := n.cfg.MaxFetchBytes
 	if req.MaxBytes > 0 && int(req.MaxBytes) < budget {
 		budget = int(req.MaxBytes)
 	}
 	for _, t := range req.Topics {
-		tr := wire.FetchTopicResponse{Name: t.Name}
+		name := t.Name
+		if v >= 13 {
+			name = n.st.byID[t.TopicID]
+		}
+		tr := wire.FetchTopicResponse{Name: name, TopicID: t.TopicID}
+		if tp := n.st.topics[name]; tp != nil {
+			tr.TopicID = tp.id
+		}
 		for _, q := range t.Partitions {
 			pr := wire.FetchPartitionResponse{Index: q.Index, HighWatermark: -1}
-			p := n.st.partition(t.Name, q.Index)
+			p := n.st.partition(name, q.Index)
 			switch {
-			case !n.may(c, opRead, resTopic, t.Name):
+			case v >= 13 && name == "":
+				pr.ErrorCode = wire.ErrUnknownTopicID
+			case !n.may(c, opRead, resTopic, name):
 				pr.ErrorCode = wire.ErrTopicAuthorizationFailed
 			case p == nil:
 				pr.ErrorCode = wire.ErrUnknownTopicOrPartition

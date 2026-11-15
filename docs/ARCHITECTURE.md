@@ -24,11 +24,12 @@ derived from the applied prefix.
       +--------------- result of apply completes the waiter ---------+
 ```
 
-The commands (`internal/broker/state.go`): create topic, append a record
+The commands (`internal/broker/state.go`): create topic (with its KIP-516
+16-byte UUID from format level 4, [ADR 0032](adr/0032-topic-ids.md)), append a record
 batch to a partition, commit an offset, set a group's generation, set a
 group's assignment, and the admin commands (B4): delete a topic (with its
-producer state and every group's offsets for it, in one command; topics
-are named by name only, [ADR 0016](adr/0016-admin-api-versions.md)), grow
+producer state and every group's offsets for it, in one command; by name or
+topic UUID, [ADR 0016](adr/0016-admin-api-versions.md), [ADR 0032](adr/0032-topic-ids.md)), grow
 a topic's partitions, and delete a partition's records below an offset. Each starts with a type byte; an unknown type stops the
 node rather than being skipped. Raft adds a no-op entry at the start of
 each leader's term.

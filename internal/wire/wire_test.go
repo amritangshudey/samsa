@@ -134,24 +134,30 @@ func messages() map[string]struct {
 			func() Message { return &APIVersionsResponse{} }},
 		"MetadataRequest": {KeyMetadata, &MetadataRequest{Topics: []string{"a", "b"}},
 			func() Message { return &MetadataRequest{} }},
+		"MetadataRequestByID": {KeyMetadata, &MetadataRequest{Topics: []string{"", "b"}, TopicIDs: []UUID{{1, 2, 3}, {}}},
+			func() Message { return &MetadataRequest{} }},
 		"MetadataRequestAll": {KeyMetadata, &MetadataRequest{AllTopics: true},
 			func() Message { return &MetadataRequest{} }},
 		"MetadataResponse": {KeyMetadata, &MetadataResponse{
 			Brokers: []Broker{{NodeID: 1, Host: "localhost", Port: 9092}}, ClusterID: "c", ControllerID: 1,
-			Topics: []TopicMetadata{{Name: "a", Partitions: []PartitionMetadata{{Index: 0, Leader: 1, Replicas: []int32{1}, ISR: []int32{1}}}},
-				{ErrorCode: 3, Name: "missing"}},
+			Topics: []TopicMetadata{{Name: "a", TopicID: UUID{4, 5}, Partitions: []PartitionMetadata{{Index: 0, Leader: 1, Replicas: []int32{1}, ISR: []int32{1}}}},
+				{ErrorCode: 3, Name: "missing"},
+				{ErrorCode: 100, TopicID: UUID{9, 9}}},
 		}, func() Message { return &MetadataResponse{} }},
 		"CreateTopicsRequest": {KeyCreateTopics, &CreateTopicsRequest{Topics: []CreateTopic{{Name: "a", NumPartitions: 3, ReplicationFactor: 1}, {Name: "b", NumPartitions: 1, ReplicationFactor: 1, HasAssignments: true, Configs: []TopicConfig{{Name: "retention.ms", Value: "1000"}, {Name: "cleanup.policy", Null: true}}}}, TimeoutMs: 1000},
 			func() Message { return &CreateTopicsRequest{} }},
-		"CreateTopicsResponse": {KeyCreateTopics, &CreateTopicsResponse{Topics: []CreateTopicResult{{Name: "a"}, {Name: "b", ErrorCode: 36, ErrorMessage: "exists"}}},
+		"CreateTopicsResponse": {KeyCreateTopics, &CreateTopicsResponse{Topics: []CreateTopicResult{
+			{Name: "a", TopicID: UUID{6, 7}, NumPartitions: 3, ReplicationFactor: 1, Configs: []CreateTopicConfig{{Name: "cleanup.policy", Value: "delete", Source: 5}}},
+			{Name: "b", ErrorCode: 36, ErrorMessage: "exists", NumPartitions: -1, ReplicationFactor: -1},
+		}},
 			func() Message { return &CreateTopicsResponse{} }},
 		"ProduceRequest": {KeyProduce, &ProduceRequest{Acks: -1, TimeoutMs: 30000, Topics: []ProduceTopic{{Name: "a", Partitions: []ProducePartition{{Index: 2, Records: []byte("batch")}}}}},
 			func() Message { return &ProduceRequest{} }},
 		"ProduceResponse": {KeyProduce, &ProduceResponse{Topics: []ProduceTopicResponse{{Name: "a", Partitions: []ProducePartitionResponse{{Index: 2, BaseOffset: 77}, {Index: 3, ErrorCode: 3, BaseOffset: -1}}}}},
 			func() Message { return &ProduceResponse{} }},
-		"FetchRequest": {KeyFetch, &FetchRequest{MaxWaitMs: 500, MinBytes: 1, MaxBytes: 1 << 20, RackID: "a", Topics: []FetchTopic{{Name: "a", Partitions: []FetchPartition{{Index: 0, Offset: 5, MaxBytes: 1 << 16}}}}},
+		"FetchRequest": {KeyFetch, &FetchRequest{MaxWaitMs: 500, MinBytes: 1, MaxBytes: 1 << 20, RackID: "a", Topics: []FetchTopic{{TopicID: UUID{1, 2, 3}, Partitions: []FetchPartition{{Index: 0, Offset: 5, MaxBytes: 1 << 16}}}}},
 			func() Message { return &FetchRequest{} }},
-		"FetchResponse": {KeyFetch, &FetchResponse{Topics: []FetchTopicResponse{{Name: "a", Partitions: []FetchPartitionResponse{{Index: 0, HighWatermark: 9, Records: []byte("batches")}, {Index: 1, ErrorCode: 1, PreferredReadReplica: 3, HasPreferred: true}}}}},
+		"FetchResponse": {KeyFetch, &FetchResponse{Topics: []FetchTopicResponse{{TopicID: UUID{1, 2, 3}, Partitions: []FetchPartitionResponse{{Index: 0, HighWatermark: 9, Records: []byte("batches")}, {Index: 1, ErrorCode: 1, PreferredReadReplica: 3, HasPreferred: true}}}}},
 			func() Message { return &FetchResponse{} }},
 		"ListOffsetsRequest": {KeyListOffsets, &ListOffsetsRequest{Topics: []ListOffsetsTopic{{Name: "a", Partitions: []ListOffsetsPartition{{Index: 0, Timestamp: TimestampEarliest}}}}},
 			func() Message { return &ListOffsetsRequest{} }},
@@ -358,8 +364,15 @@ func TestSupported(t *testing.T) {
 		{KeyProduce, 9, false},
 		{KeyFetch, 3, false},
 		{KeyFetch, 11, true},
+		{KeyFetch, 13, true},
+		{KeyFetch, 14, false},
+		{KeyMetadata, 12, true},
+		{KeyMetadata, 13, false},
 		{KeyAPIVersions, 4, true},
-		{KeyAPIVersions, 5, false},
+		{KeyAPIVersions, 5, true},
+		{KeyAPIVersions, 6, false},
+		{KeyCreateTopics, 7, true},
+		{KeyCreateTopics, 8, false},
 		{KeyInitProducerID, 0, true},
 		{KeyInitProducerID, 4, true},
 		{KeyInitProducerID, 5, false}, // adds only an error for transactions
@@ -368,6 +381,30 @@ func TestSupported(t *testing.T) {
 	for _, tt := range tests {
 		if got := Supported(tt.key, tt.version); got != tt.want {
 			t.Errorf("Supported(%d, %d) = %v, want %v", tt.key, tt.version, got, tt.want)
+		}
+	}
+}
+
+func TestFetchNameAndTopicID(t *testing.T) {
+	reqByName := &FetchRequest{MaxWaitMs: 500, MinBytes: 1, MaxBytes: 1 << 20, RackID: "r",
+		Topics: []FetchTopic{{Name: "orders", Partitions: []FetchPartition{{Index: 0, Offset: 5, MaxBytes: 4096}}}}}
+	respByName := &FetchResponse{Topics: []FetchTopicResponse{{Name: "orders", Partitions: []FetchPartitionResponse{{Index: 0, HighWatermark: 9}}}}}
+	for v := int16(4); v <= 12; v++ {
+		var w Writer
+		reqByName.Encode(&w, v)
+		var gotReq FetchRequest
+		r := NewReader(w.B)
+		gotReq.Decode(r, v)
+		if r.Err() != nil || r.Len() != 0 || gotReq.Topics[0].Name != "orders" || gotReq.Topics[0].TopicID != (UUID{}) {
+			t.Fatalf("FetchRequest v%d: got %+v, err %v", v, gotReq, r.Err())
+		}
+		w.B = w.B[:0]
+		respByName.Encode(&w, v)
+		var gotResp FetchResponse
+		r = NewReader(w.B)
+		gotResp.Decode(r, v)
+		if r.Err() != nil || r.Len() != 0 || gotResp.Topics[0].Name != "orders" || gotResp.Topics[0].TopicID != (UUID{}) {
+			t.Fatalf("FetchResponse v%d: got %+v, err %v", v, gotResp, r.Err())
 		}
 	}
 }

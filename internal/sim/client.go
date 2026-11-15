@@ -301,14 +301,23 @@ func (cl *client) misc() {
 		return
 	}
 	tp := cl.randomTP()
+	v := cl.version(wire.KeyMetadata)
 	known, epoch, asked := m.Known(TP{tp.Topic, 0}), m.Epoch(), cl.c.inc.node.id
 	req, resp := &wire.MetadataRequest{Topics: []string{tp.Topic}, AllTopics: cl.rng.Chance(0.3)}, &wire.MetadataResponse{}
-	cl.request(wire.KeyMetadata, cl.version(wire.KeyMetadata), req, resp, func(ok bool) {
+	if v >= 10 && !req.AllTopics {
+		if id := m.TopicID(tp.Topic); id != (wire.UUID{}) && cl.rng.Chance(0.5) {
+			req.Topics, req.TopicIDs = []string{""}, []wire.UUID{id}
+		}
+	}
+	cl.request(wire.KeyMetadata, v, req, resp, func(ok bool) {
 		if !ok || m.stale(epoch) {
 			return
 		}
 		found := false
 		for _, t := range resp.Topics {
+			if v >= 10 && t.ErrorCode == wire.ErrNone && t.TopicID != (wire.UUID{}) {
+				cl.check(m.NoteTopicID(t.Name, t.TopicID, epoch))
+			}
 			if t.Name != tp.Topic || t.ErrorCode != wire.ErrNone {
 				continue
 			}
@@ -373,8 +382,14 @@ func (cl *client) createTopic() {
 		case !valid:
 		case code == wire.ErrNone || code == wire.ErrTopicAlreadyExists:
 			m.TopicCreated(name, epoch)
-		case code == wire.ErrUnsupportedVersion && configured:
-			// The cluster is not yet at format level 2; a later try works.
+			if code == wire.ErrNone && v >= 7 {
+				if resp.Topics[0].TopicID == (wire.UUID{}) {
+					cl.w.fail("CreateTopics v7 for %q returned a zero topic id", name)
+				}
+				cl.check(m.NoteTopicID(name, resp.Topics[0].TopicID, epoch))
+			}
+		case code == wire.ErrUnsupportedVersion && (configured || v >= 7):
+			// The cluster is not yet at format level 2 or 4; a later try works.
 		default:
 			cl.w.fail("creating topic %q failed with code %d", name, code)
 		}
@@ -538,6 +553,20 @@ func (cl *client) fetch(req *wire.FetchRequest, asked []Fetch, each func(f Fetch
 	w := cl.w
 	resp := &wire.FetchResponse{}
 	version := max(cl.version(wire.KeyFetch), cl.fetchMin)
+	if version >= 13 {
+		for i, f := range asked {
+			if f.TP.Topic == ghostTopic {
+				req.Topics[i].TopicID = wire.UUID{0xde, 0xad}
+				continue
+			}
+			id := w.model.TopicID(f.TP.Topic)
+			if id == (wire.UUID{}) {
+				version = 12
+				break
+			}
+			req.Topics[i].TopicID = id
+		}
+	}
 	var node *simNode
 	var epoch0 int
 	var serving0 bool
@@ -562,13 +591,17 @@ func (cl *client) fetch(req *wire.FetchRequest, asked []Fetch, each func(f Fetch
 		var moveTo *simNode
 		for i, f := range asked {
 			t := resp.Topics[i]
-			if t.Name != f.TP.Topic || len(t.Partitions) != 1 || t.Partitions[0].Index != f.TP.Part {
+			match := t.Name == f.TP.Topic
+			if version >= 13 {
+				match = t.TopicID == req.Topics[i].TopicID
+			}
+			if !match || len(t.Partitions) != 1 || t.Partitions[0].Index != f.TP.Part {
 				w.fail("fetch response does not match the request at entry %d", i)
 				return
 			}
 			p := t.Partitions[0]
 			f.Err, f.HW, f.Records, f.MustProgress, f.LogStart = p.ErrorCode, p.HighWatermark, p.Records, bytesSoFar == 0, -1
-			f.Follower = follower
+			f.Follower, f.ByID = follower, version >= 13
 			if p.HasPreferred {
 				// KIP-392: the leader names a replica in the consumer's rack and sends no records.
 				nd := w.node(p.PreferredReadReplica)
