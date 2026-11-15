@@ -424,7 +424,7 @@ func TestJavaProducerAfterExpiry(t *testing.T) {
 func TestTopicIDIncarnationAndFetchByID(t *testing.T) {
 	c := startCluster(t, 3)
 	cl := c.client()
-	c.leader(cl)
+	leader := cl.Broker(int(c.leader(cl)))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -435,7 +435,7 @@ func TestTopicIDIncarnationAndFetchByID(t *testing.T) {
 		rt := kmsg.NewCreateTopicsRequestTopic()
 		rt.Topic, rt.NumPartitions, rt.ReplicationFactor = name, 3, -1
 		req.Topics = append(req.Topics, rt)
-		resp, err := req.RequestWith(ctx, cl)
+		resp, err := req.RequestWith(ctx, leader)
 		if err != nil || len(resp.Topics) != 1 || resp.Topics[0].ErrorCode != 0 {
 			t.Fatalf("CreateTopics(%q): %v %+v", name, err, resp)
 		}
@@ -458,7 +458,7 @@ func TestTopicIDIncarnationAndFetchByID(t *testing.T) {
 	mt := kmsg.NewMetadataRequestTopic()
 	mt.TopicID = id1
 	mreq.Topics = append(mreq.Topics, mt)
-	mresp, err := mreq.RequestWith(ctx, cl)
+	mresp, err := mreq.RequestWith(ctx, leader)
 	if err != nil || len(mresp.Topics) != 1 || mresp.Topics[0].ErrorCode != 0 {
 		t.Fatalf("Metadata by TopicID: %v %+v", err, mresp)
 	}
@@ -475,7 +475,7 @@ func TestTopicIDIncarnationAndFetchByID(t *testing.T) {
 	dt := kmsg.NewDeleteTopicsRequestTopic()
 	dt.TopicID = id1
 	dreq.Topics = append(dreq.Topics, dt)
-	dresp, err := dreq.RequestWith(ctx, cl)
+	dresp, err := dreq.RequestWith(ctx, leader)
 	if err != nil || len(dresp.Topics) != 1 || dresp.Topics[0].ErrorCode != 0 || dresp.Topics[0].TopicID != id1 {
 		t.Fatalf("DeleteTopics v6 by TopicID: %v %+v", err, dresp)
 	}
@@ -502,7 +502,7 @@ func TestTopicIDIncarnationAndFetchByID(t *testing.T) {
 		fp.PartitionMaxBytes = 1 << 20
 		ft.Partitions = append(ft.Partitions, fp)
 		freq.Topics = append(freq.Topics, ft)
-		fresp, err := freq.RequestWith(ctx, cl)
+		fresp, err := freq.RequestWith(ctx, leader)
 		if err != nil {
 			t.Fatalf("Fetch v13: %v", err)
 		}

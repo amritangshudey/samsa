@@ -283,6 +283,24 @@ for how much that is worth.
   applies twice is harmless. The leader accepts a forwarded topic config
   command only at format level 2. `TestAlterConfigsForwarded` covers it.
 
+### C3. Advertising SaslHandshake from version 1 broke librdkafka < 2.10 (C18a, before merge)
+
+- **Test:** `TestACLsOtherClients/kcat` and `TestTLSAndSASLOtherClients/kcat`
+  on Ubuntu 24.04 (`librdkafka` 2.3.0).
+- **Symptom:** `librdkafka` aborted immediately after `ApiVersions` v3 with
+  `Failed to initialize SASL authentication: SASL Handshake not supported by
+  broker (required by mechanism SCRAM-SHA-256)`.
+- **Root cause:** in `librdkafka` before 2.10 (`rdkafka_feature.c`),
+  `RD_KAFKA_FEATURE_SASL_HANDSHAKE` is enabled only if the broker's advertised
+  `SaslHandshake` range overlaps `[0, 0]` (`librdkafka` 2.10 widened the check
+  to `[0, RD_KAFKAP_RPC_VERSION_MAX]`). Samsa advertised `1..1`, so `librdkafka`
+  2.3.0 cleared `RD_KAFKA_FEATURE_SASL_HANDSHAKE` even though it sends
+  `SaslHandshake` version 1 once enabled.
+- **Fix:** `KeySaslHandshake` advertises `AdvertisedMin: 0` in `ApiVersions`
+  (matching Kafka's `SaslHandshakeRequest.json` `"validVersions": "0-1"` and
+  Samsa's existing `AdvertisedMin: 0` on `KeyProduce` for `KAFKA-18659`), while
+  `Min: 1` continues to reject version 0 requests.
+
 ## Bugs found by the soak
 
 ### L1. Raft kept one term per entry ever written (G5)

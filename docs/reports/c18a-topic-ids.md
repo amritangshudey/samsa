@@ -85,6 +85,11 @@ ADR 0032.
   Fixed by comparing the unacknowledged tombstone's in-flight end time against
   `r.sent` (`oldTombUntil[k] >= r.sent`), and added seed 951 to
   `internal/sim/regressions.txt`.
+- **BUGS.md C3:** on Ubuntu 24.04 (`librdkafka` 2.3.0), `kcat` failed SASL
+  authentication with `SASL Handshake not supported by broker` because
+  `librdkafka` < 2.10 checks that the broker's advertised `SaslHandshake` range
+  overlaps `[0, 0]`. Fixed by setting `AdvertisedMin: 0` on `KeySaslHandshake`
+  while keeping `Min: 1`.
 
 ## How to run it
 

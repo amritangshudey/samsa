@@ -358,7 +358,9 @@ func TestSupported(t *testing.T) {
 		key, version int16
 		want         bool
 	}{
-		{KeyProduce, 2, false}, // advertised for librdkafka, but rejected
+		{KeyProduce, 2, false},       // advertised for librdkafka, but rejected
+		{KeySaslHandshake, 0, false}, // advertised for librdkafka < 2.10, but rejected
+		{KeySaslHandshake, 1, true},
 		{KeyProduce, 3, true},
 		{KeyProduce, 8, true},
 		{KeyProduce, 9, false},
