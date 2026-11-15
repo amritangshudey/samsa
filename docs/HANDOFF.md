@@ -5,7 +5,7 @@ Written for whoever works on Samsa next, a person or another coding tool.
 merged PR is to update this file (CLAUDE.md says so). If the date below is old,
 check `git log` and `docs/PRODUCTION.md` before trusting it.
 
-**Last updated: 2026-11-15, 20:30 IST.**
+**Last updated: 2026-11-16, 01:45 IST.**
 
 ## 1. Read these first, in this order
 
@@ -55,30 +55,23 @@ check `git log` and `docs/PRODUCTION.md` before trusting it.
   settings (2026-11-15).
 - Still to ask about: test-only dependencies for item 16 (the client matrix).
 
-## 4. State on 2026-11-15
+## 4. State on 2026-11-16
 
-**Done and merged to `main`:** items 1 to 13 and 24, 23a (see the status table),
-including retention and compaction (ADR 0026, 0027, 0029), storage damage repair
-(ADR 0030), profiles and `samsa doctor`, and four more fault kinds.
+**Done and merged to `main`:** items 1 to 13, 19, 23a, 24, and item 17's
+packaging/runbook/security review (see the status table in
+`docs/PRODUCTION.md`), including retention and compaction (ADR 0026, 0027,
+0029), storage damage repair (ADR 0030), fetch from the nearest replica
+(ADR 0031, PR #37), profiles and `samsa doctor` (PR #35), four more fault kinds
+(PR #35), packaging/runbook/security review (PR #36), and the 24-hour soak
+(`docs/reports/g5-soak.md`, `docs/soak/run1/`, `docs/soak/run2/`).
 
-**Open PRs, in this order of merging** (each is based on the one before):
-- #36 `packaging`: container image (`make image`), systemd unit, runbook,
-  security review, owner-only data files.
-- #37 `follower-fetch`: item 19, fetch from the nearest replica (KIP-392).
-  After #36 merges, merge `origin/main` into it and push (an empty commit
-  starts CI if a merge push does not).
-
-**Soak (item 6):** run 1 (before the memory-leak fix) failed on memory only.
-Run 2, on the fixed build, started 2026-11-15 01:38 IST and ends about
-2026-11-16 01:40 IST. At 18.8 h: 33.7 million records, no errors, no gaps,
-peak memory 33 MiB (run 1: 173 MiB). It runs from `~/soak-run2/`
-(`samsa` binary, `out/` results, `src/` a git worktree) under `caffeinate`.
-**When it ends:** copy `summary.md` and `samples.csv` to `docs/soak/run2/`;
-run 1's output is on branch `soak-run1-data` (`docs/soak/run1/`); write
-`docs/reports/g5-soak.md` comparing both (mention that other heavy work ran on
-the same machine); PR, merge on green; then `git worktree remove` the source
-worktree; then tags (v0.3 and onward, after checking CHANGELOG-style notes in
-`docs/releases/`). Do not run the Kafka benchmark during a soak.
+**Soak (item 6):** done. Run 1 (before the memory-leak fix, `docs/BUGS.md` L1)
+failed on memory only (peak RSS 173 MiB). Run 2 on the fixed build (`7d877ab`)
+finished 2026-11-16 01:38 IST and **passed**: 43,196,136 records produced and
+consumed (41.2 GiB), 0 produce errors, 0 gaps, RSS 18–32 MiB (25 MiB at 24 h),
+data directory 29–256 MiB (198 MiB at 24 h), open files 16–26, and restart on
+the soaked data ready in 63 ms (`docs/reports/g5-soak.md`). Release notes for
+v0.3.0 to v0.6.0 are in `docs/releases/`.
 
 ## 5. Next, in order
 
