@@ -117,6 +117,24 @@ func TestExchange(t *testing.T) {
 		if _, err := client(t, mech, "mallory", "secret", s, lookup); !errors.Is(err, ErrAuth) {
 			t.Errorf("%s unknown user: %v", mech, err)
 		}
+		// librdkafka <= 2.6.0 duplicated the client nonce in client-final-message (#4895).
+		s, _ = NewServer(mech)
+		first, err := s.First([]byte("n,,n=alice,r=cnonce"), lookup, []byte("k"), "snonce")
+		if err != nil {
+			t.Fatal(err)
+		}
+		h, _ := hashFor(mech)
+		salted := derivedSalted(t, mech, "secret", []byte("0123456789abcdef"), 4096)
+		clientKey := mac(h, salted, "Client Key")
+		without := "c=biws,r=cnoncecnoncesnonce"
+		sig := mac(h, cred.StoredKey, "n=alice,r=cnonce,"+string(first)+","+without)
+		proof := make([]byte, len(sig))
+		for i := range sig {
+			proof[i] = clientKey[i] ^ sig[i]
+		}
+		if _, user, err := s.Final([]byte(without + ",p=" + base64.StdEncoding.EncodeToString(proof))); err != nil || user != "alice" {
+			t.Errorf("%s librdkafka <= 2.6.0 duplicated client nonce: %q, %v", mech, user, err)
+		}
 	}
 }
 

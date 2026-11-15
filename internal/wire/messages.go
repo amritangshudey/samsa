@@ -15,6 +15,10 @@ func (m *APIVersionsRequest) Decode(r *Reader, v int16) {
 	if v >= 3 {
 		m.ClientSoftwareName = r.String(true)
 		m.ClientSoftwareVersion = r.String(true)
+		if v >= 5 {
+			r.NullableString(true) // ClusterId, v5+ (KIP-1242)
+			r.Int32()              // NodeId, v5+
+		}
 		r.Tags(true)
 	}
 }
@@ -24,6 +28,10 @@ func (m *APIVersionsRequest) Encode(w *Writer, v int16) {
 	if v >= 3 {
 		w.String(true, m.ClientSoftwareName)
 		w.String(true, m.ClientSoftwareVersion)
+		if v >= 5 {
+			w.optString(true, "")
+			w.Int32(-1)
+		}
 		w.Tags(true)
 	}
 }
@@ -75,42 +83,90 @@ type MetadataRequest struct {
 	// means "every topic". An empty array means "no topics".
 	AllTopics bool
 	Topics    []string
+	// TopicIDs, when non-empty, is parallel to Topics (v10+). An entry
+	// with a non-zero UUID queries by topic ID; Topics[i] may then be "".
+	TopicIDs []UUID
 }
 
 // Decode implements Message.
 func (m *MetadataRequest) Decode(r *Reader, v int16) {
-	n := r.ArrayLen(false)
+	flex := v >= 9
+	n := r.ArrayLen(flex)
 	m.AllTopics = n < 0 && r.Err() == nil
 	m.Topics = nil
+	m.TopicIDs = nil
+	var hasIDs bool
 	for ; n > 0 && r.Err() == nil; n-- {
-		m.Topics = append(m.Topics, r.String(false))
+		var id UUID
+		if v >= 10 {
+			id = r.uuid()
+			if id != (UUID{}) {
+				hasIDs = true
+			}
+		}
+		var name string
+		if v >= 10 {
+			name, _ = r.NullableString(flex)
+		} else {
+			name = r.String(flex)
+		}
+		r.Tags(flex)
+		m.Topics = append(m.Topics, name)
+		if v >= 10 {
+			m.TopicIDs = append(m.TopicIDs, id)
+		}
+	}
+	if !hasIDs {
+		m.TopicIDs = nil
 	}
 	if v >= 4 {
 		r.Bool() // AllowAutoTopicCreation: topics are never auto-created
 	}
+	if v >= 8 && v <= 10 {
+		r.Bool() // IncludeClusterAuthorizedOperations, v8-10
+	}
 	if v >= 8 {
-		r.Bool() // IncludeClusterAuthorizedOperations
 		r.Bool() // IncludeTopicAuthorizedOperations
 	}
+	r.Tags(flex)
 }
 
 // Encode implements Message.
 func (m *MetadataRequest) Encode(w *Writer, v int16) {
+	flex := v >= 9
 	if m.AllTopics {
-		w.ArrayLen(false, -1)
+		w.ArrayLen(flex, -1)
 	} else {
-		w.ArrayLen(false, len(m.Topics))
-		for _, t := range m.Topics {
-			w.String(false, t)
+		n := max(len(m.Topics), len(m.TopicIDs))
+		w.ArrayLen(flex, n)
+		for i := range n {
+			var name string
+			if i < len(m.Topics) {
+				name = m.Topics[i]
+			}
+			var id UUID
+			if i < len(m.TopicIDs) {
+				id = m.TopicIDs[i]
+			}
+			if v >= 10 {
+				w.uuid(id)
+				w.optString(flex, name)
+			} else {
+				w.String(flex, name)
+			}
+			w.Tags(flex)
 		}
 	}
 	if v >= 4 {
 		w.Bool(false)
 	}
-	if v >= 8 {
-		w.Bool(false)
+	if v >= 8 && v <= 10 {
 		w.Bool(false)
 	}
+	if v >= 8 {
+		w.Bool(false)
+	}
+	w.Tags(flex)
 }
 
 // Broker is one broker in a Metadata response.
@@ -132,6 +188,7 @@ type PartitionMetadata struct {
 type TopicMetadata struct {
 	ErrorCode  int16
 	Name       string
+	TopicID    UUID // v10+
 	Partitions []PartitionMetadata
 }
 
@@ -147,10 +204,10 @@ type MetadataResponse struct {
 // *AuthorizedOperations fields, meaning "not requested".
 const noAuthorizedOperations = -2147483648
 
-func readInt32s(r *Reader) []int32 { return Array(r, false, r.Int32) }
+func readInt32s(r *Reader, flex bool) []int32 { return Array(r, flex, r.Int32) }
 
-func writeInt32s(w *Writer, vs []int32) {
-	w.ArrayLen(false, len(vs))
+func writeInt32s(w *Writer, flex bool, vs []int32) {
+	w.ArrayLen(flex, len(vs))
 	for _, v := range vs {
 		w.Int32(v)
 	}
@@ -158,68 +215,86 @@ func writeInt32s(w *Writer, vs []int32) {
 
 // Decode implements Message.
 func (m *MetadataResponse) Decode(r *Reader, v int16) {
+	flex := v >= 9
 	if v >= 3 {
 		r.Int32() // ThrottleTimeMs
 	}
-	m.Brokers = Array(r, false, func() Broker {
-		b := Broker{NodeID: r.Int32(), Host: r.String(false), Port: r.Int32()}
-		b.Rack, _ = r.NullableString(false) // v1+
+	m.Brokers = Array(r, flex, func() Broker {
+		b := Broker{NodeID: r.Int32(), Host: r.String(flex), Port: r.Int32()}
+		b.Rack, _ = r.NullableString(flex) // v1+
+		r.Tags(flex)
 		return b
 	})
 	if v >= 2 {
-		m.ClusterID, _ = r.NullableString(false)
+		m.ClusterID, _ = r.NullableString(flex)
 	}
 	m.ControllerID = r.Int32()
-	m.Topics = Array(r, false, func() TopicMetadata {
-		t := TopicMetadata{ErrorCode: r.Int16(), Name: r.String(false)}
+	m.Topics = Array(r, flex, func() TopicMetadata {
+		t := TopicMetadata{ErrorCode: r.Int16()}
+		if v >= 12 {
+			t.Name, _ = r.NullableString(flex)
+		} else {
+			t.Name = r.String(flex)
+		}
+		if v >= 10 {
+			t.TopicID = r.uuid()
+		}
 		r.Bool() // IsInternal, v1+
-		t.Partitions = Array(r, false, func() PartitionMetadata {
+		t.Partitions = Array(r, flex, func() PartitionMetadata {
 			p := PartitionMetadata{ErrorCode: r.Int16(), Index: r.Int32(), Leader: r.Int32()}
 			if v >= 7 {
 				r.Int32() // LeaderEpoch
 			}
-			p.Replicas, p.ISR = readInt32s(r), readInt32s(r)
+			p.Replicas, p.ISR = readInt32s(r, flex), readInt32s(r, flex)
 			if v >= 5 {
-				readInt32s(r) // OfflineReplicas
+				readInt32s(r, flex) // OfflineReplicas
 			}
+			r.Tags(flex)
 			return p
 		})
 		if v >= 8 {
 			r.Int32() // TopicAuthorizedOperations
 		}
+		r.Tags(flex)
 		return t
 	})
-	if v >= 8 {
+	if v >= 8 && v <= 10 {
 		r.Int32() // ClusterAuthorizedOperations, v8-10
 	}
+	r.Tags(flex)
 }
 
 // Encode implements Message.
 func (m *MetadataResponse) Encode(w *Writer, v int16) {
+	flex := v >= 9
 	if v >= 3 {
 		w.Int32(0)
 	}
-	w.ArrayLen(false, len(m.Brokers))
+	w.ArrayLen(flex, len(m.Brokers))
 	for _, b := range m.Brokers {
 		w.Int32(b.NodeID)
-		w.String(false, b.Host)
+		w.String(flex, b.Host)
 		w.Int32(b.Port)
-		if b.Rack == "" {
-			w.NullString(false)
-		} else {
-			w.String(false, b.Rack)
-		}
+		w.optString(flex, b.Rack)
+		w.Tags(flex)
 	}
 	if v >= 2 {
-		w.String(false, m.ClusterID)
+		w.String(flex, m.ClusterID)
 	}
 	w.Int32(m.ControllerID)
-	w.ArrayLen(false, len(m.Topics))
+	w.ArrayLen(flex, len(m.Topics))
 	for _, t := range m.Topics {
 		w.Int16(t.ErrorCode)
-		w.String(false, t.Name)
+		if v >= 12 {
+			w.optString(flex, t.Name)
+		} else {
+			w.String(flex, t.Name)
+		}
+		if v >= 10 {
+			w.uuid(t.TopicID)
+		}
 		w.Bool(false) // IsInternal
-		w.ArrayLen(false, len(t.Partitions))
+		w.ArrayLen(flex, len(t.Partitions))
 		for _, p := range t.Partitions {
 			w.Int16(p.ErrorCode)
 			w.Int32(p.Index)
@@ -227,19 +302,22 @@ func (m *MetadataResponse) Encode(w *Writer, v int16) {
 			if v >= 7 {
 				w.Int32(0) // LeaderEpoch: constant until there is replication
 			}
-			writeInt32s(w, p.Replicas)
-			writeInt32s(w, p.ISR)
+			writeInt32s(w, flex, p.Replicas)
+			writeInt32s(w, flex, p.ISR)
 			if v >= 5 {
-				w.ArrayLen(false, 0) // OfflineReplicas
+				w.ArrayLen(flex, 0) // OfflineReplicas
 			}
+			w.Tags(flex)
 		}
 		if v >= 8 {
 			w.Int32(noAuthorizedOperations)
 		}
+		w.Tags(flex)
 	}
-	if v >= 8 {
+	if v >= 8 && v <= 10 {
 		w.Int32(noAuthorizedOperations)
 	}
+	w.Tags(flex)
 }
 
 // CreateTopic is one topic of a CreateTopics request.
@@ -269,90 +347,157 @@ type CreateTopicsRequest struct {
 }
 
 // Decode implements Message.
-func (m *CreateTopicsRequest) Decode(r *Reader, _ int16) {
-	m.Topics = Array(r, false, func() CreateTopic {
-		t := CreateTopic{Name: r.String(false), NumPartitions: r.Int32(), ReplicationFactor: r.Int16()}
-		assignments := Array(r, false, func() struct{} {
-			r.Int32()     // PartitionIndex
-			readInt32s(r) // BrokerIds
+func (m *CreateTopicsRequest) Decode(r *Reader, v int16) {
+	flex := v >= 5
+	m.Topics = Array(r, flex, func() CreateTopic {
+		t := CreateTopic{Name: r.String(flex), NumPartitions: r.Int32(), ReplicationFactor: r.Int16()}
+		assignments := Array(r, flex, func() struct{} {
+			r.Int32()             // PartitionIndex
+			readInt32s(r, flex)   // BrokerIds
+			r.Tags(flex)
 			return struct{}{}
 		})
 		t.HasAssignments = len(assignments) > 0
-		t.Configs = Array(r, false, func() TopicConfig {
-			c := TopicConfig{Name: r.String(false)}
-			c.Value, c.Null = r.NullableString(false)
+		t.Configs = Array(r, flex, func() TopicConfig {
+			c := TopicConfig{Name: r.String(flex)}
+			c.Value, c.Null = r.NullableString(flex)
+			r.Tags(flex)
 			return c
 		})
+		r.Tags(flex)
 		return t
 	})
 	m.TimeoutMs = r.Int32()
 	m.ValidateOnly = r.Bool() // v1+
+	r.Tags(flex)
 }
 
 // Encode implements Message. HasAssignments is
 // written as one assignment of partition 0 to no brokers, so that it
 // survives a round trip.
-func (m *CreateTopicsRequest) Encode(w *Writer, _ int16) {
-	w.ArrayLen(false, len(m.Topics))
+func (m *CreateTopicsRequest) Encode(w *Writer, v int16) {
+	flex := v >= 5
+	w.ArrayLen(flex, len(m.Topics))
 	for _, t := range m.Topics {
-		w.String(false, t.Name)
+		w.String(flex, t.Name)
 		w.Int32(t.NumPartitions)
 		w.Int16(t.ReplicationFactor)
 		if t.HasAssignments {
-			w.ArrayLen(false, 1)
-			w.Int32(0)           // PartitionIndex
-			w.ArrayLen(false, 0) // BrokerIds
+			w.ArrayLen(flex, 1)
+			w.Int32(0)          // PartitionIndex
+			w.ArrayLen(flex, 0) // BrokerIds
+			w.Tags(flex)
 		} else {
-			w.ArrayLen(false, 0)
+			w.ArrayLen(flex, 0)
 		}
-		w.ArrayLen(false, len(t.Configs))
+		w.ArrayLen(flex, len(t.Configs))
 		for _, c := range t.Configs {
-			w.String(false, c.Name)
+			w.String(flex, c.Name)
 			if c.Null {
-				w.NullString(false)
+				w.NullString(flex)
 			} else {
-				w.String(false, c.Value)
+				w.String(flex, c.Value)
 			}
+			w.Tags(flex)
 		}
+		w.Tags(flex)
 	}
 	w.Int32(m.TimeoutMs)
 	w.Bool(m.ValidateOnly)
+	w.Tags(flex)
+}
+
+// CreateTopicConfig is one configuration entry of a CreateTopics v5+ response.
+type CreateTopicConfig struct {
+	Name        string
+	Value       string
+	Null        bool
+	ReadOnly    bool
+	Source      int8
+	IsSensitive bool
 }
 
 // CreateTopicResult is one topic of a CreateTopics response.
 type CreateTopicResult struct {
-	Name      string
-	ErrorCode int16
+	Name              string
+	TopicID           UUID // v7+
+	ErrorCode         int16
 	// ErrorMessage is sent as null when empty.
-	ErrorMessage string
+	ErrorMessage      string
+	NumPartitions     int32               // v5+; -1 when unset/error
+	ReplicationFactor int16               // v5+; -1 when unset/error
+	Configs           []CreateTopicConfig // v5+; nil is sent as null
 }
 
 // CreateTopicsResponse is the body of a CreateTopics response.
 type CreateTopicsResponse struct{ Topics []CreateTopicResult }
 
 // Decode implements Message.
-func (m *CreateTopicsResponse) Decode(r *Reader, _ int16) {
+func (m *CreateTopicsResponse) Decode(r *Reader, v int16) {
+	flex := v >= 5
 	r.Int32() // ThrottleTimeMs, v2+
-	m.Topics = Array(r, false, func() CreateTopicResult {
-		t := CreateTopicResult{Name: r.String(false), ErrorCode: r.Int16()}
-		t.ErrorMessage, _ = r.NullableString(false) // v1+
+	m.Topics = Array(r, flex, func() CreateTopicResult {
+		t := CreateTopicResult{Name: r.String(flex)}
+		if v >= 7 {
+			t.TopicID = r.uuid()
+		}
+		t.ErrorCode = r.Int16()
+		t.ErrorMessage, _ = r.NullableString(flex) // v1+
+		if v >= 5 {
+			t.NumPartitions = r.Int32()
+			t.ReplicationFactor = r.Int16()
+			t.Configs = Array(r, flex, func() CreateTopicConfig {
+				c := CreateTopicConfig{Name: r.String(flex)}
+				c.Value, c.Null = r.NullableString(flex)
+				c.ReadOnly = r.Bool()
+				c.Source = r.Int8()
+				c.IsSensitive = r.Bool()
+				r.Tags(flex)
+				return c
+			})
+		}
+		r.Tags(flex)
 		return t
 	})
+	r.Tags(flex)
 }
 
 // Encode implements Message.
-func (m *CreateTopicsResponse) Encode(w *Writer, _ int16) {
+func (m *CreateTopicsResponse) Encode(w *Writer, v int16) {
+	flex := v >= 5
 	w.Int32(0)
-	w.ArrayLen(false, len(m.Topics))
+	w.ArrayLen(flex, len(m.Topics))
 	for _, t := range m.Topics {
-		w.String(false, t.Name)
-		w.Int16(t.ErrorCode)
-		if t.ErrorMessage == "" {
-			w.NullString(false)
-		} else {
-			w.String(false, t.ErrorMessage)
+		w.String(flex, t.Name)
+		if v >= 7 {
+			w.uuid(t.TopicID)
 		}
+		w.Int16(t.ErrorCode)
+		w.optString(flex, t.ErrorMessage)
+		if v >= 5 {
+			w.Int32(t.NumPartitions)
+			w.Int16(t.ReplicationFactor)
+			if t.Configs == nil {
+				w.ArrayLen(flex, -1)
+			} else {
+				w.ArrayLen(flex, len(t.Configs))
+				for _, c := range t.Configs {
+					w.String(flex, c.Name)
+					if c.Null {
+						w.NullString(flex)
+					} else {
+						w.String(flex, c.Value)
+					}
+					w.Bool(c.ReadOnly)
+					w.Int8(c.Source)
+					w.Bool(c.IsSensitive)
+					w.Tags(flex)
+				}
+			}
+		}
+		w.Tags(flex)
 	}
+	w.Tags(flex)
 }
 
 // ProducePartition is one partition's records in a Produce request.
@@ -473,7 +618,8 @@ type FetchPartition struct {
 
 // FetchTopic is one topic of a Fetch request.
 type FetchTopic struct {
-	Name       string
+	Name       string // v4-12
+	TopicID    UUID   // v13+
 	Partitions []FetchPartition
 }
 
@@ -488,6 +634,7 @@ type FetchRequest struct {
 
 // Decode implements Message.
 func (m *FetchRequest) Decode(r *Reader, v int16) {
+	flex := v >= 12
 	r.Int32() // ReplicaId
 	m.MaxWaitMs = r.Int32()
 	m.MinBytes = r.Int32()
@@ -497,34 +644,53 @@ func (m *FetchRequest) Decode(r *Reader, v int16) {
 		r.Int32() // SessionId: sessions are declined
 		r.Int32() // SessionEpoch
 	}
-	m.Topics = Array(r, false, func() FetchTopic {
-		return FetchTopic{Name: r.String(false), Partitions: Array(r, false, func() FetchPartition {
+	m.Topics = Array(r, flex, func() FetchTopic {
+		var t FetchTopic
+		if v >= 13 {
+			t.TopicID = r.uuid()
+		} else {
+			t.Name = r.String(flex)
+		}
+		t.Partitions = Array(r, flex, func() FetchPartition {
 			p := FetchPartition{Index: r.Int32()}
 			if v >= 9 {
 				r.Int32() // CurrentLeaderEpoch
 			}
 			p.Offset = r.Int64()
+			if v >= 12 {
+				r.Int32() // LastFetchedEpoch
+			}
 			if v >= 5 {
 				r.Int64() // LogStartOffset
 			}
 			p.MaxBytes = r.Int32()
+			r.Tags(flex)
 			return p
-		})}
+		})
+		r.Tags(flex)
+		return t
 	})
 	if v >= 7 {
-		Array(r, false, func() struct{} { // ForgottenTopicsData
-			r.String(false)
-			readInt32s(r)
+		Array(r, flex, func() struct{} { // ForgottenTopicsData
+			if v >= 13 {
+				r.uuid()
+			} else {
+				r.String(flex)
+			}
+			readInt32s(r, flex)
+			r.Tags(flex)
 			return struct{}{}
 		})
 	}
 	if v >= 11 {
-		m.RackID = r.String(false)
+		m.RackID = r.String(flex)
 	}
+	r.Tags(flex)
 }
 
 // Encode implements Message.
 func (m *FetchRequest) Encode(w *Writer, v int16) {
+	flex := v >= 12
 	w.Int32(-1)
 	w.Int32(m.MaxWaitMs)
 	w.Int32(m.MinBytes)
@@ -534,28 +700,38 @@ func (m *FetchRequest) Encode(w *Writer, v int16) {
 		w.Int32(0)
 		w.Int32(-1)
 	}
-	w.ArrayLen(false, len(m.Topics))
+	w.ArrayLen(flex, len(m.Topics))
 	for _, t := range m.Topics {
-		w.String(false, t.Name)
-		w.ArrayLen(false, len(t.Partitions))
+		if v >= 13 {
+			w.uuid(t.TopicID)
+		} else {
+			w.String(flex, t.Name)
+		}
+		w.ArrayLen(flex, len(t.Partitions))
 		for _, p := range t.Partitions {
 			w.Int32(p.Index)
 			if v >= 9 {
 				w.Int32(-1)
 			}
 			w.Int64(p.Offset)
+			if v >= 12 {
+				w.Int32(-1)
+			}
 			if v >= 5 {
 				w.Int64(-1)
 			}
 			w.Int32(p.MaxBytes)
+			w.Tags(flex)
 		}
+		w.Tags(flex)
 	}
 	if v >= 7 {
-		w.ArrayLen(false, 0)
+		w.ArrayLen(flex, 0)
 	}
 	if v >= 11 {
-		w.String(false, m.RackID)
+		w.String(flex, m.RackID)
 	}
+	w.Tags(flex)
 }
 
 // FetchPartitionResponse is one partition's result in a Fetch response.
@@ -573,7 +749,8 @@ type FetchPartitionResponse struct {
 
 // FetchTopicResponse is one topic of a Fetch response.
 type FetchTopicResponse struct {
-	Name       string
+	Name       string // v4-12
+	TopicID    UUID   // v13+
 	Partitions []FetchPartitionResponse
 }
 
@@ -582,21 +759,29 @@ type FetchResponse struct{ Topics []FetchTopicResponse }
 
 // Decode implements Message.
 func (m *FetchResponse) Decode(r *Reader, v int16) {
+	flex := v >= 12
 	r.Int32() // ThrottleTimeMs, v1+
 	if v >= 7 {
 		r.Int16() // ErrorCode
 		r.Int32() // SessionId
 	}
-	m.Topics = Array(r, false, func() FetchTopicResponse {
-		return FetchTopicResponse{Name: r.String(false), Partitions: Array(r, false, func() FetchPartitionResponse {
+	m.Topics = Array(r, flex, func() FetchTopicResponse {
+		var t FetchTopicResponse
+		if v >= 13 {
+			t.TopicID = r.uuid()
+		} else {
+			t.Name = r.String(flex)
+		}
+		t.Partitions = Array(r, flex, func() FetchPartitionResponse {
 			p := FetchPartitionResponse{Index: r.Int32(), ErrorCode: r.Int16(), HighWatermark: r.Int64()}
 			r.Int64() // LastStableOffset, v4+
 			if v >= 5 {
 				p.LogStartOffset = r.Int64()
 			}
-			Array(r, false, func() struct{} { // AbortedTransactions, v4+
+			Array(r, flex, func() struct{} { // AbortedTransactions, v4+
 				r.Int64()
 				r.Int64()
+				r.Tags(flex)
 				return struct{}{}
 			})
 			if v >= 11 {
@@ -604,25 +789,34 @@ func (m *FetchResponse) Decode(r *Reader, v int16) {
 					p.PreferredReadReplica, p.HasPreferred = id, true
 				}
 			}
-			if p.Records = r.Bytes(false); len(p.Records) == 0 {
+			if p.Records = r.Bytes(flex); len(p.Records) == 0 {
 				p.Records = nil
 			}
+			r.Tags(flex)
 			return p
-		})}
+		})
+		r.Tags(flex)
+		return t
 	})
+	r.Tags(flex)
 }
 
 // Encode implements Message.
 func (m *FetchResponse) Encode(w *Writer, v int16) {
+	flex := v >= 12
 	w.Int32(0)
 	if v >= 7 {
 		w.Int16(ErrNone)
 		w.Int32(0) // SessionId 0: no session, keep sending full requests
 	}
-	w.ArrayLen(false, len(m.Topics))
+	w.ArrayLen(flex, len(m.Topics))
 	for _, t := range m.Topics {
-		w.String(false, t.Name)
-		w.ArrayLen(false, len(t.Partitions))
+		if v >= 13 {
+			w.uuid(t.TopicID)
+		} else {
+			w.String(flex, t.Name)
+		}
+		w.ArrayLen(flex, len(t.Partitions))
 		for _, p := range t.Partitions {
 			w.Int32(p.Index)
 			w.Int16(p.ErrorCode)
@@ -631,7 +825,7 @@ func (m *FetchResponse) Encode(w *Writer, v int16) {
 			if v >= 5 {
 				w.Int64(p.LogStartOffset)
 			}
-			w.ArrayLen(false, -1) // AbortedTransactions: null
+			w.ArrayLen(flex, -1) // AbortedTransactions: null
 			if v >= 11 {
 				if p.HasPreferred {
 					w.Int32(p.PreferredReadReplica)
@@ -643,10 +837,16 @@ func (m *FetchResponse) Encode(w *Writer, v int16) {
 			// definition allows null, and the Java client and franz-go
 			// accept it, but librdkafka rejects it ("invalid
 			// MessageSetSize -1"). Found by the kcat integration test.
-			w.Int32(int32(len(p.Records)))
-			w.B = append(w.B, p.Records...)
+			recs := p.Records
+			if recs == nil {
+				recs = []byte{}
+			}
+			w.Bytes(flex, recs)
+			w.Tags(flex)
 		}
+		w.Tags(flex)
 	}
+	w.Tags(flex)
 }
 
 // Special timestamps in a ListOffsets request.

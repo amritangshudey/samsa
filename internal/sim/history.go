@@ -36,6 +36,7 @@ type rec struct {
 	state    recState
 	offset   int64 // where it was acknowledged or observed; -1 if neither
 	sent     int64 // ms, when Retention is on: its timestamp is no earlier
+	end      int64 // ms, when Unknown was recorded
 	ackEpoch int   // model epoch when it was acknowledged
 	lost     bool  // seen, then removed by a permitted power-loss truncation
 	final    int   // last final pass that observed it
@@ -70,6 +71,7 @@ type topicModel struct {
 	// deleting is set once a DeleteTopics was sent, deleted once one was
 	// acknowledged: from then on no request sent may find it (D1).
 	deleting, deleted bool
+	id                wire.UUID
 }
 
 // Model is the checker. Clients report what they sent and what they were
@@ -137,7 +139,7 @@ func (m *Model) PowerLoss() {
 		if t.state == topicCreated {
 			t.state = topicAttempted
 		}
-		t.known, t.deleted = t.initial, false // a growth or a delete may be lost too
+		t.known, t.deleted, t.id = t.initial, false, wire.UUID{} // a growth, a delete or an id may be lost too
 	}
 }
 
@@ -155,6 +157,38 @@ func (m *Model) TopicCreated(name string, epoch int) {
 		t.state = topicCreated
 		t.known = max(t.known, t.initial)
 	}
+}
+
+// NoteTopicID records that the broker reported id for name in answer to a
+// request sent in the given epoch. Every node and every API must report
+// the same unique non-zero id for a topic across its life.
+func (m *Model) NoteTopicID(name string, id wire.UUID, epoch int) error {
+	if m.stale(epoch) || id == (wire.UUID{}) {
+		return nil
+	}
+	t := m.topics[name]
+	if t == nil {
+		return nil
+	}
+	if t.id != (wire.UUID{}) && t.id != id {
+		return fmt.Errorf("I4: topic %s has id %x, had %x", name, id, t.id)
+	}
+	for other, ot := range m.topics {
+		if other != name && ot.id == id {
+			return fmt.Errorf("I4: topics %s and %s share topic id %x", name, other, id)
+		}
+	}
+	t.id = id
+	return nil
+}
+
+// TopicID returns the topic id reported for name, or the zero UUID if
+// none has been seen in this epoch.
+func (m *Model) TopicID(name string) wire.UUID {
+	if t := m.topics[name]; t != nil {
+		return t.id
+	}
+	return wire.UUID{}
 }
 
 // Known reports whether a request sent now must find tp.
@@ -216,8 +250,12 @@ func (m *Model) Rejected(first uint64, n int) error {
 // Unknown records that the client will never learn what happened to the n
 // records from first.
 func (m *Model) Unknown(first uint64, n int) {
+	var end int64
+	if m.clock != nil {
+		end = m.clock()
+	}
 	for id := first; id < first+uint64(n); id++ {
-		m.recs[id].state = recUnknown
+		m.recs[id].state, m.recs[id].end = recUnknown, end
 	}
 }
 
@@ -308,6 +346,8 @@ type Fetch struct {
 	// Redirected is set when the answer names another node to read from
 	// and carries no records.
 	Redirected bool
+	// ByID is set when the fetch asked by topic id (Fetch v13).
+	ByID bool
 }
 
 // Start returns the highest log start offset reported for tp: retention
@@ -356,14 +396,28 @@ func (m *Model) Fetched(f Fetch) (next int64, err error) {
 	if m.stale(f.Epoch) {
 		return -1, nil
 	}
-	if f.Deleted && f.Err != wire.ErrUnknownTopicOrPartition && !f.Follower {
-		return -1, fmt.Errorf("D1: %v was deleted, but a fetch sent afterwards was answered with code %d", f.TP, f.Err)
+	if f.Deleted && !f.Follower {
+		want := wire.ErrUnknownTopicOrPartition
+		if f.ByID {
+			want = wire.ErrUnknownTopicID
+		}
+		if f.Err != want {
+			return -1, fmt.Errorf("D1: %v was deleted, but a fetch sent afterwards was answered with code %d, want %d", f.TP, f.Err, want)
+		}
 	}
 	switch f.Err {
 	case wire.ErrNone:
 	case wire.ErrUnknownTopicOrPartition:
 		if f.Known && !f.Follower {
 			return -1, fmt.Errorf("I1: %v was created but the broker does not know it", f.TP)
+		}
+		return -1, nil
+	case wire.ErrUnknownTopicID:
+		if !f.ByID {
+			return -1, fmt.Errorf("fetch of %v by name answered UNKNOWN_TOPIC_ID", f.TP)
+		}
+		if f.Known && !f.Follower {
+			return -1, fmt.Errorf("I1: %v was created but the broker does not know its topic id", f.TP)
 		}
 		return -1, nil
 	case wire.ErrOffsetNotAvailable:

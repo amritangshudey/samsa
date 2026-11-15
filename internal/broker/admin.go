@@ -33,27 +33,45 @@ func (n *Node) deleteTopics(c *conn, h wire.RequestHeader, req *wire.DeleteTopic
 	seen := map[string]bool{}
 	for i, t := range req.Topics {
 		res := &resp.Topics[i]
-		res.Name = t.Name
+		res.Name, res.TopicID = t.Name, t.TopicID
+		byID := t.Name == ""
+		if byID {
+			res.Name = n.st.byID[t.TopicID]
+		}
+		tp := n.st.topics[res.Name]
+		if tp != nil {
+			res.TopicID = tp.id
+		}
 		switch {
-		case t.Name == "":
-			res.TopicID = t.TopicID
-			res.ErrorCode, res.ErrorMessage = wire.ErrUnknownTopicID, "topics are named by name only (ADR 0016)"
-		case seen[t.Name]:
+		case byID && tp == nil:
+			res.ErrorCode, res.ErrorMessage = wire.ErrUnknownTopicID, "unknown topic id"
+		case seen[res.Name]:
 			res.ErrorCode, res.ErrorMessage = wire.ErrInvalidRequest, "topic appears twice in the request"
-		case !clusterDelete && !n.may(c, opDescribe, resTopic, t.Name):
+		case !clusterDelete && !n.may(c, opDescribe, resTopic, res.Name):
 			res.ErrorCode = wire.ErrTopicAuthorizationFailed // before existence: it is not disclosed
-		case n.st.topics[t.Name] == nil:
+		case tp == nil:
 			res.ErrorCode = wire.ErrUnknownTopicOrPartition
-		case !clusterDelete && !n.may(c, opDelete, resTopic, t.Name):
+		case t.TopicID != (wire.UUID{}) && tp.id != t.TopicID:
+			res.ErrorCode = wire.ErrUnknownTopicID
+		case !clusterDelete && !n.may(c, opDelete, resTopic, res.Name):
 			res.ErrorCode = wire.ErrTopicAuthorizationFailed
 		}
-		seen[t.Name] = true
+		if res.Name != "" {
+			seen[res.Name] = true
+		}
 		if res.ErrorCode != wire.ErrNone {
 			continue
 		}
 		add()
-		n.propose(encodeDeleteTopic(t.Name), func(r result) {
+		var targetID wire.UUID
+		if n.st.level >= 4 {
+			targetID = tp.id
+		}
+		n.propose(encodeDeleteTopic(res.Name, targetID), func(r result) {
 			res.ErrorCode = r.errCode
+			if !byID && t.TopicID == (wire.UUID{}) && res.ErrorCode == wire.ErrUnknownTopicID {
+				res.ErrorCode = wire.ErrUnknownTopicOrPartition
+			}
 			done()
 		})
 	}
@@ -126,6 +144,40 @@ func (n *Node) deleteRecords(c *conn, h wire.RequestHeader, req *wire.DeleteReco
 	done()
 }
 
+func (n *Node) topicConfigEntries(overrides map[string]string) []wire.ConfigEntry {
+	segment := strconv.FormatInt(n.cfg.SegmentBytes, 10)
+	if n.cfg.SegmentBytes == 0 {
+		segment = strconv.FormatInt(64<<20, 10) // the storage default
+	}
+	maxBatch := strconv.Itoa(n.cfg.MaxBatchBytes)
+	const integer, long, list = 3, 5, 7 // ConfigType ids
+	static := wire.ConfigSourceStaticBroker
+	entries := []wire.ConfigEntry{
+		{Name: "cleanup.policy", Value: "delete", Source: wire.ConfigSourceDefault, Type: list},
+		{Name: "delete.retention.ms", Value: strconv.FormatInt(n.cfg.DeleteRetentionTime.Milliseconds(), 10), Source: static, Type: long},
+		{Name: "min.compaction.lag.ms", Value: "0", Source: wire.ConfigSourceDefault, Type: long},
+		{Name: "max.message.bytes", Value: maxBatch, ReadOnly: true, Source: static, Type: integer},
+		{Name: "retention.bytes", Value: "-1", Source: wire.ConfigSourceDefault, Type: long}, // per partition; the log-wide bound is log.retention.bytes
+		{Name: "retention.ms", Value: "-1", Source: wire.ConfigSourceDefault, Type: long},
+		{Name: "segment.bytes", Value: segment, ReadOnly: true, Source: static, Type: integer},
+	}
+	for i, e := range entries {
+		if v, ok := overrides[e.Name]; ok {
+			entries[i].Value, entries[i].Source = v, wire.ConfigSourceDynamicTopic
+		}
+	}
+	return entries
+}
+
+func (n *Node) createdTopicConfigs(overrides map[string]string) []wire.CreateTopicConfig {
+	entries := n.topicConfigEntries(overrides)
+	out := make([]wire.CreateTopicConfig, len(entries))
+	for i, e := range entries {
+		out[i] = wire.CreateTopicConfig{Name: e.Name, Value: e.Value, ReadOnly: e.ReadOnly, Source: e.Source, IsSensitive: e.IsSensitive}
+	}
+	return out
+}
+
 // describeConfigs is answered by every node from its own configuration and
 // applied state, like Metadata: nothing in it is ever changed by a client,
 // and a follower is at most a little behind on which topics exist.
@@ -140,17 +192,8 @@ func (n *Node) describeConfigs(c *conn, req *wire.DescribeConfigsRequest) *wire.
 	}
 	maxBatch := strconv.Itoa(n.cfg.MaxBatchBytes)
 	sync := [...]string{SyncAlways: "always", SyncInterval: "interval", SyncNever: "never"}[n.cfg.Sync]
-	const str, integer, long, list = 2, 3, 5, 7 // ConfigType ids
+	const str, integer, long = 2, 3, 5 // ConfigType ids
 	static := wire.ConfigSourceStaticBroker
-	topicConfigs := []wire.ConfigEntry{
-		{Name: "cleanup.policy", Value: "delete", Source: wire.ConfigSourceDefault, Type: list},
-		{Name: "delete.retention.ms", Value: strconv.FormatInt(n.cfg.DeleteRetentionTime.Milliseconds(), 10), Source: static, Type: long},
-		{Name: "min.compaction.lag.ms", Value: "0", Source: wire.ConfigSourceDefault, Type: long},
-		{Name: "max.message.bytes", Value: maxBatch, Source: static, Type: integer},
-		{Name: "retention.bytes", Value: "-1", Source: wire.ConfigSourceDefault, Type: long}, // per partition; the log-wide bound is log.retention.bytes
-		{Name: "retention.ms", Value: "-1", Source: wire.ConfigSourceDefault, Type: long},
-		{Name: "segment.bytes", Value: segment, Source: static, Type: integer},
-	}
 	brokerConfigs := []wire.ConfigEntry{
 		{Name: "log.retention.bytes", Value: retention, Source: static, Type: long},
 		{Name: "log.segment.bytes", Value: segment, Source: static, Type: integer},
@@ -167,12 +210,7 @@ func (n *Node) describeConfigs(c *conn, req *wire.DescribeConfigsRequest) *wire.
 		case res.Type == wire.ResourceBroker && !n.may(c, opDescribeConfigs, resCluster, clusterName):
 			out.ErrorCode = wire.ErrClusterAuthorizationFailed
 		case res.Type == wire.ResourceTopic && n.st.topics[res.Name] != nil:
-			all = slices.Clone(topicConfigs)
-			for j, e := range all {
-				if v, ok := n.st.topics[res.Name].configs[e.Name]; ok {
-					all[j].Value, all[j].Source = v, wire.ConfigSourceDynamicTopic
-				}
-			}
+			all = n.topicConfigEntries(n.st.topics[res.Name].configs)
 		case res.Type == wire.ResourceTopic:
 			out.ErrorCode, out.ErrorMessage = wire.ErrUnknownTopicOrPartition, "no such topic"
 		case res.Type == wire.ResourceBroker && (res.Name == "" || res.Name == strconv.Itoa(int(n.cfg.NodeID))):

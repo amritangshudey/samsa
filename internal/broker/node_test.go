@@ -793,10 +793,14 @@ func FuzzNodeInput(f *testing.F) {
 		req    wire.Message
 	}{
 		{wire.KeyAPIVersions, 3, &wire.APIVersionsRequest{ClientSoftwareName: "f"}},
+		{wire.KeyAPIVersions, 5, &wire.APIVersionsRequest{ClientSoftwareName: "f", ClientSoftwareVersion: "1"}},
 		{wire.KeyMetadata, 8, &wire.MetadataRequest{AllTopics: true}},
+		{wire.KeyMetadata, 12, &wire.MetadataRequest{Topics: []string{"t"}, TopicIDs: []wire.UUID{{1, 2, 3}}}},
 		{wire.KeyCreateTopics, 4, &wire.CreateTopicsRequest{Topics: []wire.CreateTopic{{Name: "t", NumPartitions: 1, ReplicationFactor: 1}}}},
+		{wire.KeyCreateTopics, 7, &wire.CreateTopicsRequest{Topics: []wire.CreateTopic{{Name: "u", NumPartitions: 1, ReplicationFactor: 1}}}},
 		{wire.KeyProduce, 8, produceReq("t", 0, batch("x"))},
 		{wire.KeyFetch, 11, fetchReq("t", 0, 0, 10, 1)},
+		{wire.KeyFetch, 13, &wire.FetchRequest{MaxWaitMs: 10, MinBytes: 1, MaxBytes: 1024, Topics: []wire.FetchTopic{{TopicID: wire.UUID{1, 2}, Partitions: []wire.FetchPartition{{Index: 0, Offset: 0, MaxBytes: 1024}}}}}},
 		{wire.KeyListOffsets, 5, &wire.ListOffsetsRequest{Topics: []wire.ListOffsetsTopic{{Name: "t", Partitions: []wire.ListOffsetsPartition{{Timestamp: -1}}}}}},
 	} {
 		b, _ := h.frame(m.key, m.v, m.req)
@@ -857,4 +861,119 @@ func TestRetentionTrimsTheLog(t *testing.T) {
 	}
 	h.open(1)
 	check()
+}
+
+// Topic IDs (ADR 0032): CreateTopics v5-7 returns partition count,
+// replication factor, configs and topic ID; Metadata v9-12 reports topic IDs
+// and resolves topics by ID; Fetch v12-13 fetches by topic ID; deleting and
+// recreating a topic assigns a fresh UUID so fetches against the deleted
+// incarnation fail with UNKNOWN_TOPIC_ID.
+func TestTopicIDsAndProtocolVersions(t *testing.T) {
+	h := newHarness(t, Config{SnapshotEvery: 2})
+	h.open(1)
+
+	var av wire.APIVersionsResponse
+	h.call(1, wire.KeyAPIVersions, 5, &wire.APIVersionsRequest{ClientSoftwareName: "kgo", ClientSoftwareVersion: "1.17"}, &av)
+	if av.ErrorCode != wire.ErrNone {
+		t.Fatalf("ApiVersions v5: %+v", av)
+	}
+
+	var ct wire.CreateTopicsResponse
+	h.call(1, wire.KeyCreateTopics, 7, &wire.CreateTopicsRequest{
+		Topics: []wire.CreateTopic{
+			{Name: "orders", NumPartitions: 2, ReplicationFactor: -1, Configs: []wire.TopicConfig{{Name: "retention.ms", Value: "60000"}}},
+			{Name: "orders", NumPartitions: 1, ReplicationFactor: 1},
+		},
+		TimeoutMs: 1000,
+	}, &ct)
+	if len(ct.Topics) != 2 || ct.Topics[0].ErrorCode != wire.ErrNone || ct.Topics[1].ErrorCode != wire.ErrInvalidRequest {
+		t.Fatalf("CreateTopics v7: %+v", ct)
+	}
+	id1 := ct.Topics[0].TopicID
+	if id1 == (wire.UUID{}) || id1[6]&0xf0 != 0x40 || id1[8]&0xc0 != 0x80 {
+		t.Fatalf("topic ID %x is not a non-zero RFC 4122 v4 UUID", id1)
+	}
+	if ct.Topics[0].NumPartitions != 2 || ct.Topics[0].ReplicationFactor != 1 || len(ct.Topics[0].Configs) == 0 {
+		t.Fatalf("CreateTopics v7 metadata: %+v", ct.Topics[0])
+	}
+	if ct.Topics[1].NumPartitions != -1 || ct.Topics[1].ReplicationFactor != -1 || ct.Topics[1].Configs != nil {
+		t.Fatalf("CreateTopics v7 error entry: %+v", ct.Topics[1])
+	}
+
+	// Metadata v9-12: by name, all topics, and by UUID (valid and unknown).
+	for v := int16(9); v <= 12; v++ {
+		var md wire.MetadataResponse
+		h.call(1, wire.KeyMetadata, v, &wire.MetadataRequest{AllTopics: true}, &md)
+		if len(md.Topics) != 1 || md.Topics[0].Name != "orders" || (v >= 10 && md.Topics[0].TopicID != id1) {
+			t.Fatalf("Metadata v%d all: %+v", v, md.Topics)
+		}
+	}
+	var mdByID wire.MetadataResponse
+	missingID := wire.UUID{9, 9, 9}
+	h.call(1, wire.KeyMetadata, 12, &wire.MetadataRequest{
+		Topics:   []string{"", "", "missing"},
+		TopicIDs: []wire.UUID{id1, missingID, {}},
+	}, &mdByID)
+	if len(mdByID.Topics) != 3 ||
+		mdByID.Topics[0].ErrorCode != wire.ErrNone || mdByID.Topics[0].Name != "orders" || mdByID.Topics[0].TopicID != id1 ||
+		mdByID.Topics[1].ErrorCode != wire.ErrUnknownTopicID || mdByID.Topics[1].Name != "" || mdByID.Topics[1].TopicID != missingID ||
+		mdByID.Topics[2].ErrorCode != wire.ErrUnknownTopicOrPartition || mdByID.Topics[2].Name != "missing" {
+		t.Fatalf("Metadata v12 by ID and name: %+v", mdByID.Topics)
+	}
+
+	// Produce and Fetch v12 (by name) and v13 (by topic ID).
+	h.produce(1, "orders", 0, "m1", "m2")
+	var f12 wire.FetchResponse
+	h.call(1, wire.KeyFetch, 12, fetchReq("orders", 0, 0, 0, 1), &f12)
+	if _, vals := h.values(f12.Topics[0].Partitions[0]); !reflect.DeepEqual(vals, []string{"m1", "m2"}) {
+		t.Fatalf("Fetch v12: %v", vals)
+	}
+	var f13 wire.FetchResponse
+	h.call(1, wire.KeyFetch, 13, &wire.FetchRequest{
+		MaxBytes: 1 << 20,
+		Topics:   []wire.FetchTopic{{TopicID: id1, Partitions: []wire.FetchPartition{{Index: 0, Offset: 0, MaxBytes: 1 << 16}}}},
+	}, &f13)
+	if f13.Topics[0].TopicID != id1 {
+		t.Fatalf("Fetch v13 topic ID %x, want %x", f13.Topics[0].TopicID, id1)
+	}
+	if _, vals := h.values(f13.Topics[0].Partitions[0]); !reflect.DeepEqual(vals, []string{"m1", "m2"}) {
+		t.Fatalf("Fetch v13: %v", vals)
+	}
+
+	// Delete by TopicID (DeleteTopics v6) and recreate under the same name:
+	// the new incarnation gets a distinct UUID and old-UUID fetches fail
+	// with UNKNOWN_TOPIC_ID (100).
+	if del := h.deleteTopics(1, wire.DeleteTopic{TopicID: id1}); del[0].ErrorCode != wire.ErrNone || del[0].TopicID != id1 {
+		t.Fatalf("DeleteTopics by ID: %+v", del)
+	}
+	h.call(1, wire.KeyCreateTopics, 7, &wire.CreateTopicsRequest{
+		Topics: []wire.CreateTopic{{Name: "orders", NumPartitions: 1, ReplicationFactor: 1}},
+	}, &ct)
+	id2 := ct.Topics[0].TopicID
+	if ct.Topics[0].ErrorCode != wire.ErrNone || id2 == (wire.UUID{}) || id2 == id1 {
+		t.Fatalf("recreated topic ID %x, old %x: %+v", id2, id1, ct.Topics[0])
+	}
+	h.produce(1, "orders", 0, "new-incarnation")
+
+	h.call(1, wire.KeyFetch, 13, &wire.FetchRequest{
+		MaxBytes: 1 << 20,
+		Topics:   []wire.FetchTopic{{TopicID: id1, Partitions: []wire.FetchPartition{{Index: 0, Offset: 0, MaxBytes: 1 << 16}}}},
+	}, &f13)
+	if f13.Topics[0].Partitions[0].ErrorCode != wire.ErrUnknownTopicID {
+		t.Fatalf("Fetch v13 with deleted topic ID: %+v", f13)
+	}
+	h.call(1, wire.KeyFetch, 13, &wire.FetchRequest{
+		MaxBytes: 1 << 20,
+		Topics:   []wire.FetchTopic{{TopicID: id2, Partitions: []wire.FetchPartition{{Index: 0, Offset: 0, MaxBytes: 1 << 16}}}},
+	}, &f13)
+	if _, vals := h.values(f13.Topics[0].Partitions[0]); !reflect.DeepEqual(vals, []string{"new-incarnation"}) {
+		t.Fatalf("Fetch v13 with new topic ID: %v", vals)
+	}
+
+	// Snapshot v9 round-trip on restart preserves topic IDs.
+	hash := h.node.st.hash()
+	h.start()
+	if h.node.st.hash() != hash || h.node.st.topics["orders"].id != id2 || h.node.st.byID[id2] != "orders" {
+		t.Fatalf("after restart: id %x, want %x", h.node.st.topics["orders"].id, id2)
+	}
 }

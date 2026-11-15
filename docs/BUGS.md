@@ -283,6 +283,28 @@ for how much that is worth.
   applies twice is harmless. The leader accepts a forwarded topic config
   command only at format level 2. `TestAlterConfigsForwarded` covers it.
 
+### C3. SASL/SCRAM failed against librdkafka 2.3.0 on Ubuntu 24.04 (C18a, before merge)
+
+- **Test:** `TestACLsOtherClients/kcat` and `TestTLSAndSASLOtherClients/kcat`
+  on Ubuntu 24.04 (`librdkafka` 2.3.0).
+- **Symptom:** first, `librdkafka` aborted immediately after `ApiVersions` v3
+  with `Failed to initialize SASL authentication: SASL Handshake not supported
+  by broker (required by mechanism SCRAM-SHA-256)`. Second, once `SaslHandshake`
+  was sent, `SaslAuthenticate` failed with `wrong SCRAM proof`.
+- **Root cause:** two bugs in older `librdkafka` releases:
+  1. In `librdkafka` before 2.10 (`rdkafka_feature.c`),
+     `RD_KAFKA_FEATURE_SASL_HANDSHAKE` is enabled only if the broker's
+     advertised `SaslHandshake` range overlaps `[0, 0]`. Samsa advertised
+     `1..1`, so `librdkafka` 2.3.0 cleared `RD_KAFKA_FEATURE_SASL_HANDSHAKE`
+     even though it sends `SaslHandshake` version 1 once enabled.
+  2. In `librdkafka` <= 2.6.0 (`rdkafka_sasl_scram.c`,
+     `confluentinc/librdkafka#4895`), `client-final-message-without-proof`
+     concatenated the client nonce a second time (`r=<cnonce><cnonce><snonce>`),
+     which Apache Kafka worked around in `ScramSaslServer.java` (`KAFKA-17805`).
+- **Fix:** `KeySaslHandshake` advertises `AdvertisedMin: 0` in `ApiVersions`
+  while `Min: 1` continues to reject version 0 requests, and `scram.Server.Final`
+  accepts both `r=<cnonce><snonce>` and `r=<cnonce><cnonce><snonce>`.
+
 ## Bugs found by the soak
 
 ### L1. Raft kept one term per entry ever written (G5)
@@ -479,6 +501,24 @@ for how much that is worth.
   the log and fell back to the configured peer only when there was none, so
   the rack, which is only in the configuration, was dropped.
 - **Fix:** the rack is read from the configuration either way.
+
+### C18a-1. ApiVersionsRequest v5 failed on the second connection once ClusterId was known (C18a)
+
+- **Found by:** `TestFranzGoRoundTripAndRestart`, `TestJavaClientRoundTrip`,
+  and `TestTopicIDIncarnationAndFetchByID` (`closing connection ...
+  reason="malformed request body: key 18 version 5"`).
+- **Root cause:** `ApiVersionsRequest` v5 (KIP-1242) adds `ClusterId` (compact
+  nullable string) and `NodeId` (`int32`, default `-1`) before the tagged
+  fields. On a client's bootstrap connection `ClusterId` is null (`0x00`),
+  which `r.Tags(true)` read as zero tagged fields and ignored the trailing 5
+  bytes. Once `Metadata` answered `ClusterId = "samsa"`, the client's next
+  connection sent `"samsa"`, which `r.Tags(true)` tried to parse as 6 tagged
+  fields.
+- **Fix:** `APIVersionsRequest.Decode` and `Encode` read and write `ClusterId`
+  and `NodeId` at version 5+.
+- **Lesson:** `r.Tags(true)` stops at the end of the tag list without checking
+  for trailing bytes, so a missing nullable field whose bootstrap value is
+  `0x00` looks like an empty tag section until a client sends a non-null value.
 
 ## Bugs in the simulator and tests
 
@@ -757,3 +797,37 @@ would happen against Kafka too (not tested against Kafka).
   leader's rules only if the node was serving at the request and at the
   receipt with no change between; to the follower's rules only if it was not
   serving throughout; to the lesser ones otherwise.
+
+### M19. The simulator expected CreateTopics v7 to return a TopicID on TOPIC_ALREADY_EXISTS (C18a)
+
+- **Seeds:** 1, 2, 3, 4, 6 and 129 others in the first 200-seed run.
+- **Reported as:** `CreateTopics v7 for "t2" returned a zero topic id`.
+- **Root cause:** `client.createTopic` required `resp.Topics[0].TopicID != UUID{}`
+  whenever `ErrorCode` was `ErrNone` or `ErrTopicAlreadyExists`. On
+  `ErrTopicAlreadyExists`, the broker (matching Kafka) returns the zero UUID
+  because the request did not create the topic.
+- **Fix:** `client.createTopic` requires a non-zero `TopicID` only when
+  `ErrorCode == ErrNone`; in `admin.go`, when a retried `CreateTopics` v7
+  receives `ErrTopicAlreadyExists` after a dropped connection, it queries
+  `Metadata` v12 to read the existing topic's `TopicID`.
+
+### M20. C1 ordered an unacknowledged tombstone by send id instead of its in-flight window (C18a)
+
+- **Seed:** 951, in the 3,000-seed CI run on PR #40.
+- **Reported as:** `C1: record 13376, acknowledged at tc/0 offset 1730 with key key-6, is gone, and nothing later of the key is left to replace it`.
+- **Root cause:** M14 fixed `checkCompactedFinal` to order acknowledged
+  tombstones by offset (`oldTombAt`), but still ordered tombstones whose
+  acknowledgement never arrived by record id (`oldTombID[k] > id`). Here one
+  producer sent tombstone 13359 for `key-6` at 9.958 s and a second producer
+  sent record 13376 for `key-6` at 9.962 s. Record 13376 arrived at leader
+  node 2 first (offset 1730) and was acknowledged at 10.012 s; tombstone 13359
+  arrived at leader node 2 second (offset 1733), replicated to a quorum, and
+  became `recUnknown` when node 2 stepped down at 10.012 s before answering
+  that connection. During quiesce the cleaner removed record 13376 (superseded
+  by tombstone 13359) and then removed tombstone 13359 once
+  `delete.retention.ms` elapsed. Because `13359 < 13376`, `oldTombID` assumed
+  the tombstone had preceded record 13376.
+- **Fix:** `Model.Unknown` records the clock instant `end` when a record's
+  request ends without an answer, and `checkCompactedFinal` tracks
+  `oldTombUntil[k]`, the latest time an unacknowledged old tombstone of key `k`
+  remained in flight (`oldTombUntil[k] >= r.sent`).

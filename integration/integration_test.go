@@ -416,3 +416,108 @@ func TestJavaProducerAfterExpiry(t *testing.T) {
 		}
 	}
 }
+
+// KIP-516 topic IDs across CreateTopics v7, Metadata v12, DeleteTopics v6
+// by id, and Fetch v13: a recreated topic of the same name gets a fresh
+// UUID, and a client that still holds the deleted incarnation's UUID is
+// answered with UNKNOWN_TOPIC_ID (100) rather than reading the new topic.
+func TestTopicIDIncarnationAndFetchByID(t *testing.T) {
+	c := startCluster(t, 3)
+	cl := c.client()
+	leader := cl.Broker(int(c.leader(cl)))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	create := func(name string) [16]byte {
+		t.Helper()
+		req := kmsg.NewPtrCreateTopicsRequest()
+		rt := kmsg.NewCreateTopicsRequestTopic()
+		rt.Topic, rt.NumPartitions, rt.ReplicationFactor = name, 3, -1
+		req.Topics = append(req.Topics, rt)
+		resp, err := req.RequestWith(ctx, leader)
+		if err != nil || len(resp.Topics) != 1 || resp.Topics[0].ErrorCode != 0 {
+			t.Fatalf("CreateTopics(%q): %v %+v", name, err, resp)
+		}
+		if resp.Version != 7 {
+			t.Fatalf("CreateTopics negotiated v%d, want v7", resp.Version)
+		}
+		if resp.Topics[0].TopicID == ([16]byte{}) {
+			t.Fatalf("CreateTopics v7 returned zero TopicID for %q", name)
+		}
+		if resp.Topics[0].NumPartitions != 3 || resp.Topics[0].ReplicationFactor != 3 || len(resp.Topics[0].Configs) == 0 {
+			t.Fatalf("CreateTopics v7 metadata: %+v", resp.Topics[0])
+		}
+		return resp.Topics[0].TopicID
+	}
+
+	id1 := create("orders")
+
+	// Metadata v12 lookup by TopicID only (Topic name nil).
+	mreq := kmsg.NewPtrMetadataRequest()
+	mt := kmsg.NewMetadataRequestTopic()
+	mt.TopicID = id1
+	mreq.Topics = append(mreq.Topics, mt)
+	mresp, err := mreq.RequestWith(ctx, leader)
+	if err != nil || len(mresp.Topics) != 1 || mresp.Topics[0].ErrorCode != 0 {
+		t.Fatalf("Metadata by TopicID: %v %+v", err, mresp)
+	}
+	if mresp.Version != 12 || mresp.Topics[0].TopicID != id1 || mresp.Topics[0].Topic == nil || *mresp.Topics[0].Topic != "orders" {
+		t.Fatalf("Metadata v12 response: v=%d %+v", mresp.Version, mresp.Topics[0])
+	}
+
+	if err := c.produce(cl, "orders", "v1", 6, 10*time.Second); err != nil {
+		t.Fatalf("produce to orders: %v", err)
+	}
+
+	// Delete by TopicID (DeleteTopics v6) and recreate under the same name.
+	dreq := kmsg.NewPtrDeleteTopicsRequest()
+	dt := kmsg.NewDeleteTopicsRequestTopic()
+	dt.TopicID = id1
+	dreq.Topics = append(dreq.Topics, dt)
+	dresp, err := dreq.RequestWith(ctx, leader)
+	if err != nil || len(dresp.Topics) != 1 || dresp.Topics[0].ErrorCode != 0 || dresp.Topics[0].TopicID != id1 {
+		t.Fatalf("DeleteTopics v6 by TopicID: %v %+v", err, dresp)
+	}
+
+	id2 := create("orders")
+	if id2 == id1 {
+		t.Fatalf("recreated topic reused TopicID %x", id2)
+	}
+	if err := c.produce(c.client(), "orders", "v2", 6, 10*time.Second); err != nil {
+		t.Fatalf("produce to recreated orders: %v", err)
+	}
+
+	// A Fetch v13 carrying the old TopicID must be refused with UNKNOWN_TOPIC_ID (100),
+	// while a Fetch v13 carrying the new TopicID succeeds.
+	fetchByID := func(id [16]byte) *kmsg.FetchResponse {
+		t.Helper()
+		freq := kmsg.NewPtrFetchRequest()
+		freq.MaxBytes = 1 << 20
+		ft := kmsg.NewFetchRequestTopic()
+		ft.TopicID = id
+		fp := kmsg.NewFetchRequestTopicPartition()
+		fp.Partition = 0
+		fp.FetchOffset = 0
+		fp.PartitionMaxBytes = 1 << 20
+		ft.Partitions = append(ft.Partitions, fp)
+		freq.Topics = append(freq.Topics, ft)
+		fresp, err := freq.RequestWith(ctx, leader)
+		if err != nil {
+			t.Fatalf("Fetch v13: %v", err)
+		}
+		if fresp.Version != 13 {
+			t.Fatalf("Fetch negotiated v%d, want v13", fresp.Version)
+		}
+		return fresp
+	}
+
+	oldResp := fetchByID(id1)
+	if got := oldResp.Topics[0].Partitions[0].ErrorCode; got != 100 {
+		t.Fatalf("Fetch v13 with deleted incarnation's TopicID: error %d, want UNKNOWN_TOPIC_ID (100)", got)
+	}
+	newResp := fetchByID(id2)
+	if got := newResp.Topics[0].Partitions[0].ErrorCode; got != 0 || len(newResp.Topics[0].Partitions[0].RecordBatches) == 0 {
+		t.Fatalf("Fetch v13 with new incarnation's TopicID: error %d, %d bytes", got, len(newResp.Topics[0].Partitions[0].RecordBatches))
+	}
+}

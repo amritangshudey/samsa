@@ -71,7 +71,7 @@ jobs:
   # Real Kafka clients against the built binary. A missing client fails the
   # job instead of being skipped.
   integration:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
         with:

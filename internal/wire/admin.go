@@ -4,13 +4,19 @@ package wire
 // of kafka-clients 4.4.0 (ADR 0016). Every structure of a flexible version
 // ends with tagged fields, which are skipped.
 
-// UUID is a Kafka uuid: 16 bytes. Samsa has no topic ids and sends zero.
+// UUID is a Kafka uuid: 16 bytes.
 type UUID [16]byte
+
+// UUID reads a 16-byte UUID.
+func (r *Reader) UUID() UUID { return r.uuid() }
 
 func (r *Reader) uuid() (u UUID) {
 	copy(u[:], r.take(16))
 	return u
 }
+
+// UUID appends a 16-byte UUID.
+func (w *Writer) UUID(u UUID) { w.uuid(u) }
 
 func (w *Writer) uuid(u UUID) { w.B = append(w.B, u[:]...) }
 

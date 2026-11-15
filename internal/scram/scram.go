@@ -155,6 +155,7 @@ type Server struct {
 	gs2         string // the GS2 header, as sent
 	clientBare  string
 	serverFirst string
+	clientNonce string
 	nonce       string
 }
 
@@ -204,7 +205,8 @@ func (s *Server) First(msg []byte, lookup func(user string) (Credential, bool), 
 	}
 	// Later attributes are extensions (Kafka's "tokenauth"); ignored, as Kafka does.
 	s.user = user
-	s.nonce = attrs[1][2:] + serverNonce
+	s.clientNonce = attrs[1][2:]
+	s.nonce = s.clientNonce + serverNonce
 	cred, found := lookup(user)
 	if !found || cred.Mechanism != s.mechanism {
 		s.unknown = true
@@ -233,7 +235,11 @@ func (s *Server) Final(msg []byte) ([]byte, string, error) {
 	}
 	withoutProof, proofText := m[:i], m[i+3:]
 	attrs := strings.Split(withoutProof, ",")
-	if len(attrs) < 2 || attrs[0] != "c="+base64.StdEncoding.EncodeToString([]byte(s.gs2)) || attrs[1] != "r="+s.nonce {
+	// librdkafka <= 2.6.0 prepends the client nonce a second time in the
+	// client-final-message (confluentinc/librdkafka#4895); Kafka's
+	// ScramSaslServer accepts it (KAFKA-17805).
+	if len(attrs) < 2 || attrs[0] != "c="+base64.StdEncoding.EncodeToString([]byte(s.gs2)) ||
+		(attrs[1] != "r="+s.nonce && attrs[1] != "r="+s.clientNonce+s.nonce) {
 		return nil, "", ErrAuth
 	}
 	proof, err := base64.StdEncoding.DecodeString(proofText)

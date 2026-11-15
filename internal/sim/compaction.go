@@ -250,11 +250,11 @@ func (m *Model) checkCompactedFinal() error {
 		now := m.clock()
 		// A tombstone of key k old enough to have gone takes everything older
 		// with it: oldTombAt[k] is the highest offset of one whose offset is
-		// known, oldTombID[k] the highest id of one whose offset is not.
-		var oldTombAt [compactKeys]int64
-		var oldTombID [compactKeys]uint64
+		// known, oldTombUntil[k] the latest time one whose offset is not was
+		// still in flight (it may have landed after any record sent by then).
+		var oldTombAt, oldTombUntil [compactKeys]int64
 		for i := range oldTombAt {
-			oldTombAt[i] = -1
+			oldTombAt[i], oldTombUntil[i] = -1, -1
 		}
 		for id := 1; id < len(m.recs); id++ {
 			r := &m.recs[id]
@@ -262,10 +262,13 @@ func (m *Model) checkCompactedFinal() error {
 				continue
 			}
 			k := keyIndex(uint64(id))
-			if r.offset >= 0 {
+			switch {
+			case r.offset >= 0:
 				oldTombAt[k] = max(oldTombAt[k], r.offset)
-			} else {
-				oldTombID[k] = uint64(id)
+			case r.state == recPending:
+				oldTombUntil[k] = now
+			default:
+				oldTombUntil[k] = max(oldTombUntil[k], r.end)
 			}
 		}
 		for id := 1; id < len(m.recs); id++ {
@@ -274,7 +277,7 @@ func (m *Model) checkCompactedFinal() error {
 				continue
 			}
 			k := keyIndex(uint64(id))
-			if seen[k] > r.offset || oldTombAt[k] >= r.offset || oldTombID[k] > uint64(id) { // replaced, or an old tombstone itself or after it
+			if seen[k] > r.offset || oldTombAt[k] >= r.offset || oldTombUntil[k] >= r.sent { // replaced, or an old tombstone itself or after it
 				continue
 			}
 			return fmt.Errorf("C1: record %d, acknowledged at %v offset %d with key %s, is gone, and nothing later of the key is left to replace it", id, r.tp, r.offset, Key(uint64(id)))

@@ -13,15 +13,21 @@ import "github.com/amritangshudey/samsa/internal/wire"
 // creating it again under its name is left to the broker and integration
 // tests: the model would need to tell the two topics apart.
 
-const doomedTopic = "doomed"
+const (
+	doomedTopic = "doomed"
+	rebornTopic = "reborn"
+)
 
 type adminPhase uint8
 
 const (
-	adminCreate  adminPhase = iota // create doomedTopic
-	adminProduce                   // write a few batches to it
-	adminDelete                    // delete it, until acknowledged
-	adminGone                      // read it: it must not be there
+	adminCreate         adminPhase = iota // create doomedTopic
+	adminProduce                          // write a few batches to it
+	adminDelete                           // delete it, until acknowledged
+	adminGone                             // read it: it must not be there
+	adminRebornCreate                     // create rebornTopic at v7 to record its id
+	adminRebornDelete                     // delete rebornTopic by id (v6)
+	adminRebornRecreate                   // create rebornTopic again at v7: it must get a fresh id
 )
 
 // adminState is the admin client's progress through doomedTopic's life.
@@ -31,7 +37,10 @@ type adminState struct {
 	batches int  // acknowledged so far
 	// unsettled is a connection that carried a create and died before
 	// its answer; nothing more happens until the node has closed it.
-	unsettled *conn
+	unsettled   *conn
+	rebornID    wire.UUID
+	rebornEpoch int
+	rebornDone  bool
 }
 
 func (cl *client) admin() {
@@ -143,11 +152,12 @@ func (cl *client) doomed() {
 	switch a.phase {
 	case adminCreate:
 		m.TopicAttempted(doomedTopic, 1)
+		v := cl.version(wire.KeyCreateTopics)
 		req := &wire.CreateTopicsRequest{Topics: []wire.CreateTopic{{Name: doomedTopic, NumPartitions: 1, ReplicationFactor: w.replication()}}, TimeoutMs: 1000}
 		resp := &wire.CreateTopicsResponse{}
 		a.busy = true
 		c := cl.c
-		cl.request(wire.KeyCreateTopics, 4, req, resp, func(ok bool) {
+		cl.request(wire.KeyCreateTopics, v, req, resp, func(ok bool) {
 			a.busy = false
 			switch {
 			case !ok:
@@ -156,7 +166,11 @@ func (cl *client) doomed() {
 				w.fail("CreateTopics response does not match the request")
 			case resp.Topics[0].ErrorCode == wire.ErrNone || resp.Topics[0].ErrorCode == wire.ErrTopicAlreadyExists:
 				m.TopicCreated(doomedTopic, epoch)
+				if v >= 7 {
+					cl.check(m.NoteTopicID(doomedTopic, resp.Topics[0].TopicID, epoch))
+				}
 				a.phase = adminProduce
+			case resp.Topics[0].ErrorCode == wire.ErrUnsupportedVersion && v >= 7:
 			case resp.Topics[0].ErrorCode != wire.ErrNotController:
 				w.fail("creating %s failed with code %d", doomedTopic, resp.Topics[0].ErrorCode)
 			}
@@ -212,6 +226,130 @@ func (cl *client) doomed() {
 		f := Fetch{TP: tp, Offset: 0, Floor: m.Floor(tp), Epoch: epoch, Known: m.Known(tp), Start: m.Start(tp), Deleted: m.Deleted(doomedTopic)}
 		req := &wire.FetchRequest{MaxBytes: 1 << 20, Topics: []wire.FetchTopic{{Name: tp.Topic, Partitions: []wire.FetchPartition{{Index: 0, MaxBytes: 1 << 20}}}}}
 		a.busy = true
-		cl.fetch(req, []Fetch{f}, func(Fetch, int64) { a.busy = false })
+		cl.fetch(req, []Fetch{f}, func(Fetch, int64) {
+			a.busy = false
+			if !a.rebornDone {
+				a.phase = adminRebornCreate
+			}
+		})
+	case adminRebornCreate:
+		req := &wire.CreateTopicsRequest{Topics: []wire.CreateTopic{{Name: rebornTopic, NumPartitions: 1, ReplicationFactor: w.replication()}}, TimeoutMs: 1000}
+		resp := &wire.CreateTopicsResponse{}
+		a.busy = true
+		c := cl.c
+		cl.request(wire.KeyCreateTopics, 7, req, resp, func(ok bool) {
+			a.busy = false
+			switch {
+			case !ok:
+				a.unsettled = c
+			case len(resp.Topics) != 1:
+				w.fail("CreateTopics response does not match the request")
+			case resp.Topics[0].ErrorCode == wire.ErrNone:
+				if resp.Topics[0].TopicID == (wire.UUID{}) {
+					w.fail("CreateTopics v7 for %s returned a zero topic id", rebornTopic)
+					return
+				}
+				a.rebornID = resp.Topics[0].TopicID
+				a.phase = adminRebornDelete
+			case resp.Topics[0].ErrorCode == wire.ErrTopicAlreadyExists:
+				a.busy = true
+				mresp := &wire.MetadataResponse{}
+				cl.request(wire.KeyMetadata, 12, &wire.MetadataRequest{Topics: []string{rebornTopic}}, mresp, func(ok bool) {
+					a.busy = false
+					if ok && len(mresp.Topics) == 1 && mresp.Topics[0].ErrorCode == wire.ErrNone && mresp.Topics[0].TopicID != (wire.UUID{}) {
+						a.rebornID = mresp.Topics[0].TopicID
+						a.phase = adminRebornDelete
+					}
+				})
+			case resp.Topics[0].ErrorCode == wire.ErrUnsupportedVersion || resp.Topics[0].ErrorCode == wire.ErrNotController:
+			default:
+				w.fail("creating %s failed with code %d", rebornTopic, resp.Topics[0].ErrorCode)
+			}
+		})
+	case adminRebornDelete:
+		req := &wire.DeleteTopicsRequest{Topics: []wire.DeleteTopic{{TopicID: a.rebornID}}, TimeoutMs: 1000}
+		resp := &wire.DeleteTopicsResponse{}
+		a.busy = true
+		c := cl.c
+		cl.request(wire.KeyDeleteTopics, 6, req, resp, func(ok bool) {
+			a.busy = false
+			switch {
+			case !ok:
+				a.unsettled = c
+			case len(resp.Topics) != 1 || resp.Topics[0].TopicID != a.rebornID:
+				w.fail("DeleteTopics v6 response does not match the request: %+v", resp.Topics)
+			case resp.Topics[0].ErrorCode == wire.ErrNone || resp.Topics[0].ErrorCode == wire.ErrUnknownTopicID:
+				if m.stale(epoch) {
+					a.phase = adminRebornCreate
+					return
+				}
+				a.rebornEpoch = epoch
+				a.phase = adminRebornRecreate
+			case resp.Topics[0].ErrorCode != wire.ErrNotController:
+				w.fail("deleting %s by id failed with code %d", rebornTopic, resp.Topics[0].ErrorCode)
+			}
+		})
+	case adminRebornRecreate:
+		if m.stale(a.rebornEpoch) {
+			a.phase = adminRebornCreate
+			return
+		}
+		req := &wire.CreateTopicsRequest{Topics: []wire.CreateTopic{{Name: rebornTopic, NumPartitions: 1, ReplicationFactor: w.replication()}}, TimeoutMs: 1000}
+		resp := &wire.CreateTopicsResponse{}
+		a.busy = true
+		c := cl.c
+		checkReborn := func(id wire.UUID) {
+			if id == (wire.UUID{}) || id == a.rebornID {
+				w.fail("D2: recreated topic %s got topic id %x, deleted incarnation had %x", rebornTopic, id, a.rebornID)
+				return
+			}
+			a.busy = true
+			freq := &wire.FetchRequest{MaxBytes: 1 << 20, Topics: []wire.FetchTopic{{TopicID: a.rebornID, Partitions: []wire.FetchPartition{{Index: 0, MaxBytes: 1 << 20}}}}}
+			fresp := &wire.FetchResponse{}
+			cl.request(wire.KeyFetch, 13, freq, fresp, func(ok bool) {
+				a.busy = false
+				if !ok || m.stale(a.rebornEpoch) {
+					return
+				}
+				if len(fresp.Topics) != 1 || fresp.Topics[0].TopicID != a.rebornID || len(fresp.Topics[0].Partitions) != 1 {
+					w.fail("Fetch v13 response does not match the request: %+v", fresp.Topics)
+					return
+				}
+				if code := fresp.Topics[0].Partitions[0].ErrorCode; code != wire.ErrUnknownTopicID && code != wire.ErrNotLeaderOrFollower {
+					w.fail("D2: Fetch v13 with deleted incarnation's id %x answered code %d, want UNKNOWN_TOPIC_ID", a.rebornID, code)
+					return
+				}
+				a.rebornDone, a.phase = true, adminGone
+			})
+		}
+		cl.request(wire.KeyCreateTopics, 7, req, resp, func(ok bool) {
+			a.busy = false
+			switch {
+			case !ok:
+				a.unsettled = c
+			case m.stale(a.rebornEpoch):
+				a.phase = adminRebornCreate
+			case len(resp.Topics) != 1:
+				w.fail("CreateTopics response does not match the request")
+			case resp.Topics[0].ErrorCode == wire.ErrNone:
+				checkReborn(resp.Topics[0].TopicID)
+			case resp.Topics[0].ErrorCode == wire.ErrTopicAlreadyExists:
+				a.busy = true
+				mresp := &wire.MetadataResponse{}
+				cl.request(wire.KeyMetadata, 12, &wire.MetadataRequest{Topics: []string{rebornTopic}}, mresp, func(ok bool) {
+					a.busy = false
+					if m.stale(a.rebornEpoch) {
+						a.phase = adminRebornCreate
+						return
+					}
+					if ok && mresp.ControllerID == cl.c.inc.node.id && len(mresp.Topics) == 1 && mresp.Topics[0].ErrorCode == wire.ErrNone {
+						checkReborn(mresp.Topics[0].TopicID)
+					}
+				})
+			case resp.Topics[0].ErrorCode == wire.ErrUnsupportedVersion || resp.Topics[0].ErrorCode == wire.ErrNotController:
+			default:
+				w.fail("recreating %s failed with code %d", rebornTopic, resp.Topics[0].ErrorCode)
+			}
+		})
 	}
 }

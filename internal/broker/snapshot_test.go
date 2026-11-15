@@ -102,7 +102,7 @@ func TestACLCommands(t *testing.T) {
 }
 
 func TestStateEncoding(t *testing.T) {
-	for name, s := range map[string]*state{"empty": newState(), "sample": sampleState(t), "level 2": sampleLevel2(t)} {
+	for name, s := range map[string]*state{"empty": newState(), "sample": sampleState(t), "level 2": sampleLevel2(t), "level 4": sampleLevel4(t)} {
 		b := s.encode()
 		got, err := decodeState(b)
 		if err != nil {
@@ -135,6 +135,7 @@ func TestStateEncoding(t *testing.T) {
 
 func FuzzDecodeState(f *testing.F) {
 	f.Add(newState().encode())
+	f.Add(sampleLevel4(&testing.T{}).encode())
 	f.Fuzz(func(t *testing.T, b []byte) {
 		s, err := decodeState(b)
 		if err != nil {
@@ -195,6 +196,25 @@ func sampleLevel2(t *testing.T) *state {
 	}
 	if b := s.encode(); b[0] != 8 {
 		t.Fatalf("snapshot version %d at level 2, want 8", b[0])
+	}
+	return s
+}
+
+func sampleLevel4(t *testing.T) *state {
+	t.Helper()
+	s := sampleLevel2(t)
+	idD := wire.UUID{1, 2, 3, 4, 5, 6, 0x47, 8, 0x89, 10, 11, 12, 13, 14, 15, 16}
+	cmds := [][]byte{
+		{cmdSetLevel, 4},
+		encodeCreateTopic("d", 1, nil, idD),
+	}
+	for i, cmd := range cmds {
+		if res, err := s.apply(int64(200+i), cmd); err != nil || res.errCode != 0 {
+			t.Fatalf("command %d: %+v, %v", i, res, err)
+		}
+	}
+	if b := s.encode(); b[0] != 9 {
+		t.Fatalf("snapshot version %d at level 4, want 9", b[0])
 	}
 	return s
 }

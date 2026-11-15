@@ -177,6 +177,9 @@ type Config struct {
 	// UnsafeRaiseLevelEarly raises the cluster's format level without
 	// waiting for every voter to support it (design G7).
 	UnsafeRaiseLevelEarly bool
+	// UnsafeReuseTopicID gives a recreated topic the UUID of the deleted
+	// topic of the same name (design C18a).
+	UnsafeReuseTopicID bool
 }
 
 func (c Config) withDefaults() Config {
@@ -388,6 +391,7 @@ func New(cfg Config, clock sys.Clock, net sys.Network, disk sys.Disk, rand sys.R
 func (n *Node) adopt(st *state) {
 	st.noFencing, st.noSequences = n.cfg.UnsafeNoFencing, n.cfg.UnsafeNoSequenceCheck
 	st.keepOffsetsOnDelete, st.trimResetsStart = n.cfg.UnsafeKeepOffsetsOnDelete, n.cfg.UnsafeTrimResetsStart
+	st.reuseTopicID = n.cfg.UnsafeReuseTopicID
 	n.st = st
 	n.snapStart = st.logStart // every state adopted is a snapshot's
 	// A snapshot older than version 8 has no batch sizes; the cleaner's
@@ -405,6 +409,18 @@ func (n *Node) adopt(st *state) {
 			}
 		}
 	}
+}
+
+// newUUID draws a fresh RFC 4122 version 4 UUID from the node's random
+// source.
+func (n *Node) newUUID() (u wire.UUID) {
+	for u == (wire.UUID{}) || n.st.byID[u] != "" {
+		binary.BigEndian.PutUint64(u[:8], n.rand.Uint64())
+		binary.BigEndian.PutUint64(u[8:], n.rand.Uint64())
+		u[6] = (u[6] & 0x0f) | 0x40
+		u[8] = (u[8] & 0x3f) | 0x80
+	}
+	return u
 }
 
 // compactTo returns where the log may be cut: below the log start of the

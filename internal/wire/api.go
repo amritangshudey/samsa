@@ -109,9 +109,9 @@ type API struct {
 	// Min and Max bound the versions the broker accepts.
 	Min, Max int16
 	// AdvertisedMin is the minimum reported in ApiVersions. It differs from
-	// Min only for Produce, which Kafka advertises from version 0 because
-	// librdkafka derives feature support from the advertised range
-	// (KAFKA-18659).
+	// Min only for Produce and SaslHandshake, which Kafka advertises from
+	// version 0 because librdkafka derives feature support from the
+	// advertised range (KAFKA-18659; rdkafka_feature.c in librdkafka < 2.10).
 	AdvertisedMin int16
 	// FlexFrom is the first flexible version.
 	FlexFrom int16
@@ -121,9 +121,9 @@ type API struct {
 // the ranges.
 var APIs = []API{
 	{Key: KeyProduce, Min: 3, Max: 8, AdvertisedMin: 0, FlexFrom: 9},
-	{Key: KeyFetch, Min: 4, Max: 11, AdvertisedMin: 4, FlexFrom: 12},
+	{Key: KeyFetch, Min: 4, Max: 13, AdvertisedMin: 4, FlexFrom: 12},
 	{Key: KeyListOffsets, Min: 1, Max: 5, AdvertisedMin: 1, FlexFrom: 6},
-	{Key: KeyMetadata, Min: 1, Max: 8, AdvertisedMin: 1, FlexFrom: 9},
+	{Key: KeyMetadata, Min: 1, Max: 12, AdvertisedMin: 1, FlexFrom: 9},
 	{Key: KeyOffsetCommit, Min: 2, Max: 7, AdvertisedMin: 2, FlexFrom: 8},
 	{Key: KeyOffsetFetch, Min: 1, Max: 5, AdvertisedMin: 1, FlexFrom: 6},
 	{Key: KeyFindCoord, Min: 0, Max: 2, AdvertisedMin: 0, FlexFrom: 3},
@@ -133,9 +133,9 @@ var APIs = []API{
 	{Key: KeySyncGroup, Min: 0, Max: 3, AdvertisedMin: 0, FlexFrom: 4},
 	{Key: KeyDescribeGroups, Min: 0, Max: 6, AdvertisedMin: 0, FlexFrom: 5},
 	{Key: KeyListGroups, Min: 0, Max: 5, AdvertisedMin: 0, FlexFrom: 3},
-	{Key: KeySaslHandshake, Min: 1, Max: 1, AdvertisedMin: 1, FlexFrom: 2},
-	{Key: KeyAPIVersions, Min: 0, Max: 4, AdvertisedMin: 0, FlexFrom: 3},
-	{Key: KeyCreateTopics, Min: 2, Max: 4, AdvertisedMin: 2, FlexFrom: 5},
+	{Key: KeySaslHandshake, Min: 1, Max: 1, AdvertisedMin: 0, FlexFrom: 2},
+	{Key: KeyAPIVersions, Min: 0, Max: 5, AdvertisedMin: 0, FlexFrom: 3},
+	{Key: KeyCreateTopics, Min: 2, Max: 7, AdvertisedMin: 2, FlexFrom: 5},
 	{Key: KeyDeleteTopics, Min: 1, Max: 6, AdvertisedMin: 1, FlexFrom: 4},
 	{Key: KeyDeleteRecords, Min: 0, Max: 2, AdvertisedMin: 0, FlexFrom: 2},
 	{Key: KeyInitProducerID, Min: 0, Max: 4, AdvertisedMin: 0, FlexFrom: 2},

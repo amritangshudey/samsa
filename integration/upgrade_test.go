@@ -1,7 +1,6 @@
 package integration
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -123,14 +122,28 @@ func TestRollingUpgrade(t *testing.T) {
 			}
 			restart(t, c.nodes[c.leader(cl)], oldBin)
 		}
-		code := alterUser(t, c)
+		code := createTopicV7(t, c, fmt.Sprintf("upgraded-%d", id))
 		switch {
 		case id < 3 && code != 35:
-			t.Fatalf("with an old node left, a credential change answered %d, want UNSUPPORTED_VERSION (35)", code)
+			t.Fatalf("with an old node left, CreateTopics v7 answered %d, want UNSUPPORTED_VERSION (35)", code)
 		case id == 3 && code != 0:
-			t.Fatalf("after the upgrade, a credential change answered %d, want success", code)
+			t.Fatalf("after the upgrade, CreateTopics v7 answered %d, want success", code)
 		}
-		t.Logf("node %d upgraded; node %d leads; credential change answered %d", id, c.leader(cl), code)
+		t.Logf("node %d upgraded; node %d leads; CreateTopics v7 answered %d", id, c.leader(cl), code)
+	}
+
+	// Pre-existing topics created on the old release now carry a non-zero
+	// deterministic TopicID at format level 4.
+	mreq := kmsg.NewPtrMetadataRequest()
+	mt := kmsg.NewMetadataRequestTopic()
+	name := "events"
+	mt.Topic = &name
+	mreq.Topics = append(mreq.Topics, mt)
+	mctx, mcancel := context.WithTimeout(context.Background(), 10*time.Second)
+	mresp, err := mreq.RequestWith(mctx, cl)
+	mcancel()
+	if err != nil || len(mresp.Topics) != 1 || mresp.Topics[0].ErrorCode != 0 || mresp.Topics[0].TopicID == ([16]byte{}) {
+		t.Fatalf("Metadata v12 for pre-existing topic after upgrade: %v %+v", err, mresp)
 	}
 
 	close(stop)
@@ -147,30 +160,32 @@ func TestRollingUpgrade(t *testing.T) {
 	}
 }
 
-// alterUser asks the leader to create a SCRAM user and returns the error
-// code. A leader on the new binary refuses while the cluster's format
-// level is 0, and succeeds after.
-func alterUser(t *testing.T, c *cluster) int16 {
+// createTopicV7 asks the leader to create a topic with CreateTopics v7 and
+// returns the error code. A leader on the new binary refuses while the
+// cluster's format level is below 4, and succeeds with a non-zero TopicID after.
+func createTopicV7(t *testing.T, c *cluster, topic string) int16 {
 	t.Helper()
-	req := kmsg.NewPtrAlterUserSCRAMCredentialsRequest()
-	u := kmsg.NewAlterUserSCRAMCredentialsRequestUpsertion()
-	u.Name, u.Mechanism, u.Iterations = "upgraded", 1, 4096
-	u.Salt, u.SaltedPassword = bytes.Repeat([]byte{1}, 16), bytes.Repeat([]byte{2}, 32)
-	req.Upsertions = append(req.Upsertions, u)
+	req := kmsg.NewPtrCreateTopicsRequest()
+	rt := kmsg.NewCreateTopicsRequestTopic()
+	rt.Topic, rt.NumPartitions, rt.ReplicationFactor = topic, 1, 3
+	req.Topics = append(req.Topics, rt)
 	var err error
 	for range 10 { // a fresh client each time: no stale idea of the leader
 		cl := c.client()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		var resp *kmsg.AlterUserSCRAMCredentialsResponse
+		var resp *kmsg.CreateTopicsResponse
 		resp, err = req.RequestWith(ctx, cl)
 		cancel()
 		cl.Close()
 		if err == nil {
-			return resp.Results[0].ErrorCode
+			if resp.Topics[0].ErrorCode == 0 && resp.Topics[0].TopicID == ([16]byte{}) {
+				t.Fatalf("CreateTopics v7 succeeded for %q with a zero TopicID", topic)
+			}
+			return resp.Topics[0].ErrorCode
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	t.Fatalf("AlterUserScramCredentials: %v", err)
+	t.Fatalf("CreateTopics v7: %v", err)
 	return 0
 }
 

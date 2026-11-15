@@ -35,7 +35,7 @@ func refusal(req wire.Message) wire.Message {
 	case *wire.CreateTopicsRequest:
 		resp := &wire.CreateTopicsResponse{}
 		for _, t := range m.Topics {
-			resp.Topics = append(resp.Topics, wire.CreateTopicResult{Name: t.Name, ErrorCode: wire.ErrNotController, ErrorMessage: "this node is not the leader"})
+			resp.Topics = append(resp.Topics, wire.CreateTopicResult{Name: t.Name, ErrorCode: wire.ErrNotController, ErrorMessage: "this node is not the leader", NumPartitions: -1, ReplicationFactor: -1})
 		}
 		return resp
 	case *wire.ProduceRequest:
@@ -51,7 +51,7 @@ func refusal(req wire.Message) wire.Message {
 	case *wire.FetchRequest:
 		resp := &wire.FetchResponse{}
 		for _, t := range m.Topics {
-			tr := wire.FetchTopicResponse{Name: t.Name}
+			tr := wire.FetchTopicResponse{Name: t.Name, TopicID: t.TopicID}
 			for _, p := range t.Partitions {
 				tr.Partitions = append(tr.Partitions, wire.FetchPartitionResponse{Index: p.Index, ErrorCode: wire.ErrNotLeaderOrFollower, HighWatermark: -1})
 			}
