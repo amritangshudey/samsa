@@ -40,6 +40,11 @@ in such a way that it solves the problems of kafka". Tiered and diskless
 storage in object storage are now in scope, tested locally only (ADR
 0028, `docs/PRODUCTION.md` section 7).
 
+**Handoff (2026-11-15):** `docs/HANDOFF.md` says where the project stands,
+for whoever works on it next (a person or another tool). **Update it at the
+end of every item and every merged PR**, and whenever a standing approval or
+the plan changes: it is the last step of the process below.
+
 ## Architecture rules (non-negotiable)
 
 1. Core logic is single-threaded per node and does no I/O directly. Clock,
