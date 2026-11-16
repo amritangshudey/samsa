@@ -97,6 +97,7 @@ type Model struct {
 	clock     func() int64
 	rebatched bool
 	groups    groupModel
+	share     shareModel
 	// compact and keyst are set by Compaction (compaction.go).
 	compact map[string]*compactRules
 	keyst   map[string]*[compactKeys]keyState
@@ -105,7 +106,7 @@ type Model struct {
 
 // NewModel returns an empty model.
 func NewModel(strict bool) *Model {
-	return &Model{strict: strict, recs: make([]rec, 1), parts: map[TP]*partModel{}, topics: map[string]*topicModel{}, groups: newGroupModel()}
+	return &Model{strict: strict, recs: make([]rec, 1), parts: map[TP]*partModel{}, topics: map[string]*topicModel{}, groups: newGroupModel(), share: newShareModel()}
 }
 
 func (m *Model) part(tp TP) *partModel {
@@ -132,6 +133,7 @@ func (m *Model) PowerLoss() {
 		return
 	}
 	m.groups.forget()
+	m.share.forget()
 	for _, p := range m.parts { // order-independent: every entry gets the same update
 		p.floor, p.start = 0, 0 // a lost Trim may come back as a lower start
 	}

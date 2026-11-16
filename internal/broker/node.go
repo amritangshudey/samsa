@@ -140,6 +140,12 @@ type Config struct {
 	// Defaults 5s and 45s, as in Kafka.
 	ConsumerHeartbeatInterval time.Duration
 	ConsumerSessionTimeout    time.Duration
+	// ShareAcquisitionLockTimeout is how long acquired records in a share
+	// group stay locked before returning to available (KIP-932). Default 30s.
+	ShareAcquisitionLockTimeout time.Duration
+	// ShareDeliveryCountLimit is how many times a record may be acquired in
+	// a share group before being archived (KIP-932). Default 5.
+	ShareDeliveryCountLimit int16
 	// MaxGroupSize bounds the members of one consumer group. Default 1000.
 	MaxGroupSize int
 	// Logger receives structured logs. Default: discard.
@@ -189,6 +195,9 @@ type Config struct {
 	// new member before the previous owner has confirmed revoking it
 	// (design C18).
 	UnsafeAssignBeforeRevoke bool
+	// UnsafeDropShareLock marks a released or expired share-group record
+	// as acknowledged instead of returning it for redelivery (design C22).
+	UnsafeDropShareLock bool
 }
 
 func (c Config) withDefaults() Config {
@@ -248,6 +257,12 @@ func (c Config) withDefaults() Config {
 	}
 	if c.ConsumerSessionTimeout <= 0 {
 		c.ConsumerSessionTimeout = 45 * time.Second
+	}
+	if c.ShareAcquisitionLockTimeout <= 0 {
+		c.ShareAcquisitionLockTimeout = 30 * time.Second
+	}
+	if c.ShareDeliveryCountLimit <= 0 {
+		c.ShareDeliveryCountLimit = 5
 	}
 	if c.MaxGroupSize <= 0 {
 		c.MaxGroupSize = 1000
@@ -360,7 +375,10 @@ type Node struct {
 	waiters    []waiter // ascending by index; non-empty only while serving
 	flushArmed bool
 	conns      map[sys.ConnID]*conn
-	parked     []*parkedFetch // in arrival order
+	parked         []*parkedFetch // in arrival order
+	parkedShare    []*parkedShareFetch
+	shareSessions  map[shareSessionKey]*shareSession
+	shareLockTimer sys.TimerID
 	nextTimer  sys.TimerID
 	timers     map[sys.TimerID]func() // armed by after; see groups.go
 	forwards   map[uint64]*forward    // ACL changes sent to the leader, by tag; see forward.go
@@ -389,7 +407,8 @@ func New(cfg Config, clock sys.Clock, net sys.Network, disk sys.Disk, rand sys.R
 		cfg: cfg, clock: clock, net: net, disk: disk, rand: rand, log: cfg.Logger,
 		trimmedAt: -1, conns: map[sys.ConnID]*conn{}, nextTimer: firstFreeTimer,
 		timers: map[sys.TimerID]func(){}, groups: map[string]*softGroup{}, forwards: map[uint64]*forward{},
-		levels: map[sys.NodeID]levelReport{},
+		shareSessions: map[shareSessionKey]*shareSession{},
+		levels:        map[sys.NodeID]levelReport{},
 		faults: faulter{cfg: cfg.Faults, state: cfg.Faults.Seed},
 	}
 	if cfg.SASL != nil {
@@ -408,6 +427,8 @@ func (n *Node) adopt(st *state) {
 	st.keepOffsetsOnDelete, st.trimResetsStart = n.cfg.UnsafeKeepOffsetsOnDelete, n.cfg.UnsafeTrimResetsStart
 	st.reuseTopicID = n.cfg.UnsafeReuseTopicID
 	st.assignEarly = n.cfg.UnsafeAssignBeforeRevoke
+	st.dropShareLock = n.cfg.UnsafeDropShareLock
+	st.shareDeliveryLimit = n.cfg.ShareDeliveryCountLimit
 	n.st = st
 	n.snapStart = st.logStart // every state adopted is a snapshot's
 	// A snapshot older than version 8 has no batch sizes; the cleaner's
@@ -587,6 +608,16 @@ func (n *Node) OnConnClose(id sys.ConnID) error {
 		}
 		clear(n.parked[len(kept):])
 		n.parked = kept
+		keptShare := n.parkedShare[:0]
+		for _, pf := range n.parkedShare {
+			if pf.c == c {
+				n.clock.CancelTimer(pf.timer)
+			} else {
+				keptShare = append(keptShare, pf)
+			}
+		}
+		clear(n.parkedShare[len(keptShare):])
+		n.parkedShare = keptShare
 	}
 	return n.settle()
 }
@@ -623,6 +654,12 @@ func (n *Node) OnTimer(id sys.TimerID) error {
 		for _, f := range n.parked {
 			if f.timer == id {
 				n.completeFetch(f)
+				break
+			}
+		}
+		for _, pf := range n.parkedShare {
+			if pf.timer == id {
+				n.completeShareFetch(pf)
 				break
 			}
 		}
@@ -733,6 +770,12 @@ func (n *Node) stopServing() {
 		n.clock.CancelTimer(f.timer)
 	}
 	n.parked = nil
+	for _, pf := range n.parkedShare {
+		n.clock.CancelTimer(pf.timer)
+	}
+	n.parkedShare = nil
+	n.shareLockTimer = 0
+	clear(n.shareSessions)
 	for _, id := range sortedKeys(n.timers) {
 		n.cancel(id)
 	}
@@ -862,6 +905,7 @@ func (n *Node) advance() {
 	}
 	if appended {
 		n.wakeFetches()
+		n.wakeShareFetches()
 	}
 }
 
@@ -1109,6 +1153,18 @@ func (n *Node) dispatch(c *conn, frame []byte) {
 	case wire.KeyDescribeTopicPartitions:
 		m := &wire.DescribeTopicPartitionsRequest{}
 		req, handle = m, func() { n.respond(c, h, n.describeTopicPartitions(c, m)) }
+	case wire.KeyShareGroupHeartbeat:
+		m := &wire.ShareGroupHeartbeatRequest{}
+		req, handle = m, func() { n.shareGroupHeartbeat(c, h, m) }
+	case wire.KeyShareGroupDescribe:
+		m := &wire.ShareGroupDescribeRequest{}
+		req, handle = m, func() { n.respond(c, h, n.shareGroupDescribe(c, m)) }
+	case wire.KeyShareFetch:
+		m := &wire.ShareFetchRequest{}
+		req, handle = m, func() { n.shareFetch(c, h, m) }
+	case wire.KeyShareAcknowledge:
+		m := &wire.ShareAcknowledgeRequest{}
+		req, handle = m, func() { n.shareAcknowledge(c, h, m) }
 	default: // unreachable while wire.APIs and this switch agree
 		n.drop(c, fmt.Sprintf("no handler for key %d", h.Key))
 		return

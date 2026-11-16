@@ -83,7 +83,8 @@ type options struct {
 	vandals     int
 	members     int
 	cgMembers   int // KIP-848 consumer group members (cg.go)
-	idempotent  int           // idempotent producers (idempotent.go)
+	sgMembers   int // KIP-932 share group members (sg.go)
+	idempotent  int // idempotent producers (idempotent.go)
 	expiry      time.Duration // producer expiry as chosen, before any mutation
 	classic     bool          // Raft without PreVote and CheckQuorum
 	admins      int           // admin clients (admin.go)
@@ -136,10 +137,12 @@ func Run(cfg Config) Result {
 		SegmentBytes:  []int64{4096, 16384, 1 << 20}[pick.Intn(3)],
 		MaxBatchBytes: maxBatchBytes,
 		// Short, so that expiries and rebalances happen within a run.
-		MinSessionTimeout:         50 * time.Millisecond,
-		ConsumerHeartbeatInterval: 50 * time.Millisecond,
-		ConsumerSessionTimeout:    300 * time.Millisecond,
-		Logger:                    nodeLogger(cfg.Trace),
+		MinSessionTimeout:           50 * time.Millisecond,
+		ConsumerHeartbeatInterval:   50 * time.Millisecond,
+		ConsumerSessionTimeout:      300 * time.Millisecond,
+		ShareAcquisitionLockTimeout: 500 * time.Millisecond,
+		ShareDeliveryCountLimit:     20,
+		Logger:                      nodeLogger(cfg.Trace),
 	}
 	for f := faultPower; f <= faultSync; f++ {
 		if pick.Chance(0.6) {
@@ -197,6 +200,7 @@ func Run(cfg Config) Result {
 		w.opts.faults = append(w.opts.faults, faultRot)
 	}
 	w.opts.cgMembers = pick.Intn(4) // drawn last
+	w.opts.sgMembers = pick.Intn(4) // drawn last
 	if cfg.Calm {
 		w.opts.drop, w.opts.dup = 0, 0
 	}
@@ -206,6 +210,9 @@ func Run(cfg Config) Result {
 		w.opts.compact = w.opts.compact || w.bcfg.UnsafeCompact != 0 // a compaction bug needs a compacted topic
 		if w.bcfg.UnsafeAssignBeforeRevoke && w.opts.cgMembers < 2 {
 			w.opts.cgMembers = 2
+		}
+		if w.bcfg.UnsafeDropShareLock && w.opts.sgMembers < 1 {
+			w.opts.sgMembers = 1
 		}
 	}
 	strict := w.bcfg.Sync == broker.SyncAlways
@@ -273,7 +280,7 @@ func Run(cfg Config) Result {
 	behaviours := []struct {
 		n    int
 		step func(*client)
-	}{{w.opts.producers, (*client).produce}, {w.opts.consumers, (*client).consume}, {w.opts.vandals, (*client).vandalise}, {w.opts.members, (*client).groupMember}, {w.opts.cgMembers, (*client).cgMember}, {w.opts.idempotent, (*client).produceIdempotent}, {w.opts.admins, (*client).admin}, {voterClients(w.opts.changes), (*client).changeVoters}}
+	}{{w.opts.producers, (*client).produce}, {w.opts.consumers, (*client).consume}, {w.opts.vandals, (*client).vandalise}, {w.opts.members, (*client).groupMember}, {w.opts.cgMembers, (*client).cgMember}, {w.opts.sgMembers, (*client).sgMember}, {w.opts.idempotent, (*client).produceIdempotent}, {w.opts.admins, (*client).admin}, {voterClients(w.opts.changes), (*client).changeVoters}}
 	for _, b := range behaviours {
 		for range b.n {
 			cl := &client{w: w, lane: len(w.clients), rng: rng.Fork(), step: b.step, cursors: map[TP]int64{}, idem: &idemProducer{id: -1}}
@@ -384,6 +391,11 @@ func (w *world) finalChecks() {
 		return
 	}
 	if err := w.model.CheckFinal(); err != nil {
+		w.fail("%v", err)
+		return
+	}
+	w.drainShareGroup(leader)
+	if err := w.model.CheckShareFinal(); err != nil {
 		w.fail("%v", err)
 		return
 	}

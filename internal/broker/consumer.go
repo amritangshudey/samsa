@@ -528,8 +528,8 @@ func (s *state) cgImmediate(b cgBeat) (*wire.ConsumerGroupHeartbeatResponse, int
 // applyCGBeat applies a heartbeat. The result carries the response.
 func (s *state) applyCGBeat(index int64, b cgBeat) (result, error) {
 	g := s.groups[b.group]
-	if g != nil && len(g.members) > 0 {
-		return result{errCode: wire.ErrInconsistentGroupProtocol, errMsg: "the group has members of the classic protocol"}, nil
+	if g != nil && (len(g.members) > 0 || (g.sg != nil && len(g.sg.members) > 0)) {
+		return result{errCode: wire.ErrInconsistentGroupProtocol, errMsg: "the group uses another protocol"}, nil
 	}
 	if g == nil || g.cg == nil {
 		if b.epoch != 0 {
@@ -738,8 +738,8 @@ func (n *Node) consumerHeartbeat(c *conn, h wire.RequestHeader, req *wire.Consum
 		b.member = n.newMemberID(h.ClientID)
 	}
 	g := n.st.group(req.GroupID)
-	if len(g.members) > 0 {
-		fail(wire.ErrInconsistentGroupProtocol, "the group has members of the classic protocol")
+	if len(g.members) > 0 || (g.sg != nil && len(g.sg.members) > 0) {
+		fail(wire.ErrInconsistentGroupProtocol, "the group uses another protocol")
 		return
 	}
 	sg := n.soft(req.GroupID)

@@ -15,10 +15,10 @@ import (
 // log index; version 5 the ACLs; version 6 the SCRAM credentials; version
 // 7 the format level; version 8 topic configurations and batch sizes
 // (design C2); version 9 topic IDs (ADR 0032); version 10 consumer-protocol
-// groups (ADR 0033). Each later field comes last,
+// groups (ADR 0033); version 11 share groups (ADR 0034). Each later field comes last,
 // so the encoder writes the oldest version that holds the state: an older
 // build in the cluster during a rolling upgrade can still read it (design G7).
-const snapshotVersion = 10
+const snapshotVersion = 11
 
 // encode returns the whole state machine as bytes, for a Raft snapshot
 // (docs/design/a1-snapshots.md). Maps are walked in sorted order, so equal
@@ -27,6 +27,8 @@ const snapshotVersion = 10
 func (s *state) encode() []byte {
 	version := byte(4)
 	switch {
+	case s.level >= 6:
+		version = 11
 	case s.level >= 5:
 		version = 10
 	case s.level >= 4:
@@ -195,6 +197,62 @@ func (s *state) encode() []byte {
 				for _, p := range m.target {
 					w.UUID(p.id)
 					w.Int32(p.part)
+				}
+			}
+		}
+	}
+	if version >= 11 {
+		var sgs []string
+		for _, name := range names {
+			if s.groups[name].sg != nil {
+				sgs = append(sgs, name)
+			}
+		}
+		w.ArrayLen(false, len(sgs))
+		for _, name := range sgs {
+			sg := s.groups[name].sg
+			w.String(false, name)
+			w.Int32(sg.epoch)
+			w.ArrayLen(false, len(sg.meta))
+			for _, tm := range sg.meta {
+				w.UUID(tm.id)
+				w.Int32(tm.parts)
+			}
+			w.ArrayLen(false, len(sg.members))
+			for _, m := range sg.members {
+				w.String(false, m.id)
+				w.Int32(m.epoch)
+				w.Int32(m.prevEpoch)
+				w.String(false, m.rack)
+				w.String(false, m.clientID)
+				w.String(false, m.host)
+				w.ArrayLen(false, len(m.subscribed))
+				for _, sub := range m.subscribed {
+					w.String(false, sub)
+				}
+				w.ArrayLen(false, len(m.assigned))
+				for _, p := range m.assigned {
+					w.UUID(p.id)
+					w.Int32(p.part)
+				}
+			}
+			tps := sortedTPKeys(sg.parts)
+			w.ArrayLen(false, len(tps))
+			for _, tp := range tps {
+				sp := sg.parts[tp]
+				w.UUID(tp.id)
+				w.Int32(tp.part)
+				w.Int64(sp.spso)
+				w.Int64(sp.speo)
+				offs := sortedKeys(sp.locks)
+				w.ArrayLen(false, len(offs))
+				for _, off := range offs {
+					l := sp.locks[off]
+					w.Int64(off)
+					w.Int8(int8(l.state))
+					w.Int16(l.delivery)
+					w.String(false, l.owner)
+					w.Int64(l.lockUntil)
 				}
 			}
 		}
@@ -386,6 +444,48 @@ func decodeState(b []byte) (*state, error) {
 			bad = bad || r.Err() == nil && (g == nil || g.cg != nil || len(g.members) > 0 || name <= last)
 			if g != nil {
 				g.cg = cg
+			}
+			last = name
+			return struct{}{}
+		})
+	}
+	bad = bad || (v >= 11) != (s.level >= 6)
+	if v >= 11 {
+		last := ""
+		wire.Array(r, false, func() struct{} {
+			name := r.String(false)
+			sg := newShareGroup()
+			sg.epoch = r.Int32()
+			sg.meta = wire.Array(r, false, func() topicMeta { return topicMeta{id: r.UUID(), parts: r.Int32()} })
+			sg.members = wire.Array(r, false, func() *sgMember {
+				m := &sgMember{
+					id: r.String(false), epoch: r.Int32(), prevEpoch: r.Int32(),
+					rack: r.String(false), clientID: r.String(false), host: r.String(false),
+				}
+				m.subscribed = wire.Array(r, false, func() string { return r.String(false) })
+				m.assigned = wire.Array(r, false, func() tpKey { return tpKey{r.UUID(), r.Int32()} })
+				return m
+			})
+			wire.Array(r, false, func() struct{} {
+				tp := tpKey{r.UUID(), r.Int32()}
+				sp := &sharePart{spso: r.Int64(), speo: r.Int64(), locks: map[int64]*shareLock{}}
+				wire.Array(r, false, func() struct{} {
+					off := r.Int64()
+					sp.locks[off] = &shareLock{
+						state:     shareRecState(r.Int8()),
+						delivery:  r.Int16(),
+						owner:     r.String(false),
+						lockUntil: r.Int64(),
+					}
+					return struct{}{}
+				})
+				sg.parts[tp] = sp
+				return struct{}{}
+			})
+			g := s.groups[name]
+			bad = bad || r.Err() == nil && (g == nil || g.sg != nil || g.cg != nil || len(g.members) > 0 || name <= last)
+			if g != nil {
+				g.sg = sg
 			}
 			last = name
 			return struct{}{}

@@ -845,3 +845,9 @@ would happen against Kafka too (not tested against Kafka).
 - **Reported as:** `S4: nodes 1 and 2 applied the same 59 entries and differ: state hash 17e448e7 and 5e1bdbee`.
 - **Root cause:** `state.topicsVersion` and `cgroup.seen` were not persisted in snapshots, so a node restoring from a snapshot started with `topicsVersion = 0` and `cg.seen = 0`. If a topic had been created before the snapshot and no `cmdCGBeat` ran before the snapshot, the node replaying from the log saw `cg.seen != s.topicsVersion` on the next `cmdCGBeat` while the snapshot-restored node saw `cg.seen == s.topicsVersion` and skipped `retarget`.
 - **Fix:** removed `topicsVersion` and `cg.seen`; `cgNeedsApply` and `applyCGBeat` compare `cg.meta` directly against `metaOf(s.subscribedTopics(cg))`.
+
+### C22-1. `ShareFetch` long-poll dropped `AckErrorCode` on wakeup or timeout (C22, before merge)
+
+- **Seeds:** 24, 81 (reported as `S8: t0/0 offset 1093 was already acknowledged/rejected and was delivered again`).
+- **Root cause:** When a `ShareFetch` request carried `AckBatches` whose `applyShareAck` failed (for example `ErrInvalidRecordState` after an acquisition lock expired) and no records were immediately available to acquire, `shareFetch` parked a `parkedShareFetch` without saving `res.shareAckErrs`. On timer expiry or wakeup, `completeShareFetch` passed `nil` for `ackErrs` to `buildShareFetchResp`, returning `AckErrorCode = 0` (`ErrNone`) for a failed acknowledgement.
+- **Fix:** `parkedShareFetch` stores `ackErrs` and `completeShareFetch` forwards `pf.ackErrs` to `acquireAndRespondShareFetch` and `buildShareFetchResp`.

@@ -436,3 +436,100 @@ func TestKcatConsumerGroup(t *testing.T) {
 		t.Fatalf("second run read %d records, want only the 10 new ones: %v", len(got), got)
 	}
 }
+
+// Two Java 4.4.0 KafkaShareConsumers share a single-partition topic (KIP-932),
+// releasing one record for redelivery, surviving a SIGKILL of one consumer
+// and a broker restart, and inspected via kafka-share-groups.sh --describe.
+func TestJavaShareGroup(t *testing.T) {
+	java, jars := javaAndJars(t)
+	bin, javaHome := kafkaTools(t)
+	b := startBroker(t)
+	const topic, group = "java-share-topic", "java-share-group"
+	createTopic(t, franz(t, b), topic, 1)
+
+	l := newLedger()
+	var relCount int
+	start := func(name, releaseFirstN string) *exec.Cmd {
+		cmd := exec.Command(java, "-cp", jars, "java/ShareMember.java", b.addr, group, topic, releaseFirstN)
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		stdin, err := cmd.StdinPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			stdin.Close()
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			_ = cmd.Wait()
+			if t.Failed() && stderr.Len() > 0 {
+				t.Logf("%s stderr:\n%s", name, stderr.String())
+			}
+		})
+		go func() {
+			sc := bufio.NewScanner(stdout)
+			for sc.Scan() {
+				f := strings.Fields(sc.Text())
+				switch {
+				case len(f) == 1 && f[0] == "READY":
+					l.mu.Lock()
+					l.assigned[name] = 1
+					l.mu.Unlock()
+				case len(f) == 4 && f[0] == "REL":
+					l.mu.Lock()
+					relCount++
+					l.mu.Unlock()
+				case len(f) == 4 && f[0] == "REC":
+					var p int32
+					var off int64
+					fmt.Sscan(f[1], &p)
+					fmt.Sscan(f[2], &off)
+					l.record(name, p, off)
+				case len(f) == 1 && f[0] == "COMMITTED":
+					l.mu.Lock()
+					l.idle[name] = true
+					l.mu.Unlock()
+				}
+			}
+		}()
+		return cmd
+	}
+
+	start("A", "1")
+	victim := start("B", "1")
+	l.wait(t, "both KafkaShareConsumer members to join", func() bool { return l.assigned["A"] == 1 && l.assigned["B"] == 1 })
+
+	produceN(t, b, topic, 1, 0, 100)
+	l.wait(t, "all 100 records accepted (including released record redelivered)", func() bool {
+		return len(l.by) == 100 && relCount >= 1
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cli := exec.CommandContext(ctx, bin+"/kafka-share-groups.sh", "--bootstrap-server", b.addr, "--describe", "--members", "--group", group)
+	cli.Env = append(os.Environ(), "JAVA_HOME="+javaHome)
+	out, err := cli.CombinedOutput()
+	if err != nil {
+		t.Fatalf("kafka-share-groups.sh --describe --members: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), topic) {
+		t.Fatalf("kafka-share-groups.sh --describe --members output missing %s:\n%s", topic, out)
+	}
+
+	victim.Process.Kill()
+	produceN(t, b, topic, 1, 100, 100)
+	l.wait(t, "survivor A to process the next 100 records", func() bool { return len(l.by) == 200 })
+
+	b.kill()
+	b.start()
+	produceN(t, b, topic, 1, 200, 50)
+	l.wait(t, "survivor A to continue after broker restart", func() bool { return len(l.by) == 250 })
+}

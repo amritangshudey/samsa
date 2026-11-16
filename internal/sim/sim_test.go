@@ -306,6 +306,7 @@ var mutations = []mutationCase{
 	{"tell keys apart by their first byte", func(c *broker.Config) { c.UnsafeCompact = broker.UnsafeCompactWrongKey }},
 	{"reuse a deleted topic's id when recreating it", func(c *broker.Config) { c.UnsafeReuseTopicID = true }},
 	{"assign a consumer partition before its owner revokes it", func(c *broker.Config) { c.UnsafeAssignBeforeRevoke = true }},
+	{"drop a share-group lock without redelivery", func(c *broker.Config) { c.UnsafeDropShareLock = true }},
 }
 
 // addStats adds every counter of s to total.

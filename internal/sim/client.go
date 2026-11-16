@@ -75,6 +75,7 @@ type client struct {
 	cursors  map[TP]int64  // consumers: next offset to read
 	mem      *membership   // group members: their place in the group
 	cg       *cgMembership // KIP-848 consumer group members
+	sg       *sgMembership // KIP-932 share group members
 	pin      *simNode      // if set, the only node this client connects to
 	fetchMin int16         // lowest Fetch version to use
 	idem     *idemProducer // idempotent producers: the session
@@ -246,6 +247,14 @@ func refused(resp wire.Message) bool {
 		return is(m.ErrorCode)
 	case *wire.ConsumerGroupDescribeResponse:
 		return len(m.Groups) > 0 && is(m.Groups[0].ErrorCode)
+	case *wire.ShareGroupHeartbeatResponse:
+		return is(m.ErrorCode)
+	case *wire.ShareGroupDescribeResponse:
+		return len(m.Groups) > 0 && is(m.Groups[0].ErrorCode)
+	case *wire.ShareFetchResponse:
+		return is(m.ErrorCode)
+	case *wire.ShareAcknowledgeResponse:
+		return is(m.ErrorCode)
 	}
 	return false
 }

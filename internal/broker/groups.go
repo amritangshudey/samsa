@@ -120,6 +120,10 @@ func (n *Node) startGroups() {
 			n.startConsumerGroups(name, g.cg)
 			continue
 		}
+		if g.sg != nil {
+			n.startShareGroups(name, g.sg)
+			continue
+		}
 		if len(g.members) == 0 {
 			continue
 		}
@@ -472,7 +476,7 @@ func (n *Node) joinGroup(c *conn, h wire.RequestHeader, req *wire.JoinGroupReque
 		return
 	}
 	g := n.st.group(req.GroupID)
-	if g.cg != nil && len(g.cg.members) > 0 {
+	if (g.cg != nil && len(g.cg.members) > 0) || (g.sg != nil && len(g.sg.members) > 0) {
 		fail(wire.ErrInconsistentGroupProtocol)
 		return
 	}
