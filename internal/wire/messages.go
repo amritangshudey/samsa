@@ -514,15 +514,18 @@ type ProduceTopic struct {
 
 // ProduceRequest is the body of a Produce request (key 0).
 type ProduceRequest struct {
-	Acks      int16
-	TimeoutMs int32
-	Topics    []ProduceTopic
+	TransactionalID    string
+	HasTransactionalID bool
+	Acks               int16
+	TimeoutMs          int32
+	Topics             []ProduceTopic
 }
 
 // Decode implements Message.
 func (m *ProduceRequest) Decode(r *Reader, v int16) {
 	flex := v >= 9
-	r.NullableString(flex) // TransactionalId, v3+
+	tid, null := r.NullableString(flex) // TransactionalId, v3+
+	m.TransactionalID, m.HasTransactionalID = tid, !null
 	m.Acks = r.Int16()
 	m.TimeoutMs = r.Int32()
 	m.Topics = Array(r, flex, func() ProduceTopic {
@@ -541,7 +544,11 @@ func (m *ProduceRequest) Decode(r *Reader, v int16) {
 // Encode implements Message.
 func (m *ProduceRequest) Encode(w *Writer, v int16) {
 	flex := v >= 9
-	w.NullString(flex)
+	if m.HasTransactionalID || m.TransactionalID != "" {
+		w.String(flex, m.TransactionalID)
+	} else {
+		w.NullString(flex)
+	}
 	w.Int16(m.Acks)
 	w.Int32(m.TimeoutMs)
 	w.ArrayLen(flex, len(m.Topics))
@@ -648,6 +655,7 @@ type FetchTopic struct {
 // FetchRequest is the body of a Fetch request (key 1).
 type FetchRequest struct {
 	MaxWaitMs, MinBytes, MaxBytes int32
+	IsolationLevel                int8 // v4+: 0=READ_UNCOMMITTED, 1=READ_COMMITTED
 	Topics                        []FetchTopic
 	// RackID is the consumer's rack (v11+): the broker may name a replica in
 	// it to fetch from (KIP-392).
@@ -661,7 +669,7 @@ func (m *FetchRequest) Decode(r *Reader, v int16) {
 	m.MaxWaitMs = r.Int32()
 	m.MinBytes = r.Int32()
 	m.MaxBytes = r.Int32() // v3+
-	r.Int8()               // IsolationLevel, v4+
+	m.IsolationLevel = r.Int8() // v4+
 	if v >= 7 {
 		r.Int32() // SessionId: sessions are declined
 		r.Int32() // SessionEpoch
@@ -717,7 +725,7 @@ func (m *FetchRequest) Encode(w *Writer, v int16) {
 	w.Int32(m.MaxWaitMs)
 	w.Int32(m.MinBytes)
 	w.Int32(m.MaxBytes)
-	w.Int8(0)
+	w.Int8(m.IsolationLevel)
 	if v >= 7 {
 		w.Int32(0)
 		w.Int32(-1)
@@ -756,13 +764,22 @@ func (m *FetchRequest) Encode(w *Writer, v int16) {
 	w.Tags(flex)
 }
 
+// AbortedTransaction is one aborted transaction range in a Fetch response.
+type AbortedTransaction struct {
+	ProducerID  int64
+	FirstOffset int64
+}
+
 // FetchPartitionResponse is one partition's result in a Fetch response.
 type FetchPartitionResponse struct {
-	Index          int32
-	ErrorCode      int16
-	HighWatermark  int64
-	LogStartOffset int64  // v5+: the first offset still available
-	Records        []byte // whole record batches, or nil
+	Index               int32
+	ErrorCode           int16
+	HighWatermark       int64
+	LastStableOffset    int64 // v4+ (when HasLastStableOffset is false, HighWatermark is used)
+	HasLastStableOffset bool
+	LogStartOffset      int64 // v5+: the first offset still available
+	AbortedTransactions []AbortedTransaction
+	Records             []byte // whole record batches, or nil
 	// PreferredReadReplica, if HasPreferred (v11+), is the node the consumer
 	// should fetch from next, in its own rack (KIP-392).
 	PreferredReadReplica int32
@@ -796,15 +813,15 @@ func (m *FetchResponse) Decode(r *Reader, v int16) {
 		}
 		t.Partitions = Array(r, flex, func() FetchPartitionResponse {
 			p := FetchPartitionResponse{Index: r.Int32(), ErrorCode: r.Int16(), HighWatermark: r.Int64()}
-			r.Int64() // LastStableOffset, v4+
+			p.LastStableOffset = r.Int64() // LastStableOffset, v4+
+			p.HasLastStableOffset = true
 			if v >= 5 {
 				p.LogStartOffset = r.Int64()
 			}
-			Array(r, flex, func() struct{} { // AbortedTransactions, v4+
-				r.Int64()
-				r.Int64()
+			p.AbortedTransactions = Array(r, flex, func() AbortedTransaction { // AbortedTransactions, v4+
+				a := AbortedTransaction{ProducerID: r.Int64(), FirstOffset: r.Int64()}
 				r.Tags(flex)
-				return struct{}{}
+				return a
 			})
 			if v >= 11 {
 				if id := r.Int32(); id >= 0 {
@@ -843,11 +860,24 @@ func (m *FetchResponse) Encode(w *Writer, v int16) {
 			w.Int32(p.Index)
 			w.Int16(p.ErrorCode)
 			w.Int64(p.HighWatermark)
-			w.Int64(p.HighWatermark) // LastStableOffset: no transactions
+			lso := p.HighWatermark
+			if p.HasLastStableOffset {
+				lso = p.LastStableOffset
+			}
+			w.Int64(lso)
 			if v >= 5 {
 				w.Int64(p.LogStartOffset)
 			}
-			w.ArrayLen(flex, -1) // AbortedTransactions: null
+			if len(p.AbortedTransactions) == 0 {
+				w.ArrayLen(flex, -1) // null when empty
+			} else {
+				w.ArrayLen(flex, len(p.AbortedTransactions))
+				for _, a := range p.AbortedTransactions {
+					w.Int64(a.ProducerID)
+					w.Int64(a.FirstOffset)
+					w.Tags(flex)
+				}
+			}
 			if v >= 11 {
 				if p.HasPreferred {
 					w.Int32(p.PreferredReadReplica)
@@ -890,13 +920,16 @@ type ListOffsetsTopic struct {
 }
 
 // ListOffsetsRequest is the body of a ListOffsets request (key 2).
-type ListOffsetsRequest struct{ Topics []ListOffsetsTopic }
+type ListOffsetsRequest struct {
+	IsolationLevel int8
+	Topics         []ListOffsetsTopic
+}
 
 // Decode implements Message.
 func (m *ListOffsetsRequest) Decode(r *Reader, v int16) {
 	r.Int32() // ReplicaId
 	if v >= 2 {
-		r.Int8() // IsolationLevel
+		m.IsolationLevel = r.Int8()
 	}
 	flex := v >= 6
 	m.Topics = Array(r, flex, func() ListOffsetsTopic {
@@ -920,7 +953,7 @@ func (m *ListOffsetsRequest) Decode(r *Reader, v int16) {
 func (m *ListOffsetsRequest) Encode(w *Writer, v int16) {
 	w.Int32(-1)
 	if v >= 2 {
-		w.Int8(0)
+		w.Int8(m.IsolationLevel)
 	}
 	flex := v >= 6
 	w.ArrayLen(flex, len(m.Topics))
@@ -1007,22 +1040,24 @@ func (m *ListOffsetsResponse) Encode(w *Writer, v int16) {
 
 // InitProducerIDRequest is the body of an InitProducerId request (key 22).
 type InitProducerIDRequest struct {
-	// Transactional is set when the request names a transactional id. The
-	// id itself, the timeout, and the producer id and epoch of v3+ are not
-	// kept: without a transactional id Kafka ignores them too
-	// (TransactionCoordinator.handleInitProducerId).
-	Transactional bool
+	Transactional        bool
+	TransactionalID      string
+	TransactionTimeoutMs int32
+	ProducerID           int64 // v3+ (-1 if unset)
+	ProducerEpoch        int16 // v3+ (-1 if unset)
 }
 
 // Decode implements Message.
 func (m *InitProducerIDRequest) Decode(r *Reader, v int16) {
 	flex := v >= 2
-	_, null := r.NullableString(flex)
+	tid, null := r.NullableString(flex)
 	m.Transactional = !null
-	r.Int32() // TransactionTimeoutMs
+	m.TransactionalID = tid
+	m.TransactionTimeoutMs = r.Int32()
+	m.ProducerID, m.ProducerEpoch = -1, -1
 	if v >= 3 {
-		r.Int64() // ProducerId
-		r.Int16() // ProducerEpoch
+		m.ProducerID = r.Int64()
+		m.ProducerEpoch = r.Int16()
 	}
 	r.Tags(flex)
 }
@@ -1030,15 +1065,26 @@ func (m *InitProducerIDRequest) Decode(r *Reader, v int16) {
 // Encode implements Message.
 func (m *InitProducerIDRequest) Encode(w *Writer, v int16) {
 	flex := v >= 2
-	if m.Transactional {
-		w.String(flex, "")
+	if m.Transactional || m.TransactionalID != "" {
+		w.String(flex, m.TransactionalID)
 	} else {
 		w.NullString(flex)
 	}
-	w.Int32(1<<31 - 1) // TransactionTimeoutMs: what the Java client sends without transactions
+	timeout := m.TransactionTimeoutMs
+	if timeout == 0 && m.Transactional {
+		timeout = 1<<31 - 1
+	} else if timeout == 0 {
+		timeout = 1<<31 - 1
+	}
+	w.Int32(timeout)
 	if v >= 3 {
-		w.Int64(-1)
-		w.Int16(-1)
+		pid := m.ProducerID
+		ep := m.ProducerEpoch
+		if pid == 0 && ep == 0 && m.TransactionalID == "" {
+			pid, ep = -1, -1
+		}
+		w.Int64(pid)
+		w.Int16(ep)
 	}
 	w.Tags(flex)
 }

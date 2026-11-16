@@ -510,6 +510,14 @@ func (s *state) applyShareAcquire(req shareAcquireReq) result {
 
 		var ranges []wire.AcquiredRange
 		for off := max(sp.spso, p.start); off < p.next && budget > 0; off++ {
+			if p.isControlOffset(off) {
+				if sp.locks[off] == nil {
+					sp.locks[off] = &shareLock{state: shareAcked}
+				} else {
+					sp.locks[off].state = shareAcked
+				}
+				continue
+			}
 			l := sp.locks[off]
 			if l != nil && l.state != shareAvailable {
 				continue
@@ -1031,14 +1039,10 @@ func (n *Node) readBatchesSpan(p *partition, firstOff, lastOff int64, limit int,
 		if ref.base > lastOff {
 			break
 		}
-		cmd, _, err := n.raft.Read(ref.logIndex)
-		if err != nil {
-			if n.fatal == nil {
-				n.fatal = fmt.Errorf("read committed batch at log index %d: %w", ref.logIndex, err)
-			}
+		batch, ok := n.readBatch(ref)
+		if !ok {
 			return out
 		}
-		batch := appendBatch(cmd)
 		if len(out)+len(batch) > limit && (len(out) > 0 || !force) {
 			break
 		}

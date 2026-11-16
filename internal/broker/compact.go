@@ -2,7 +2,6 @@ package broker
 
 import (
 	"crypto/sha256"
-	"fmt"
 	"strconv"
 	"time"
 
@@ -202,12 +201,14 @@ func (n *Node) extendKeyMap(name string, part int, p *partition, km *keyMap, bud
 		if *budget <= 0 {
 			return true
 		}
-		cmd, _, err := n.raft.Read(b.logIndex)
-		if err != nil {
-			n.fatal = fmt.Errorf("read committed batch at log index %d to compact it: %w", b.logIndex, err)
+		if b.control != 0 {
+			km.scanned = b.base + 1
+			continue
+		}
+		data, ok := n.readBatch(b)
+		if !ok {
 			return false
 		}
-		data := appendBatch(cmd)
 		*budget -= len(data)
 		read = true
 		recs, err := wire.SplitBatch(data)
@@ -288,12 +289,14 @@ func (n *Node) sweep(name string, part int, t *topic, p *partition, km *keyMap, 
 		if n.cfg.UnsafeCompact != UnsafeCompactNoLag && !old(b, lag) {
 			continue
 		}
-		cmd, _, err := n.raft.Read(b.logIndex)
-		if err != nil {
-			n.fatal = fmt.Errorf("read committed batch at log index %d to compact it: %w", b.logIndex, err)
+		if b.control != 0 {
+			km.scanned = b.base + 1
+			continue
+		}
+		data, ok := n.readBatch(b)
+		if !ok {
 			return false
 		}
-		data := appendBatch(cmd)
 		recs, err := wire.SplitBatch(data)
 		if err != nil {
 			continue

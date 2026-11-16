@@ -15,10 +15,10 @@ import (
 // log index; version 5 the ACLs; version 6 the SCRAM credentials; version
 // 7 the format level; version 8 topic configurations and batch sizes
 // (design C2); version 9 topic IDs (ADR 0032); version 10 consumer-protocol
-// groups (ADR 0033); version 11 share groups (ADR 0034). Each later field comes last,
+// groups (ADR 0033); version 11 share groups (ADR 0034); version 12 transactions (ADR 0035). Each later field comes last,
 // so the encoder writes the oldest version that holds the state: an older
 // build in the cluster during a rolling upgrade can still read it (design G7).
-const snapshotVersion = 11
+const snapshotVersion = 12
 
 // encode returns the whole state machine as bytes, for a Raft snapshot
 // (docs/design/a1-snapshots.md). Maps are walked in sorted order, so equal
@@ -27,6 +27,8 @@ const snapshotVersion = 11
 func (s *state) encode() []byte {
 	version := byte(4)
 	switch {
+	case s.level >= 7:
+		version = 12
 	case s.level >= 6:
 		version = 11
 	case s.level >= 5:
@@ -253,6 +255,70 @@ func (s *state) encode() []byte {
 					w.Int16(l.delivery)
 					w.String(false, l.owner)
 					w.Int64(l.lockUntil)
+				}
+			}
+		}
+	}
+	if version >= 12 {
+		txnIDs := sortedKeys(s.txns)
+		w.ArrayLen(false, len(txnIDs))
+		for _, id := range txnIDs {
+			tx := s.txns[id]
+			w.String(false, tx.id)
+			w.Int64(tx.pid)
+			w.Int16(tx.epoch)
+			w.Int64(tx.prevPID)
+			w.Int16(tx.prevEpoch)
+			w.Int8(int8(tx.phase))
+			w.Int32(tx.timeoutMs)
+			w.Int64(tx.startedMs)
+			w.ArrayLen(false, len(tx.parts))
+			for _, tp := range tx.parts {
+				w.String(false, tp.topic)
+				w.Int32(tp.part)
+			}
+			w.ArrayLen(false, len(tx.groups))
+			for _, g := range tx.groups {
+				w.String(false, g)
+			}
+			gnames := sortedKeys(tx.pendingOffsets)
+			w.ArrayLen(false, len(gnames))
+			for _, g := range gnames {
+				w.String(false, g)
+				tps := sortedTPNames(tx.pendingOffsets[g])
+				w.ArrayLen(false, len(tps))
+				for _, tp := range tps {
+					o := tx.pendingOffsets[g][tp]
+					w.String(false, tp.topic)
+					w.Int32(tp.part)
+					w.Int64(o.offset)
+					w.Int32(o.leaderEpoch)
+					w.String(false, o.metadata)
+					w.Int64(o.time)
+				}
+			}
+		}
+		for _, name := range s.names {
+			for _, p := range s.topics[name].parts {
+				w.ArrayLen(false, len(p.batches))
+				for _, b := range p.batches {
+					w.Int8(int8(b.control))
+					w.Int64(b.controlPID)
+					w.Int16(b.controlEpoch)
+				}
+				pids := sortedKeys(p.openTxns)
+				w.ArrayLen(false, len(pids))
+				for _, pid := range pids {
+					ot := p.openTxns[pid]
+					w.Int64(pid)
+					w.Int16(ot.epoch)
+					w.Int64(ot.firstOffset)
+				}
+				w.ArrayLen(false, len(p.aborted))
+				for _, ab := range p.aborted {
+					w.Int64(ab.pid)
+					w.Int64(ab.firstOffset)
+					w.Int64(ab.lastOffset)
 				}
 			}
 		}
@@ -490,6 +556,79 @@ func decodeState(b []byte) (*state, error) {
 			last = name
 			return struct{}{}
 		})
+	}
+	bad = bad || (v >= 12) != (s.level >= 7)
+	if v >= 12 {
+		last := ""
+		wire.Array(r, false, func() struct{} {
+			id := r.String(false)
+			tx := &txnState{
+				id:        id,
+				pid:       r.Int64(),
+				epoch:     r.Int16(),
+				prevPID:   r.Int64(),
+				prevEpoch: r.Int16(),
+				phase:     txnPhase(r.Int8()),
+				timeoutMs: r.Int32(),
+				startedMs: r.Int64(),
+			}
+			tx.parts = wire.Array(r, false, func() tpName {
+				return tpName{topic: r.String(false), part: r.Int32()}
+			})
+			tx.groups = wire.Array(r, false, func() string { return r.String(false) })
+			wire.Array(r, false, func() struct{} {
+				g := r.String(false)
+				if tx.pendingOffsets == nil {
+					tx.pendingOffsets = map[string]map[tpName]committedOffset{}
+				}
+				m := map[tpName]committedOffset{}
+				wire.Array(r, false, func() struct{} {
+					tp := tpName{topic: r.String(false), part: r.Int32()}
+					m[tp] = committedOffset{offset: r.Int64(), leaderEpoch: r.Int32(), metadata: r.String(false), time: r.Int64()}
+					return struct{}{}
+				})
+				tx.pendingOffsets[g] = m
+				return struct{}{}
+			})
+			bad = bad || r.Err() == nil && (len(s.txns) > 0 && id <= last)
+			s.txns[id] = tx
+			last = id
+			return struct{}{}
+		})
+		for _, name := range s.names {
+			for _, p := range s.topics[name].parts {
+				ctrls := wire.Array(r, false, func() struct {
+					c uint8
+					p int64
+					e int16
+				} {
+					return struct {
+						c uint8
+						p int64
+						e int16
+					}{c: uint8(r.Int8()), p: r.Int64(), e: r.Int16()}
+				})
+				bad = bad || r.Err() == nil && len(ctrls) != len(p.batches)
+				if len(ctrls) == len(p.batches) {
+					for i := range p.batches {
+						p.batches[i].control = ctrls[i].c
+						p.batches[i].controlPID = ctrls[i].p
+						p.batches[i].controlEpoch = ctrls[i].e
+					}
+				}
+				wire.Array(r, false, func() struct{} {
+					if p.openTxns == nil {
+						p.openTxns = map[int64]txnOpen{}
+					}
+					pid := r.Int64()
+					p.openTxns[pid] = txnOpen{epoch: r.Int16(), firstOffset: r.Int64()}
+					return struct{}{}
+				})
+				p.aborted = wire.Array(r, false, func() abortedTxn {
+					return abortedTxn{pid: r.Int64(), firstOffset: r.Int64(), lastOffset: r.Int64()}
+				})
+			}
+		}
 	}
 	if r.Err() != nil || r.Len() != 0 || bad {
 		return nil, fmt.Errorf("%w: snapshot state: %w, %d bytes left, malformed %v", errBadCommand, r.Err(), r.Len(), bad)

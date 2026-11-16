@@ -41,8 +41,12 @@ const (
 	// (ADR 0019).
 	KeySaslHandshake    int16 = 17
 	KeySaslAuthenticate int16 = 36
-	// KeyInitProducerID is how an idempotent producer gets its id.
-	KeyInitProducerID int16 = 22
+	// KeyInitProducerID is how an idempotent or transactional producer gets its id.
+	KeyInitProducerID    int16 = 22
+	KeyAddPartitionsToTxn int16 = 24
+	KeyAddOffsetsToTxn   int16 = 25
+	KeyEndTxn            int16 = 26
+	KeyTxnOffsetCommit   int16 = 28
 	// KeyDescribeAcls, KeyCreateAcls and KeyDeleteAcls manage ACLs (C8).
 	KeyDescribeAcls int16 = 29
 	KeyCreateAcls   int16 = 30
@@ -89,6 +93,12 @@ const (
 	ErrInvalidRecordState          int16 = 121
 	ErrShareSessionNotFound        int16 = 122
 	ErrInvalidShareSessionEpoch    int16 = 123
+	ErrInvalidTxnState             int16 = 48
+	ErrInvalidProducerIDMapping    int16 = 49
+	ErrInvalidTxnTimeout           int16 = 50
+	ErrConcurrentTransactions      int16 = 51
+	ErrProducerFenced              int16 = 90
+	ErrTransactionAbortable        int16 = 120
 	ErrTopicAuthorizationFailed    int16 = 29
 	ErrGroupAuthorizationFailed    int16 = 30
 	ErrClusterAuthorizationFailed  int16 = 31
@@ -159,7 +169,11 @@ var APIs = []API{
 	{Key: KeyCreateTopics, Min: 2, Max: 7, AdvertisedMin: 2, FlexFrom: 5},
 	{Key: KeyDeleteTopics, Min: 1, Max: 6, AdvertisedMin: 1, FlexFrom: 4},
 	{Key: KeyDeleteRecords, Min: 0, Max: 2, AdvertisedMin: 0, FlexFrom: 2},
-	{Key: KeyInitProducerID, Min: 0, Max: 4, AdvertisedMin: 0, FlexFrom: 2},
+	{Key: KeyInitProducerID, Min: 0, Max: 5, AdvertisedMin: 0, FlexFrom: 2},
+	{Key: KeyAddPartitionsToTxn, Min: 0, Max: 5, AdvertisedMin: 0, FlexFrom: 3},
+	{Key: KeyAddOffsetsToTxn, Min: 0, Max: 4, AdvertisedMin: 0, FlexFrom: 3},
+	{Key: KeyEndTxn, Min: 0, Max: 5, AdvertisedMin: 0, FlexFrom: 3},
+	{Key: KeyTxnOffsetCommit, Min: 0, Max: 5, AdvertisedMin: 0, FlexFrom: 3},
 	{Key: KeyDescribeAcls, Min: 1, Max: 3, AdvertisedMin: 1, FlexFrom: 2},
 	{Key: KeyCreateAcls, Min: 1, Max: 3, AdvertisedMin: 1, FlexFrom: 2},
 	{Key: KeyDeleteAcls, Min: 1, Max: 3, AdvertisedMin: 1, FlexFrom: 2},

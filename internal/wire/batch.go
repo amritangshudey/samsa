@@ -54,11 +54,12 @@ type BatchInfo struct {
 	Size         int   // bytes the whole batch occupies
 	Count        int32 // number of records, and of offsets it consumes
 	MaxTimestamp int64
-	// The idempotent producer that sent the batch: its id (negative: none),
-	// its epoch, and the sequence number of the batch's first record.
+	// The idempotent or transactional producer that sent the batch.
 	ProducerID    int64
 	ProducerEpoch int16
 	BaseSequence  int32
+	Transactional bool
+	Control       bool
 }
 
 // ParseBatch validates the record batch at the start of b without looking
@@ -96,6 +97,7 @@ func parseBatch(b []byte, maxSize int) (BatchInfo, int16) {
 		return info, ErrCorruptMessage
 	}
 	attributes := binary.BigEndian.Uint16(b[batchAttributesAt:])
+	info.Transactional = attributes&attrTransactional != 0
 	info.Count = int32(binary.BigEndian.Uint32(b[batchCountAt:]))
 	lastDelta := int32(binary.BigEndian.Uint32(b[batchLastDeltaAt:]))
 	info.MaxTimestamp = int64(binary.BigEndian.Uint64(b[batchMaxTimeAt:]))
@@ -103,8 +105,10 @@ func parseBatch(b []byte, maxSize int) (BatchInfo, int16) {
 	switch {
 	case info.Count < 1 || lastDelta != info.Count-1:
 		return info, ErrInvalidRecord
-	case attributes&(attrControl|attrTransactional) != 0:
-		return info, ErrInvalidRecord // transactions are not supported
+	case attributes&attrControl != 0:
+		return info, ErrInvalidRecord // clients must not send control batches
+	case info.Transactional && info.ProducerID < 0:
+		return info, ErrInvalidRecord
 	case info.ProducerID >= 0 && info.BaseSequence < 0:
 		return info, ErrInvalidRecord // LogValidator.java: a producer id needs a sequence
 	}
@@ -128,6 +132,28 @@ func SetBatchProducer(b []byte, id int64, epoch int16, sequence int32) {
 	binary.BigEndian.PutUint32(b[batchCRCAt:], crc32.Checksum(b[batchAttributesAt:], castagnoli))
 }
 
+// SetBatchTransactional marks b as a transactional batch and recomputes its CRC.
+func SetBatchTransactional(b []byte) {
+	attrs := binary.BigEndian.Uint16(b[batchAttributesAt:]) | attrTransactional
+	binary.BigEndian.PutUint16(b[batchAttributesAt:], attrs)
+	binary.BigEndian.PutUint32(b[batchCRCAt:], crc32.Checksum(b[batchAttributesAt:], castagnoli))
+}
+
+// SplitBatches slices a concatenated record-set buffer into individual batches.
+func SplitBatches(b []byte) [][]byte {
+	var out [][]byte
+	for len(b) >= BatchOverhead {
+		length := int(int32(binary.BigEndian.Uint32(b[batchLengthAt:])))
+		size := batchLogOverhead + length
+		if size < BatchOverhead || size > len(b) {
+			break
+		}
+		out = append(out, b[:size])
+		b = b[size:]
+	}
+	return out
+}
+
 // AddSequence returns the sequence number n after seq. Sequences run from 0
 // to 2^31-1 and then start again at 0 (DefaultRecordBatch.incrementSequence).
 func AddSequence(seq, n int32) int32 {
@@ -136,6 +162,44 @@ func AddSequence(seq, n int32) int32 {
 		return n - (top - seq) - 1
 	}
 	return seq + n
+}
+
+// ControlBatch builds a single-record magic-2 transaction control batch
+// (COMMIT when commit is true, ABORT otherwise) with a valid CRC-32C.
+func ControlBatch(baseOffset int64, leaderEpoch int32, pid int64, epoch int16, ts int64, commit bool) []byte {
+	// Single record: length(1)=0x20(16), attrs(1)=0, tsDelta(1)=0, offDelta(1)=0,
+	// keyLen(1)=0x08(4), key(4), valLen(1)=0x0c(6), val(6), headers(1)=0. Total = 17 bytes.
+	const recLen = 17
+	b := make([]byte, BatchOverhead+recLen)
+	binary.BigEndian.PutUint64(b[0:], uint64(baseOffset))
+	binary.BigEndian.PutUint32(b[batchLengthAt:], uint32(BatchOverhead-batchLogOverhead+recLen))
+	binary.BigEndian.PutUint32(b[12:], uint32(leaderEpoch))
+	b[batchMagicAt] = 2
+	binary.BigEndian.PutUint16(b[batchAttributesAt:], attrControl|attrTransactional)
+	binary.BigEndian.PutUint32(b[batchLastDeltaAt:], 0)
+	binary.BigEndian.PutUint64(b[batchBaseTimeAt:], uint64(ts))
+	binary.BigEndian.PutUint64(b[batchMaxTimeAt:], uint64(ts))
+	binary.BigEndian.PutUint64(b[batchProducerIDAt:], uint64(pid))
+	binary.BigEndian.PutUint16(b[batchProducerEpoch:], uint16(epoch))
+	binary.BigEndian.PutUint32(b[batchBaseSeqAt:], 0xffffffff) // -1
+	binary.BigEndian.PutUint32(b[batchCountAt:], 1)
+
+	rec := b[BatchOverhead:]
+	rec[0] = 0x20 // zig-zag(16)
+	rec[1] = 0    // attributes
+	rec[2] = 0    // timestampDelta
+	rec[3] = 0    // offsetDelta
+	rec[4] = 0x08 // zig-zag(4) key length
+	// key[5:9]: version=0 (int16), type=0 (ABORT) or 1 (COMMIT) (int16)
+	if commit {
+		rec[8] = 1
+	}
+	rec[9] = 0x0c // zig-zag(6) value length
+	// value[10:16]: version=0 (int16), coordinatorEpoch=0 (int32)
+	rec[16] = 0 // 0 headers
+
+	binary.BigEndian.PutUint32(b[batchCRCAt:], crc32.Checksum(b[batchAttributesAt:], castagnoli))
+	return b
 }
 
 // SetBatchBaseOffset stamps the offset of a batch's first record into it.
@@ -245,6 +309,9 @@ func PeekBatch(b []byte) (info BatchInfo, ok bool) {
 		return info, false
 	}
 	info.Size = len(b)
+	attrs := binary.BigEndian.Uint16(b[batchAttributesAt:])
+	info.Transactional = attrs&attrTransactional != 0
+	info.Control = attrs&attrControl != 0
 	info.Count = int32(binary.BigEndian.Uint32(b[batchCountAt:]))
 	info.MaxTimestamp = int64(binary.BigEndian.Uint64(b[batchMaxTimeAt:]))
 	info.producer(b)

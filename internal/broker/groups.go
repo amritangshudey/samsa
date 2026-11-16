@@ -439,7 +439,15 @@ func (n *Node) findCoordinator(c *conn, req *wire.FindCoordinatorRequest) *wire.
 		var r wire.FindCoordinatorResult
 		r.Key, r.NodeID = key, -1
 		switch {
-		case req.KeyType != wire.KeyTypeGroup: // only groups have a coordinator here
+		case req.KeyType == txnCoordinatorLookup:
+			if !n.may(c, opDescribe, resTxnID, key) {
+				r.ErrorCode = wire.ErrTransactionalIDAuthFailed
+			} else if !ok {
+				r.ErrorCode = wire.ErrCoordinatorNotAvailable
+			} else {
+				r.NodeID, r.Host, r.Port = p.ID, p.Host, p.Port
+			}
+		case req.KeyType != wire.KeyTypeGroup: // only groups and transactions have a coordinator here
 			r.ErrorCode = wire.ErrCoordinatorNotAvailable
 		case !n.may(c, opDescribe, resGroup, key):
 			r.ErrorCode = wire.ErrGroupAuthorizationFailed

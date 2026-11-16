@@ -94,6 +94,18 @@ func (p *producerIDs) next() (int64, error) {
 //
 // Without a transactional id it needs IDEMPOTENT_WRITE on the cluster, or
 // WRITE on at least one topic (KafkaApis.handleInitProducerIdRequest).
+func (n *Node) handleInitProducerID(c *conn, h wire.RequestHeader, m *wire.InitProducerIDRequest) {
+	if m.Transactional && m.TransactionalID != "" {
+		if !n.serving {
+			n.respond(c, h, &wire.InitProducerIDResponse{ErrorCode: wire.ErrNotCoordinator, ProducerID: -1, ProducerEpoch: -1})
+			return
+		}
+		n.initTransactionalProducer(c, h, m)
+		return
+	}
+	n.respond(c, h, n.initProducerID(c, m))
+}
+
 func (n *Node) initProducerID(c *conn, m *wire.InitProducerIDRequest) *wire.InitProducerIDResponse {
 	resp := &wire.InitProducerIDResponse{ProducerID: -1, ProducerEpoch: -1}
 	if m.Transactional {

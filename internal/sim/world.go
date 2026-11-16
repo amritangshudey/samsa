@@ -50,6 +50,7 @@ type Stats struct {
 	GroupJoins, GroupSyncs, OffsetCommits               int
 	OffsetFetches, ZombiesRefused, CGHeartbeats         int
 	SGHeartbeats, ShareAcquired, ShareAcked             int
+	TxnCommits, TxnAborts, RCFetches                    int
 	// Clusters only: terms that had a leader, requests refused by a node
 	// that was not serving, and replica comparisons made (S4).
 	Leaders, NotLeader, ReplicasCompared int

@@ -198,6 +198,9 @@ type Config struct {
 	// UnsafeDropShareLock marks a released or expired share-group record
 	// as acknowledged instead of returning it for redelivery (design C22).
 	UnsafeDropShareLock bool
+	// UnsafeReadUncommittedInReadCommitted ignores the last stable offset
+	// for READ_COMMITTED fetches (design C15).
+	UnsafeReadUncommittedInReadCommitted bool
 }
 
 func (c Config) withDefaults() Config {
@@ -379,6 +382,7 @@ type Node struct {
 	parkedShare    []*parkedShareFetch
 	shareSessions  map[shareSessionKey]*shareSession
 	shareLockTimer sys.TimerID
+	txnTimer       sys.TimerID
 	nextTimer  sys.TimerID
 	timers     map[sys.TimerID]func() // armed by after; see groups.go
 	forwards   map[uint64]*forward    // ACL changes sent to the leader, by tag; see forward.go
@@ -429,6 +433,7 @@ func (n *Node) adopt(st *state) {
 	st.assignEarly = n.cfg.UnsafeAssignBeforeRevoke
 	st.dropShareLock = n.cfg.UnsafeDropShareLock
 	st.shareDeliveryLimit = n.cfg.ShareDeliveryCountLimit
+	st.readUncommitted = n.cfg.UnsafeReadUncommittedInReadCommitted
 	n.st = st
 	n.snapStart = st.logStart // every state adopted is a snapshot's
 	// A snapshot older than version 8 has no batch sizes; the cleaner's
@@ -745,6 +750,7 @@ func (n *Node) lead() {
 		n.expiring, n.cleaning, n.compacting = 0, 0, 0 // proposals of an earlier term are never answered
 		n.keyMaps, n.compactActive = nil, false
 		n.startGroups()
+		n.armTxnTimer()
 		n.log.Info("serving as leader", "term", term, "applied", n.applied)
 		n.levelProposed = false
 		n.raiseLevel()
@@ -775,6 +781,7 @@ func (n *Node) stopServing() {
 	}
 	n.parkedShare = nil
 	n.shareLockTimer = 0
+	n.txnTimer = 0
 	clear(n.shareSessions)
 	for _, id := range sortedKeys(n.timers) {
 		n.cancel(id)
@@ -1089,7 +1096,7 @@ func (n *Node) dispatch(c *conn, frame []byte) {
 		req, handle = m, func() { n.respond(c, h, n.offsetFetch(c, m)) }
 	case wire.KeyInitProducerID:
 		m := &wire.InitProducerIDRequest{}
-		req, handle = m, func() { n.respond(c, h, n.initProducerID(c, m)) }
+		req, handle = m, func() { n.handleInitProducerID(c, h, m) }
 	case wire.KeyDeleteTopics:
 		m := &wire.DeleteTopicsRequest{}
 		req, handle = m, func() { n.deleteTopics(c, h, m) }
@@ -1165,6 +1172,18 @@ func (n *Node) dispatch(c *conn, frame []byte) {
 	case wire.KeyShareAcknowledge:
 		m := &wire.ShareAcknowledgeRequest{}
 		req, handle = m, func() { n.shareAcknowledge(c, h, m) }
+	case wire.KeyAddPartitionsToTxn:
+		m := &wire.AddPartitionsToTxnRequest{}
+		req, handle = m, func() { n.addPartitionsToTxn(c, h, m) }
+	case wire.KeyAddOffsetsToTxn:
+		m := &wire.AddOffsetsToTxnRequest{}
+		req, handle = m, func() { n.addOffsetsToTxn(c, h, m) }
+	case wire.KeyEndTxn:
+		m := &wire.EndTxnRequest{}
+		req, handle = m, func() { n.endTxn(c, h, m) }
+	case wire.KeyTxnOffsetCommit:
+		m := &wire.TxnOffsetCommitRequest{}
+		req, handle = m, func() { n.txnOffsetCommit(c, h, m) }
 	default: // unreachable while wire.APIs and this switch agree
 		n.drop(c, fmt.Sprintf("no handler for key %d", h.Key))
 		return
