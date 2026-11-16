@@ -28,7 +28,7 @@ func TestSkipNothingIsTheSameRun(t *testing.T) {
 // 39 to 1, before them. Any change to the bytes the simulated clients receive (the
 // advertised API list, say) moves every seed, because the network draws
 // once per delivered fragment: then pick another one that fails.
-const shrinkSeed = 6
+const shrinkSeed = 3
 
 // The shrink seed with acks before sync shrinks to fewer faults, fails by
 // the same rule, and its replay arguments reproduce it.
