@@ -27,6 +27,12 @@ const (
 	KeyConsumerGroupHeartbeat  int16 = 68
 	KeyConsumerGroupDescribe   int16 = 69
 	KeyDescribeTopicPartitions int16 = 75
+	// KeyShareGroupHeartbeat, KeyShareGroupDescribe, KeyShareFetch and
+	// KeyShareAcknowledge are share groups (KIP-932, C22).
+	KeyShareGroupHeartbeat int16 = 76
+	KeyShareGroupDescribe  int16 = 77
+	KeyShareFetch          int16 = 78
+	KeyShareAcknowledge    int16 = 79
 	// KeyIncrementalAlterConfigs sets topic configurations (C2).
 	KeyIncrementalAlterConfigs int16 = 44
 	KeyAPIVersions             int16 = 18
@@ -80,6 +86,9 @@ const (
 	ErrUnreleasedInstanceID        int16 = 111
 	ErrUnsupportedAssignor         int16 = 112
 	ErrStaleMemberEpoch            int16 = 113
+	ErrInvalidRecordState          int16 = 121
+	ErrShareSessionNotFound        int16 = 122
+	ErrInvalidShareSessionEpoch    int16 = 123
 	ErrTopicAuthorizationFailed    int16 = 29
 	ErrGroupAuthorizationFailed    int16 = 30
 	ErrClusterAuthorizationFailed  int16 = 31
@@ -167,6 +176,10 @@ var APIs = []API{
 	{Key: KeyConsumerGroupHeartbeat, Min: 0, Max: 1, AdvertisedMin: 0, FlexFrom: 0},
 	{Key: KeyConsumerGroupDescribe, Min: 0, Max: 1, AdvertisedMin: 0, FlexFrom: 0},
 	{Key: KeyDescribeTopicPartitions, Min: 0, Max: 0, AdvertisedMin: 0, FlexFrom: 0},
+	{Key: KeyShareGroupHeartbeat, Min: 1, Max: 1, AdvertisedMin: 1, FlexFrom: 0},
+	{Key: KeyShareGroupDescribe, Min: 1, Max: 1, AdvertisedMin: 1, FlexFrom: 0},
+	{Key: KeyShareFetch, Min: 1, Max: 2, AdvertisedMin: 1, FlexFrom: 0},
+	{Key: KeyShareAcknowledge, Min: 1, Max: 2, AdvertisedMin: 1, FlexFrom: 0},
 }
 
 // LookupAPI returns the entry for key.

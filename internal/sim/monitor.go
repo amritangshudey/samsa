@@ -62,6 +62,10 @@ func (w *world) monitor(inc *incarnation) {
 		w.fail("%v", err)
 		return
 	}
+	if err := inc.n.ShareGroupCheck(); err != nil {
+		w.fail("%v", err)
+		return
+	}
 	nd.term, nd.vote, nd.voted = term, vote, voted
 	if serving := inc.n.Serving(); serving != nd.serving {
 		nd.serving = serving

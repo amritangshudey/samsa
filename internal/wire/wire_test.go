@@ -6,7 +6,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
-)
+) 
 
 func TestPrimitivesRoundTrip(t *testing.T) {
 	for _, flex := range []bool{false, true} {
@@ -209,6 +209,33 @@ func messages() map[string]struct {
 			{Name: "a", TopicID: UUID{1}, Partitions: []DescribedPartition{{Index: 0, Leader: 1, LeaderEpoch: 2, Replicas: []int32{1, 2}, ISR: []int32{1}}}},
 			{ErrorCode: 3, Name: "missing"}}, NextCursor: &TopicCursor{"a", 1}},
 			func() Message { return &DescribeTopicPartitionsResponse{} }},
+		"ShareGroupHeartbeatRequest": {KeyShareGroupHeartbeat, &ShareGroupHeartbeatRequest{GroupID: "sg", MemberID: "m", MemberEpoch: 1, RackID: "r", SubscribedTopics: []string{"a", "b"}},
+			func() Message { return &ShareGroupHeartbeatRequest{} }},
+		"ShareGroupHeartbeatResponse": {KeyShareGroupHeartbeat, &ShareGroupHeartbeatResponse{MemberID: "m", MemberEpoch: 2, HeartbeatIntervalMs: 5000, HasAssignment: true, Assignment: []TopicPartitionIDs{{UUID{1}, []int32{0, 1}}}},
+			func() Message { return &ShareGroupHeartbeatResponse{} }},
+		"ShareGroupHeartbeatResponseNoAssignment": {KeyShareGroupHeartbeat, &ShareGroupHeartbeatResponse{ErrorCode: 110, ErrorMessage: "fenced"},
+			func() Message { return &ShareGroupHeartbeatResponse{} }},
+		"ShareGroupDescribeRequest": {KeyShareGroupDescribe, &ShareGroupDescribeRequest{Groups: []string{"sg", "h"}, IncludeAuthorizedOperations: true},
+			func() Message { return &ShareGroupDescribeRequest{} }},
+		"ShareGroupDescribeResponse": {KeyShareGroupDescribe, &ShareGroupDescribeResponse{Groups: []ShareGroupDescribeGroup{
+			{GroupID: "sg", State: "Stable", GroupEpoch: 3, AssignmentEpoch: 3, AssignorName: "simple", Members: []ShareGroupDescribeMember{{
+				MemberID: "m", RackID: "r", MemberEpoch: 3, ClientID: "c", ClientHost: "/127.0.0.1", SubscribedTopics: []string{"a"},
+				Assignment: []NamedTopicPartitions{{UUID{1}, "a", []int32{0, 1}}}}}},
+			{ErrorCode: 69, ErrorMessage: "no such group", GroupID: "h", State: "Dead"}}},
+			func() Message { return &ShareGroupDescribeResponse{} }},
+		"ShareFetchRequest": {KeyShareFetch, &ShareFetchRequest{GroupID: "sg", MemberID: "m", ShareSessionEpoch: 1, MaxWaitMs: 500, MinBytes: 1, MaxBytes: 1 << 20, MaxRecords: 100, BatchSize: 50, ShareAcquireMode: 1, IsRenewAck: true,
+			Topics:          []ShareFetchTopic{{TopicID: UUID{1}, Partitions: []ShareFetchPartition{{Index: 0, AckBatches: []ShareAckBatch{{0, 4, []int8{AckAccept}}}}}}},
+			ForgottenTopics: []TopicPartitionIDs{{UUID{2}, []int32{1}}}},
+			func() Message { return &ShareFetchRequest{} }},
+		"ShareFetchResponse": {KeyShareFetch, &ShareFetchResponse{AcquisitionLockTimeoutMs: 30000, Responses: []ShareFetchTopicResponse{
+			{TopicID: UUID{1}, Partitions: []ShareFetchPartitionResponse{{Index: 0, LeaderID: 1, LeaderEpoch: 2, Records: []byte("batch"), Acquired: []AcquiredRange{{0, 4, 1}}}}}}},
+			func() Message { return &ShareFetchResponse{} }},
+		"ShareAcknowledgeRequest": {KeyShareAcknowledge, &ShareAcknowledgeRequest{GroupID: "sg", MemberID: "m", ShareSessionEpoch: 2, IsRenewAck: true,
+			Topics: []ShareFetchTopic{{TopicID: UUID{1}, Partitions: []ShareFetchPartition{{Index: 0, AckBatches: []ShareAckBatch{{0, 4, []int8{AckAccept, AckRelease, AckReject, AckRenew, AckGap}}}}}}}},
+			func() Message { return &ShareAcknowledgeRequest{} }},
+		"ShareAcknowledgeResponse": {KeyShareAcknowledge, &ShareAcknowledgeResponse{AcquisitionLockTimeoutMs: 30000, Responses: []ShareAckTopicResponse{
+			{TopicID: UUID{1}, Partitions: []ShareAckPartitionResponse{{Index: 0, ErrorCode: 121, ErrorMessage: "bad state", LeaderID: 1, LeaderEpoch: 2}}}}},
+			func() Message { return &ShareAcknowledgeResponse{} }},
 		"JoinGroupRequest": {KeyJoinGroup, &JoinGroupRequest{GroupID: "g", SessionTimeoutMs: 10000, RebalanceTimeoutMs: 60000, MemberID: "m", ProtocolType: "consumer",
 			Protocols: []GroupProtocol{{"range", []byte("sub")}, {"roundrobin", nil}}},
 			func() Message { return &JoinGroupRequest{} }},

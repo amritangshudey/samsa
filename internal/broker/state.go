@@ -50,6 +50,12 @@ const (
 	// The consumer group protocol (docs/design/c18-kip848.md).
 	cmdCGBeat   byte = 19
 	cmdCGRemove byte = 20
+	// Share groups (docs/design/c22-share-groups.md).
+	cmdSGBeat       byte = 21
+	cmdSGRemove     byte = 22
+	cmdShareAcquire byte = 23
+	cmdShareAck     byte = 24
+	cmdShareExpire  byte = 25
 )
 
 // formatLevel is the highest cluster format level this build reads and
@@ -60,9 +66,11 @@ const (
 // delete.retention.ms and min.compaction.lag.ms; level 4 topic IDs in
 // cmdCreateTopic, cmdDeleteTopic and state snapshot version 9 (ADR 0032);
 // level 5 groups of the consumer protocol: cmdCGBeat, cmdCGRemove and
-// state snapshot version 10 (ADR 0033).
+// state snapshot version 10 (ADR 0033); level 6 share groups: cmdSGBeat,
+// cmdSGRemove, cmdShareAcquire, cmdShareAck, cmdShareExpire and state
+// snapshot version 11 (ADR 0034).
 // Raise it with every change to what the log or a snapshot may hold.
-const formatLevel = 5
+const formatLevel = 6
 
 // errBadCommand marks a command in the log that cannot be decoded. The log
 // is checksummed, so this means a bug or a newer on-disk format, and the
@@ -434,6 +442,8 @@ type state struct {
 	deletedIDs                                         map[string]wire.UUID
 	// assignEarly is Config.UnsafeAssignBeforeRevoke, a deliberate bug.
 	assignEarly bool
+	// dropShareLock is Config.UnsafeDropShareLock, a deliberate bug.
+	dropShareLock bool
 	// expired counts the producers this replica forgot since it started or
 	// restored a snapshot. Diagnostic only: not hashed, not in snapshots.
 	expired int
@@ -489,6 +499,8 @@ type group struct {
 	// cg is set for a group of the consumer protocol, which has no
 	// classic members, and for one that had been of it and is empty.
 	cg *cgroup
+	// sg is set for a share group (KIP-932).
+	sg *shareGroup
 }
 
 // member returns the member with the given id, or nil.
@@ -619,10 +631,13 @@ func (s *state) partition(name string, index int32) *partition {
 // result is what applying a command produced, for the request that
 // proposed it.
 type result struct {
-	errCode    int16
-	errMsg     string // CGBeat: why
-	cg         *wire.ConsumerGroupHeartbeatResponse // CGBeat: the answer
-	applied    bool       // Compact: the batch was replaced
+	errCode       int16
+	errMsg        string                                 // CGBeat/SGBeat: why
+	cg            *wire.ConsumerGroupHeartbeatResponse   // CGBeat: the answer
+	sgBeat        *wire.ShareGroupHeartbeatResponse      // SGBeat: the answer
+	shareAcquired map[tpKey][]wire.AcquiredRange         // ShareAcquire
+	shareAckErrs  map[tpKey]int16                        // ShareAck
+	applied       bool                                   // Compact / ShareExpire
 	baseOffset int64      // Append: offset assigned to the batch's first record; DeleteRecords: the new start
 	topicID    wire.UUID  // CreateTopic: the topic's UUID
 	acls       []wire.ACL // DeleteAcls: the ACLs removed
@@ -762,7 +777,7 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 			return result{errCode: wire.ErrIllegalGeneration}, nil
 		}
 		g := s.forWrite(name)
-		if g.cg != nil && len(g.cg.members) > 0 {
+		if (g.cg != nil && len(g.cg.members) > 0) || (g.sg != nil && len(g.sg.members) > 0) {
 			return result{errCode: wire.ErrInconsistentGroupProtocol}, nil
 		}
 		next.offsets = g.offsets
@@ -1088,6 +1103,41 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 		}
 		return s.applyCGRemove(group, member, epoch), nil
 
+	case cmdSGBeat:
+		b, ok := decodeSGBeat(r)
+		if !ok || s.level < 6 {
+			return result{}, fmt.Errorf("%w: share group heartbeat at index %d", errBadCommand, index)
+		}
+		return s.applySGBeat(b), nil
+
+	case cmdSGRemove:
+		group, member, epoch := r.String(false), r.String(false), r.Int32()
+		if r.Err() != nil || r.Len() != 0 || s.level < 6 {
+			return result{}, fmt.Errorf("%w: share group removal at index %d", errBadCommand, index)
+		}
+		return s.applySGRemove(group, member, epoch), nil
+
+	case cmdShareAcquire:
+		req, ok := decodeShareAcquire(r)
+		if !ok || s.level < 6 {
+			return result{}, fmt.Errorf("%w: share acquire at index %d", errBadCommand, index)
+		}
+		return s.applyShareAcquire(req), nil
+
+	case cmdShareAck:
+		cmd, ok := decodeShareAck(r)
+		if !ok || s.level < 6 {
+			return result{}, fmt.Errorf("%w: share ack at index %d", errBadCommand, index)
+		}
+		return s.applyShareAck(cmd), nil
+
+	case cmdShareExpire:
+		nowMs := r.Int64()
+		if r.Err() != nil || r.Len() != 0 || s.level < 6 {
+			return result{}, fmt.Errorf("%w: share expire at index %d", errBadCommand, index)
+		}
+		return s.applyShareExpire(nowMs), nil
+
 	case cmdGroupAssignment:
 		name, generation := r.String(false), r.Int32()
 		assignments := wire.Array(r, false, func() wire.MemberAssignment {
@@ -1206,6 +1256,31 @@ func (s *state) hash() uint32 {
 				for _, p := range m.target {
 					sum = crc32.Update(sum, table, p.id[:])
 					add(int64(p.part))
+				}
+			}
+		}
+		if sg := g.sg; sg != nil { // absent before level 6: older hashes unchanged
+			str("sg")
+			add(int64(sg.epoch), int64(len(sg.members)), int64(len(sg.parts)))
+			for _, m := range sg.members {
+				str(m.id, m.rack)
+				add(int64(m.epoch), int64(m.prevEpoch), int64(len(m.subscribed)), int64(len(m.assigned)))
+				for _, t := range m.subscribed {
+					str(t)
+				}
+				for _, p := range m.assigned {
+					sum = crc32.Update(sum, table, p.id[:])
+					add(int64(p.part))
+				}
+			}
+			for _, tp := range sortedTPKeys(sg.parts) {
+				sp := sg.parts[tp]
+				sum = crc32.Update(sum, table, tp.id[:])
+				add(int64(tp.part), sp.spso, sp.speo, int64(len(sp.locks)))
+				for _, off := range sortedKeys(sp.locks) {
+					l := sp.locks[off]
+					str(l.owner)
+					add(off, int64(l.state), int64(l.delivery), l.lockUntil)
 				}
 			}
 		}

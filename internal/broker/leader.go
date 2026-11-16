@@ -109,6 +109,18 @@ func refusal(req wire.Message) wire.Message {
 			resp.Groups = append(resp.Groups, wire.ConsumerGroupDescribeGroup{ErrorCode: wire.ErrNotCoordinator, GroupID: g})
 		}
 		return resp
+	case *wire.ShareGroupHeartbeatRequest:
+		return &wire.ShareGroupHeartbeatResponse{ErrorCode: wire.ErrNotCoordinator, MemberID: m.MemberID}
+	case *wire.ShareGroupDescribeRequest:
+		resp := &wire.ShareGroupDescribeResponse{}
+		for _, g := range m.Groups {
+			resp.Groups = append(resp.Groups, wire.ShareGroupDescribeGroup{ErrorCode: wire.ErrNotCoordinator, GroupID: g})
+		}
+		return resp
+	case *wire.ShareFetchRequest:
+		return &wire.ShareFetchResponse{ErrorCode: wire.ErrNotLeaderOrFollower}
+	case *wire.ShareAcknowledgeRequest:
+		return &wire.ShareAcknowledgeResponse{ErrorCode: wire.ErrNotLeaderOrFollower}
 	case *wire.DeleteTopicsRequest:
 		resp := &wire.DeleteTopicsResponse{}
 		for _, t := range m.Topics {
