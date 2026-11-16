@@ -141,6 +141,7 @@ func Run(cfg Config) Result {
 		ConsumerHeartbeatInterval:   50 * time.Millisecond,
 		ConsumerSessionTimeout:      300 * time.Millisecond,
 		ShareAcquisitionLockTimeout: 500 * time.Millisecond,
+		ShareDeliveryCountLimit:     20,
 		Logger:                      nodeLogger(cfg.Trace),
 	}
 	for f := faultPower; f <= faultSync; f++ {

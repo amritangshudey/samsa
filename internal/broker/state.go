@@ -443,7 +443,8 @@ type state struct {
 	// assignEarly is Config.UnsafeAssignBeforeRevoke, a deliberate bug.
 	assignEarly bool
 	// dropShareLock is Config.UnsafeDropShareLock, a deliberate bug.
-	dropShareLock bool
+	dropShareLock      bool
+	shareDeliveryLimit int16
 	// expired counts the producers this replica forgot since it started or
 	// restored a snapshot. Diagnostic only: not hashed, not in snapshots.
 	expired int

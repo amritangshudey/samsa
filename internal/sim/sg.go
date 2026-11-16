@@ -51,8 +51,8 @@ func (m *Model) ShareAcquired(tp TP, off int64, delivery int16, epoch int) error
 	if m.stale(epoch) {
 		return nil
 	}
-	if delivery < 1 || delivery > 5 {
-		return fmt.Errorf("S8: %v offset %d acquired with delivery count %d outside [1, 5]", tp, off, delivery)
+	if delivery < 1 || delivery > 20 {
+		return fmt.Errorf("S8: %v offset %d acquired with delivery count %d outside [1, 20]", tp, off, delivery)
 	}
 	if m.share.acked[tp][off] {
 		return fmt.Errorf("S8: %v offset %d was already acknowledged/rejected and was delivered again", tp, off)
@@ -81,7 +81,7 @@ func (m *Model) ShareAcked(tp TP, off int64, ackType int8, delivery int16, epoch
 		if m.share.acked[tp][off] || m.share.deliveries[tp][off] > delivery {
 			return
 		}
-		if delivery >= 5 {
+		if delivery >= 20 {
 			if m.share.acked[tp] == nil {
 				m.share.acked[tp] = map[int64]bool{}
 			}

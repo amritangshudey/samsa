@@ -132,7 +132,7 @@ func (sg *shareGroup) releaseMemberLocks(memberID string, dropLock bool, s *stat
 		for _, off := range sortedKeys(sp.locks) {
 			l := sp.locks[off]
 			if l.state == shareAcquired && l.owner == memberID {
-				releaseLock(l, dropLock)
+				releaseLock(l, dropLock, s.shareDeliveryLimit)
 			}
 		}
 		var floor int64
@@ -143,14 +143,17 @@ func (sg *shareGroup) releaseMemberLocks(memberID string, dropLock bool, s *stat
 	}
 }
 
-func releaseLock(l *shareLock, dropLock bool) {
+func releaseLock(l *shareLock, dropLock bool, limit int16) {
 	if dropLock {
 		l.state = shareAcked
 		l.owner = ""
 		l.lockUntil = 0
 		return
 	}
-	if l.delivery >= maxShareDeliveryCount {
+	if limit <= 0 {
+		limit = maxShareDeliveryCount
+	}
+	if l.delivery >= limit {
 		l.state = shareArchived
 	} else {
 		l.state = shareAvailable
@@ -500,7 +503,7 @@ func (s *state) applyShareAcquire(req shareAcquireReq) result {
 		// Expire any stale locks along the way deterministically.
 		for _, off := range sortedKeys(sp.locks) {
 			if l := sp.locks[off]; l.state == shareAcquired && l.lockUntil <= req.nowMs {
-				releaseLock(l, s.dropShareLock)
+				releaseLock(l, s.dropShareLock, s.shareDeliveryLimit)
 			}
 		}
 		sp.advance(p.start)
@@ -601,7 +604,7 @@ func (s *state) applyShareAck(cmd shareAckCmd) result {
 				case wire.AckAccept:
 					l.state, l.owner, l.lockUntil = shareAcked, "", 0
 				case wire.AckRelease:
-					releaseLock(l, s.dropShareLock)
+					releaseLock(l, s.dropShareLock, s.shareDeliveryLimit)
 				case wire.AckReject:
 					l.state, l.owner, l.lockUntil = shareArchived, "", 0
 				case wire.AckRenew:
@@ -626,7 +629,7 @@ func (s *state) applyShareExpire(nowMs int64) result {
 			for _, off := range sortedKeys(sp.locks) {
 				l := sp.locks[off]
 				if l.state == shareAcquired && l.lockUntil <= nowMs {
-					releaseLock(l, s.dropShareLock)
+					releaseLock(l, s.dropShareLock, s.shareDeliveryLimit)
 					released = true
 				}
 			}

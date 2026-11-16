@@ -143,6 +143,9 @@ type Config struct {
 	// ShareAcquisitionLockTimeout is how long acquired records in a share
 	// group stay locked before returning to available (KIP-932). Default 30s.
 	ShareAcquisitionLockTimeout time.Duration
+	// ShareDeliveryCountLimit is how many times a record may be acquired in
+	// a share group before being archived (KIP-932). Default 5.
+	ShareDeliveryCountLimit int16
 	// MaxGroupSize bounds the members of one consumer group. Default 1000.
 	MaxGroupSize int
 	// Logger receives structured logs. Default: discard.
@@ -257,6 +260,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.ShareAcquisitionLockTimeout <= 0 {
 		c.ShareAcquisitionLockTimeout = 30 * time.Second
+	}
+	if c.ShareDeliveryCountLimit <= 0 {
+		c.ShareDeliveryCountLimit = 5
 	}
 	if c.MaxGroupSize <= 0 {
 		c.MaxGroupSize = 1000
@@ -422,6 +428,7 @@ func (n *Node) adopt(st *state) {
 	st.reuseTopicID = n.cfg.UnsafeReuseTopicID
 	st.assignEarly = n.cfg.UnsafeAssignBeforeRevoke
 	st.dropShareLock = n.cfg.UnsafeDropShareLock
+	st.shareDeliveryLimit = n.cfg.ShareDeliveryCountLimit
 	n.st = st
 	n.snapStart = st.logStart // every state adopted is a snapshot's
 	// A snapshot older than version 8 has no batch sizes; the cleaner's
