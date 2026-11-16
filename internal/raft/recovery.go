@@ -74,10 +74,13 @@ func (r *Raft) repairMarked() error {
 	if err != nil {
 		return err
 	}
-	if found {
-		if err := r.cutAt(damage, nil); err != nil {
-			return err
-		}
+	if !found {
+		// The damage was in the active segment (for example, a later
+		// segment was lost to a crash), which Scrub skips.
+		damage = r.log.StartOffset()
+	}
+	if err := r.cutAt(damage, nil); err != nil {
+		return err
 	}
 	if err := r.disk.Remove(name); err != nil {
 		return fmt.Errorf("remove damage marker: %w", err)

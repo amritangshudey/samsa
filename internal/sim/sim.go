@@ -280,7 +280,6 @@ func Run(cfg Config) Result {
 			// Timeouts well under answerBound: a held JoinGroup or
 			// SyncGroup is answered within the rebalance timeout.
 			cl.mem = &membership{group: groupNames[cl.rng.Intn(len(groupNames))], session: int32(100 + cl.rng.Intn(1900)), rebalance: int32(100 + cl.rng.Intn(2900))}
-			cl.cg = &cgMembership{group: "cg0", id: fmt.Sprintf("cgm-%d", len(w.clients)), rebalanceMs: int32(100 + cl.rng.Intn(400)), assignor: []string{"", "uniform", "range"}[cl.rng.Intn(3)]}
 			w.clients = append(w.clients, cl)
 			w.after(time.Duration(cl.rng.Intn(int(50*time.Millisecond))), cl.tick)
 		}

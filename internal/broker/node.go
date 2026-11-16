@@ -682,7 +682,9 @@ func (n *Node) settle() error {
 		// A read met damage: record it, so that the restart repairs it
 		// wherever it lies (scrub.go).
 		n.damageNoted = true
-		_ = n.raft.MarkDamage(-1) // a failure leaves the node to stop, as it would
+		if err := n.raft.MarkDamage(-1); err != nil {
+			return err
+		}
 	}
 	return n.fatal
 }

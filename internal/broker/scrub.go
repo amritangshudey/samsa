@@ -18,6 +18,7 @@ func (n *Node) scrub() {
 	if n.scrubAt < 0 { // a pass is done
 		n.scrubAt = 0
 	}
+	n.scrubAt = max(n.scrubAt, n.raft.LogStart())
 	next, read, damage, found, err := n.raft.Scrub(n.scrubAt, n.cfg.ScrubBytesPerSecond)
 	n.scrubbed += int64(read)
 	switch {

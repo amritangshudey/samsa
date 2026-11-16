@@ -706,7 +706,7 @@ func (n *Node) consumerHeartbeat(c *conn, h wire.RequestHeader, req *wire.Consum
 	case req.GroupID == "":
 		fail(wire.ErrInvalidRequest, "GroupId can't be empty")
 		return
-	case req.MemberID == "" && !(h.Version == 0 && req.MemberEpoch == 0):
+	case req.MemberID == "" && (h.Version != 0 || req.MemberEpoch != 0):
 		fail(wire.ErrInvalidRequest, "MemberId can't be empty")
 		return
 	case req.InstanceID != "" || req.MemberEpoch == wire.EpochRejoin:

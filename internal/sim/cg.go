@@ -1,6 +1,7 @@
 package sim
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/amritangshudey/samsa/internal/sys"
@@ -22,6 +23,14 @@ type cgMembership struct {
 }
 
 func (cl *client) cgMember() {
+	if cl.cg == nil {
+		cl.cg = &cgMembership{
+			group:       "cg0",
+			id:          fmt.Sprintf("cgm-%d", cl.lane),
+			rebalanceMs: int32(100 + cl.rng.Intn(400)),
+			assignor:    []string{"", "uniform", "range"}[cl.rng.Intn(3)],
+		}
+	}
 	w, g := cl.w, cl.cg
 	if len(cl.pending) > 0 || w.now < g.quietUntil {
 		return
