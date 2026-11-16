@@ -389,27 +389,28 @@ func (cl *client) fetchOffset() {
 func (cl *client) fetchOffsets(group string, tps []TP, all bool, then func()) {
 	w, m := cl.w, cl.w.model
 	v := cl.version(wire.KeyOffsetFetch)
-	req := &wire.OffsetFetchRequest{GroupID: group, AllTopics: all && v >= 2}
+	fg := wire.OffsetFetchGroup{GroupID: group, MemberEpoch: -1, AllTopics: all && v >= 2}
 	floors := make([]uint64, len(tps))
 	for i, tp := range tps {
 		floors[i] = m.CommitFloor(group, tp)
-		if !req.AllTopics {
-			req.Topics = append(req.Topics, wire.OffsetFetchTopic{Name: tp.Topic, Partitions: []int32{tp.Part}})
+		if !fg.AllTopics {
+			fg.Topics = append(fg.Topics, wire.OffsetFetchTopic{Name: tp.Topic, Partitions: []int32{tp.Part}})
 		}
 	}
+	req := &wire.OffsetFetchRequest{Groups: []wire.OffsetFetchGroup{fg}}
 	epoch := m.Epoch()
 	resp := &wire.OffsetFetchResponse{}
 	cl.request(wire.KeyOffsetFetch, v, req, resp, func(ok bool) {
 		if !ok {
 			return
 		}
-		if resp.ErrorCode != wire.ErrNone || (!req.AllTopics && len(resp.Topics) != len(tps)) {
-			w.fail("OffsetFetch: error %d, %d topics for %d asked", resp.ErrorCode, len(resp.Topics), len(tps))
+		if len(resp.Groups) != 1 || resp.Groups[0].ErrorCode != wire.ErrNone || (!fg.AllTopics && len(resp.Groups[0].Topics) != len(tps)) {
+			w.fail("OffsetFetch: %+v", resp.Groups)
 			return
 		}
 		for i, tp := range tps {
 			offset := int64(-1) // asking for everything omits what has no commit
-			for _, t := range resp.Topics {
+			for _, t := range resp.Groups[0].Topics {
 				for _, p := range t.Partitions {
 					if t.Name == tp.Topic && p.Index == tp.Part {
 						offset = p.Offset

@@ -14,10 +14,11 @@ import (
 // each partition's idempotent producers; version 4 each producer's last
 // log index; version 5 the ACLs; version 6 the SCRAM credentials; version
 // 7 the format level; version 8 topic configurations and batch sizes
-// (design C2); version 9 topic IDs (ADR 0032). Each later field comes last,
+// (design C2); version 9 topic IDs (ADR 0032); version 10 consumer-protocol
+// groups (ADR 0033). Each later field comes last,
 // so the encoder writes the oldest version that holds the state: an older
 // build in the cluster during a rolling upgrade can still read it (design G7).
-const snapshotVersion = 9
+const snapshotVersion = 10
 
 // encode returns the whole state machine as bytes, for a Raft snapshot
 // (docs/design/a1-snapshots.md). Maps are walked in sorted order, so equal
@@ -26,6 +27,8 @@ const snapshotVersion = 9
 func (s *state) encode() []byte {
 	version := byte(4)
 	switch {
+	case s.level >= 5:
+		version = 10
 	case s.level >= 4:
 		version = 9
 	case s.level >= 2:
@@ -148,6 +151,52 @@ func (s *state) encode() []byte {
 	if version >= 9 {
 		for _, name := range s.names {
 			w.UUID(s.topics[name].id)
+		}
+	}
+	if version >= 10 {
+		var cgs []string
+		for _, name := range names {
+			if s.groups[name].cg != nil {
+				cgs = append(cgs, name)
+			}
+		}
+		w.ArrayLen(false, len(cgs))
+		for _, name := range cgs {
+			cg := s.groups[name].cg
+			w.String(false, name)
+			w.Int32(cg.epoch)
+			w.Int32(cg.targetEpoch)
+			w.String(false, cg.assignor)
+			w.ArrayLen(false, len(cg.meta))
+			for _, tm := range cg.meta {
+				w.UUID(tm.id)
+				w.Int32(tm.parts)
+			}
+			w.ArrayLen(false, len(cg.members))
+			for _, m := range cg.members {
+				w.String(false, m.id)
+				w.Int32(m.epoch)
+				w.Int32(m.prevEpoch)
+				w.String(false, m.rack)
+				w.String(false, m.clientID)
+				w.String(false, m.host)
+				w.Int32(m.rebalanceMs)
+				w.String(false, m.assignor)
+				w.ArrayLen(false, len(m.subscribed))
+				for _, sub := range m.subscribed {
+					w.String(false, sub)
+				}
+				w.ArrayLen(false, len(m.owned))
+				for _, p := range m.owned {
+					w.UUID(p.id)
+					w.Int32(p.part)
+				}
+				w.ArrayLen(false, len(m.target))
+				for _, p := range m.target {
+					w.UUID(p.id)
+					w.Int32(p.part)
+				}
+			}
 		}
 	}
 	return w.B
@@ -314,6 +363,33 @@ func decodeState(b []byte) (*state, error) {
 			s.topics[name].id = id
 			s.byID[id] = name
 		}
+	}
+	bad = bad || (v >= 10) != (s.level >= 5)
+	if v >= 10 {
+		last := ""
+		wire.Array(r, false, func() struct{} {
+			name := r.String(false)
+			cg := &cgroup{epoch: r.Int32(), targetEpoch: r.Int32(), assignor: r.String(false)}
+			cg.meta = wire.Array(r, false, func() topicMeta { return topicMeta{id: r.UUID(), parts: r.Int32()} })
+			cg.members = wire.Array(r, false, func() *cmember {
+				m := &cmember{
+					id: r.String(false), epoch: r.Int32(), prevEpoch: r.Int32(),
+					rack: r.String(false), clientID: r.String(false), host: r.String(false),
+					rebalanceMs: r.Int32(), assignor: r.String(false),
+				}
+				m.subscribed = wire.Array(r, false, func() string { return r.String(false) })
+				m.owned = wire.Array(r, false, func() tpKey { return tpKey{r.UUID(), r.Int32()} })
+				m.target = wire.Array(r, false, func() tpKey { return tpKey{r.UUID(), r.Int32()} })
+				return m
+			})
+			g := s.groups[name]
+			bad = bad || r.Err() == nil && (g == nil || g.cg != nil || len(g.members) > 0 || name <= last)
+			if g != nil {
+				g.cg = cg
+			}
+			last = name
+			return struct{}{}
+		})
 	}
 	if r.Err() != nil || r.Len() != 0 || bad {
 		return nil, fmt.Errorf("%w: snapshot state: %w, %d bytes left, malformed %v", errBadCommand, r.Err(), r.Len(), bad)

@@ -82,6 +82,7 @@ type options struct {
 	consumers   int
 	vandals     int
 	members     int
+	cgMembers   int // KIP-848 consumer group members (cg.go)
 	idempotent  int           // idempotent producers (idempotent.go)
 	expiry      time.Duration // producer expiry as chosen, before any mutation
 	classic     bool          // Raft without PreVote and CheckQuorum
@@ -135,8 +136,10 @@ func Run(cfg Config) Result {
 		SegmentBytes:  []int64{4096, 16384, 1 << 20}[pick.Intn(3)],
 		MaxBatchBytes: maxBatchBytes,
 		// Short, so that expiries and rebalances happen within a run.
-		MinSessionTimeout: 50 * time.Millisecond,
-		Logger:            nodeLogger(cfg.Trace),
+		MinSessionTimeout:         50 * time.Millisecond,
+		ConsumerHeartbeatInterval: 50 * time.Millisecond,
+		ConsumerSessionTimeout:    300 * time.Millisecond,
+		Logger:                    nodeLogger(cfg.Trace),
 	}
 	for f := faultPower; f <= faultSync; f++ {
 		if pick.Chance(0.6) {
@@ -193,6 +196,7 @@ func Run(cfg Config) Result {
 	if w.opts.rot = pick.Chance(0.5) && w.opts.nodes >= 3 && !w.opts.changes; w.opts.rot { // drawn last
 		w.opts.faults = append(w.opts.faults, faultRot)
 	}
+	w.opts.cgMembers = pick.Intn(4) // drawn last
 	if cfg.Calm {
 		w.opts.drop, w.opts.dup = 0, 0
 	}
@@ -200,6 +204,9 @@ func Run(cfg Config) Result {
 		cfg.Mutate(&w.bcfg)
 		w.opts.retainMs = w.bcfg.RetentionTime.Milliseconds()
 		w.opts.compact = w.opts.compact || w.bcfg.UnsafeCompact != 0 // a compaction bug needs a compacted topic
+		if w.bcfg.UnsafeAssignBeforeRevoke && w.opts.cgMembers < 2 {
+			w.opts.cgMembers = 2
+		}
 	}
 	strict := w.bcfg.Sync == broker.SyncAlways
 	if w.opts.nodes > 1 && !strict {
@@ -266,13 +273,14 @@ func Run(cfg Config) Result {
 	behaviours := []struct {
 		n    int
 		step func(*client)
-	}{{w.opts.producers, (*client).produce}, {w.opts.consumers, (*client).consume}, {w.opts.vandals, (*client).vandalise}, {w.opts.members, (*client).groupMember}, {w.opts.idempotent, (*client).produceIdempotent}, {w.opts.admins, (*client).admin}, {voterClients(w.opts.changes), (*client).changeVoters}}
+	}{{w.opts.producers, (*client).produce}, {w.opts.consumers, (*client).consume}, {w.opts.vandals, (*client).vandalise}, {w.opts.members, (*client).groupMember}, {w.opts.cgMembers, (*client).cgMember}, {w.opts.idempotent, (*client).produceIdempotent}, {w.opts.admins, (*client).admin}, {voterClients(w.opts.changes), (*client).changeVoters}}
 	for _, b := range behaviours {
 		for range b.n {
 			cl := &client{w: w, lane: len(w.clients), rng: rng.Fork(), step: b.step, cursors: map[TP]int64{}, idem: &idemProducer{id: -1}}
 			// Timeouts well under answerBound: a held JoinGroup or
 			// SyncGroup is answered within the rebalance timeout.
 			cl.mem = &membership{group: groupNames[cl.rng.Intn(len(groupNames))], session: int32(100 + cl.rng.Intn(1900)), rebalance: int32(100 + cl.rng.Intn(2900))}
+			cl.cg = &cgMembership{group: "cg0", id: fmt.Sprintf("cgm-%d", len(w.clients)), rebalanceMs: int32(100 + cl.rng.Intn(400)), assignor: []string{"", "uniform", "range"}[cl.rng.Intn(3)]}
 			w.clients = append(w.clients, cl)
 			w.after(time.Duration(cl.rng.Intn(int(50*time.Millisecond))), cl.tick)
 		}

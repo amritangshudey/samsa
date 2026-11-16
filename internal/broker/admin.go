@@ -261,7 +261,11 @@ func (n *Node) listGroups(c *conn, req *wire.ListGroupsRequest) *wire.ListGroups
 		if !all && !n.may(c, opDescribe, resGroup, name) {
 			continue
 		}
-		lg := wire.ListedGroup{ID: name, ProtocolType: n.st.groups[name].protocolType, State: n.groupState(name), Type: "classic"}
+		g := n.st.groups[name]
+		lg := wire.ListedGroup{ID: name, ProtocolType: g.protocolType, State: n.groupState(name), Type: "classic"}
+		if g.cg != nil {
+			lg = wire.ListedGroup{ID: name, ProtocolType: "consumer", State: g.cg.stateName(), Type: "consumer"}
+		}
 		if len(req.States) > 0 && !slices.ContainsFunc(req.States, func(s string) bool { return strings.EqualFold(s, lg.State) }) ||
 			len(req.Types) > 0 && !slices.ContainsFunc(req.Types, func(s string) bool { return strings.EqualFold(s, lg.Type) }) {
 			continue
@@ -279,7 +283,9 @@ func (n *Node) describeGroups(c *conn, req *wire.DescribeGroupsRequest) *wire.De
 			continue
 		}
 		dg := wire.DescribedGroup{ID: name, State: n.groupState(name)}
-		if g := n.st.groups[name]; g != nil {
+		if g := n.st.groups[name]; g != nil && g.cg != nil {
+			dg.ErrorCode, dg.ErrorMessage = wire.ErrGroupIDNotFound, "group "+name+" is not a classic group"
+		} else if g != nil {
 			dg.ProtocolType = g.protocolType
 			if dg.State == "Stable" || dg.State == "CompletingRebalance" {
 				dg.ProtocolData = g.protocol

@@ -352,8 +352,8 @@ func (m *CreateTopicsRequest) Decode(r *Reader, v int16) {
 	m.Topics = Array(r, flex, func() CreateTopic {
 		t := CreateTopic{Name: r.String(flex), NumPartitions: r.Int32(), ReplicationFactor: r.Int16()}
 		assignments := Array(r, flex, func() struct{} {
-			r.Int32()             // PartitionIndex
-			readInt32s(r, flex)   // BrokerIds
+			r.Int32()           // PartitionIndex
+			readInt32s(r, flex) // BrokerIds
 			r.Tags(flex)
 			return struct{}{}
 		})
@@ -419,9 +419,9 @@ type CreateTopicConfig struct {
 
 // CreateTopicResult is one topic of a CreateTopics response.
 type CreateTopicResult struct {
-	Name              string
-	TopicID           UUID // v7+
-	ErrorCode         int16
+	Name      string
+	TopicID   UUID // v7+
+	ErrorCode int16
 	// ErrorMessage is sent as null when empty.
 	ErrorMessage      string
 	NumPartitions     int32               // v5+; -1 when unset/error
@@ -520,31 +520,42 @@ type ProduceRequest struct {
 }
 
 // Decode implements Message.
-func (m *ProduceRequest) Decode(r *Reader, _ int16) {
-	r.NullableString(false) // TransactionalId, v3+
+func (m *ProduceRequest) Decode(r *Reader, v int16) {
+	flex := v >= 9
+	r.NullableString(flex) // TransactionalId, v3+
 	m.Acks = r.Int16()
 	m.TimeoutMs = r.Int32()
-	m.Topics = Array(r, false, func() ProduceTopic {
-		return ProduceTopic{Name: r.String(false), Partitions: Array(r, false, func() ProducePartition {
-			return ProducePartition{Index: r.Int32(), Records: r.Bytes(false)}
-		})}
+	m.Topics = Array(r, flex, func() ProduceTopic {
+		t := ProduceTopic{Name: r.String(flex)}
+		t.Partitions = Array(r, flex, func() ProducePartition {
+			p := ProducePartition{Index: r.Int32(), Records: r.Bytes(flex)}
+			r.Tags(flex)
+			return p
+		})
+		r.Tags(flex)
+		return t
 	})
+	r.Tags(flex)
 }
 
 // Encode implements Message.
-func (m *ProduceRequest) Encode(w *Writer, _ int16) {
-	w.NullString(false)
+func (m *ProduceRequest) Encode(w *Writer, v int16) {
+	flex := v >= 9
+	w.NullString(flex)
 	w.Int16(m.Acks)
 	w.Int32(m.TimeoutMs)
-	w.ArrayLen(false, len(m.Topics))
+	w.ArrayLen(flex, len(m.Topics))
 	for _, t := range m.Topics {
-		w.String(false, t.Name)
-		w.ArrayLen(false, len(t.Partitions))
+		w.String(flex, t.Name)
+		w.ArrayLen(flex, len(t.Partitions))
 		for _, p := range t.Partitions {
 			w.Int32(p.Index)
-			w.Bytes(false, p.Records)
+			w.Bytes(flex, p.Records)
+			w.Tags(flex)
 		}
+		w.Tags(flex)
 	}
+	w.Tags(flex)
 }
 
 // ProducePartitionResponse is one partition's result in a Produce response.
@@ -565,33 +576,41 @@ type ProduceResponse struct{ Topics []ProduceTopicResponse }
 
 // Decode implements Message.
 func (m *ProduceResponse) Decode(r *Reader, v int16) {
-	m.Topics = Array(r, false, func() ProduceTopicResponse {
-		return ProduceTopicResponse{Name: r.String(false), Partitions: Array(r, false, func() ProducePartitionResponse {
+	flex := v >= 9
+	m.Topics = Array(r, flex, func() ProduceTopicResponse {
+		t := ProduceTopicResponse{Name: r.String(flex)}
+		t.Partitions = Array(r, flex, func() ProducePartitionResponse {
 			p := ProducePartitionResponse{Index: r.Int32(), ErrorCode: r.Int16(), BaseOffset: r.Int64()}
 			r.Int64() // LogAppendTimeMs, v2+
 			if v >= 5 {
 				r.Int64() // LogStartOffset
 			}
 			if v >= 8 {
-				Array(r, false, func() struct{} { // RecordErrors
+				Array(r, flex, func() struct{} { // RecordErrors
 					r.Int32()
-					r.NullableString(false)
+					r.NullableString(flex)
+					r.Tags(flex)
 					return struct{}{}
 				})
-				r.NullableString(false) // ErrorMessage
+				r.NullableString(flex) // ErrorMessage
 			}
+			r.Tags(flex)
 			return p
-		})}
+		})
+		r.Tags(flex)
+		return t
 	})
 	r.Int32() // ThrottleTimeMs, v1+
+	r.Tags(flex)
 }
 
 // Encode implements Message.
 func (m *ProduceResponse) Encode(w *Writer, v int16) {
-	w.ArrayLen(false, len(m.Topics))
+	flex := v >= 9
+	w.ArrayLen(flex, len(m.Topics))
 	for _, t := range m.Topics {
-		w.String(false, t.Name)
-		w.ArrayLen(false, len(t.Partitions))
+		w.String(flex, t.Name)
+		w.ArrayLen(flex, len(t.Partitions))
 		for _, p := range t.Partitions {
 			w.Int32(p.Index)
 			w.Int16(p.ErrorCode)
@@ -601,12 +620,15 @@ func (m *ProduceResponse) Encode(w *Writer, v int16) {
 				w.Int64(-1) // LogStartOffset: the schema's default, "unknown"; Fetch carries it
 			}
 			if v >= 8 {
-				w.ArrayLen(false, 0)
-				w.NullString(false)
+				w.ArrayLen(flex, 0)
+				w.NullString(flex)
 			}
+			w.Tags(flex)
 		}
+		w.Tags(flex)
 	}
 	w.Int32(0)
+	w.Tags(flex)
 }
 
 // FetchPartition is one partition of a Fetch request.
@@ -876,16 +898,22 @@ func (m *ListOffsetsRequest) Decode(r *Reader, v int16) {
 	if v >= 2 {
 		r.Int8() // IsolationLevel
 	}
-	m.Topics = Array(r, false, func() ListOffsetsTopic {
-		return ListOffsetsTopic{Name: r.String(false), Partitions: Array(r, false, func() ListOffsetsPartition {
+	flex := v >= 6
+	m.Topics = Array(r, flex, func() ListOffsetsTopic {
+		t := ListOffsetsTopic{Name: r.String(flex)}
+		t.Partitions = Array(r, flex, func() ListOffsetsPartition {
 			p := ListOffsetsPartition{Index: r.Int32()}
 			if v >= 4 {
 				r.Int32() // CurrentLeaderEpoch
 			}
 			p.Timestamp = r.Int64()
+			r.Tags(flex)
 			return p
-		})}
+		})
+		r.Tags(flex)
+		return t
 	})
+	r.Tags(flex)
 }
 
 // Encode implements Message.
@@ -894,18 +922,22 @@ func (m *ListOffsetsRequest) Encode(w *Writer, v int16) {
 	if v >= 2 {
 		w.Int8(0)
 	}
-	w.ArrayLen(false, len(m.Topics))
+	flex := v >= 6
+	w.ArrayLen(flex, len(m.Topics))
 	for _, t := range m.Topics {
-		w.String(false, t.Name)
-		w.ArrayLen(false, len(t.Partitions))
+		w.String(flex, t.Name)
+		w.ArrayLen(flex, len(t.Partitions))
 		for _, p := range t.Partitions {
 			w.Int32(p.Index)
 			if v >= 4 {
 				w.Int32(-1)
 			}
 			w.Int64(p.Timestamp)
+			w.Tags(flex)
 		}
+		w.Tags(flex)
 	}
+	w.Tags(flex)
 }
 
 // ListOffsetsPartitionResponse is one partition's result in a ListOffsets
@@ -931,15 +963,21 @@ func (m *ListOffsetsResponse) Decode(r *Reader, v int16) {
 	if v >= 2 {
 		r.Int32() // ThrottleTimeMs
 	}
-	m.Topics = Array(r, false, func() ListOffsetsTopicResponse {
-		return ListOffsetsTopicResponse{Name: r.String(false), Partitions: Array(r, false, func() ListOffsetsPartitionResponse {
+	flex := v >= 6
+	m.Topics = Array(r, flex, func() ListOffsetsTopicResponse {
+		t := ListOffsetsTopicResponse{Name: r.String(flex)}
+		t.Partitions = Array(r, flex, func() ListOffsetsPartitionResponse {
 			p := ListOffsetsPartitionResponse{Index: r.Int32(), ErrorCode: r.Int16(), Timestamp: r.Int64(), Offset: r.Int64()}
 			if v >= 4 {
 				r.Int32() // LeaderEpoch
 			}
+			r.Tags(flex)
 			return p
-		})}
+		})
+		r.Tags(flex)
+		return t
 	})
+	r.Tags(flex)
 }
 
 // Encode implements Message.
@@ -947,10 +985,11 @@ func (m *ListOffsetsResponse) Encode(w *Writer, v int16) {
 	if v >= 2 {
 		w.Int32(0)
 	}
-	w.ArrayLen(false, len(m.Topics))
+	flex := v >= 6
+	w.ArrayLen(flex, len(m.Topics))
 	for _, t := range m.Topics {
-		w.String(false, t.Name)
-		w.ArrayLen(false, len(t.Partitions))
+		w.String(flex, t.Name)
+		w.ArrayLen(flex, len(t.Partitions))
 		for _, p := range t.Partitions {
 			w.Int32(p.Index)
 			w.Int16(p.ErrorCode)
@@ -959,8 +998,11 @@ func (m *ListOffsetsResponse) Encode(w *Writer, v int16) {
 			if v >= 4 {
 				w.Int32(0) // LeaderEpoch
 			}
+			w.Tags(flex)
 		}
+		w.Tags(flex)
 	}
+	w.Tags(flex)
 }
 
 // InitProducerIDRequest is the body of an InitProducerId request (key 22).

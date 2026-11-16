@@ -88,13 +88,25 @@ func refusal(req wire.Message) wire.Message {
 		return resp
 	case *wire.OffsetFetchRequest:
 		// Version 1 has no top-level error, so each partition carries it too.
-		resp := &wire.OffsetFetchResponse{ErrorCode: wire.ErrNotCoordinator}
-		for _, t := range m.Topics {
-			tr := wire.OffsetFetchTopicResponse{Name: t.Name}
-			for _, index := range t.Partitions {
-				tr.Partitions = append(tr.Partitions, wire.OffsetFetchPartition{Index: index, Offset: -1, LeaderEpoch: -1, ErrorCode: wire.ErrNotCoordinator})
+		resp := &wire.OffsetFetchResponse{}
+		for _, fg := range m.Groups {
+			gr := wire.OffsetFetchGroupResponse{GroupID: fg.GroupID, ErrorCode: wire.ErrNotCoordinator}
+			for _, t := range fg.Topics {
+				tr := wire.OffsetFetchTopicResponse{Name: t.Name}
+				for _, index := range t.Partitions {
+					tr.Partitions = append(tr.Partitions, wire.OffsetFetchPartition{Index: index, Offset: -1, LeaderEpoch: -1, ErrorCode: wire.ErrNotCoordinator})
+				}
+				gr.Topics = append(gr.Topics, tr)
 			}
-			resp.Topics = append(resp.Topics, tr)
+			resp.Groups = append(resp.Groups, gr)
+		}
+		return resp
+	case *wire.ConsumerGroupHeartbeatRequest:
+		return &wire.ConsumerGroupHeartbeatResponse{ErrorCode: wire.ErrNotCoordinator, MemberID: m.MemberID}
+	case *wire.ConsumerGroupDescribeRequest:
+		resp := &wire.ConsumerGroupDescribeResponse{}
+		for _, g := range m.Groups {
+			resp.Groups = append(resp.Groups, wire.ConsumerGroupDescribeGroup{ErrorCode: wire.ErrNotCoordinator, GroupID: g})
 		}
 		return resp
 	case *wire.DeleteTopicsRequest:

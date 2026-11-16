@@ -24,7 +24,7 @@ func (w *Writer) nonNullBytes(p []byte) {
 	w.B = append(w.B, p...)
 }
 
-// --- OffsetCommit (key 8), versions 2 to 7 ---
+// --- OffsetCommit (key 8), versions 2 to 9 ---
 
 // OffsetCommitPartition is one partition's offset in an OffsetCommit request.
 type OffsetCommitPartition struct {
@@ -43,7 +43,9 @@ type OffsetCommitTopic struct {
 // OffsetCommitRequest is the body of an OffsetCommit request.
 type OffsetCommitRequest struct {
 	GroupID string
-	// GenerationID is -1 and MemberID empty for a consumer that is not a
+	// GenerationID is the generation of the classic protocol or, from v9
+	// for a member of a consumer-protocol group (KIP-848), its member
+	// epoch. It is -1 and MemberID empty for a consumer that is not a
 	// group member.
 	GenerationID int32
 	MemberID     string
@@ -52,51 +54,61 @@ type OffsetCommitRequest struct {
 
 // Decode implements Message.
 func (m *OffsetCommitRequest) Decode(r *Reader, v int16) {
-	m.GroupID = r.String(false)
+	flex := v >= 8
+	m.GroupID = r.String(flex)
 	m.GenerationID = r.Int32()
-	m.MemberID = r.String(false)
+	m.MemberID = r.String(flex)
 	if v >= 7 {
-		r.nullableString() // GroupInstanceId: static membership is not supported
+		r.NullableString(flex) // GroupInstanceId: static membership is not supported
 	}
 	if v <= 4 {
 		r.Int64() // RetentionTimeMs
 	}
-	m.Topics = Array(r, false, func() OffsetCommitTopic {
-		return OffsetCommitTopic{Name: r.String(false), Partitions: Array(r, false, func() OffsetCommitPartition {
+	m.Topics = Array(r, flex, func() OffsetCommitTopic {
+		t := OffsetCommitTopic{Name: r.String(flex)}
+		t.Partitions = Array(r, flex, func() OffsetCommitPartition {
 			p := OffsetCommitPartition{Index: r.Int32(), Offset: r.Int64(), LeaderEpoch: -1}
 			if v >= 6 {
 				p.LeaderEpoch = r.Int32()
 			}
-			p.Metadata = r.nullableString()
+			p.Metadata, _ = r.NullableString(flex)
+			r.Tags(flex)
 			return p
-		})}
+		})
+		r.Tags(flex)
+		return t
 	})
+	r.Tags(flex)
 }
 
 // Encode implements Message.
 func (m *OffsetCommitRequest) Encode(w *Writer, v int16) {
-	w.String(false, m.GroupID)
+	flex := v >= 8
+	w.String(flex, m.GroupID)
 	w.Int32(m.GenerationID)
-	w.String(false, m.MemberID)
+	w.String(flex, m.MemberID)
 	if v >= 7 {
-		w.NullString(false)
+		w.NullString(flex)
 	}
 	if v <= 4 {
 		w.Int64(-1)
 	}
-	w.ArrayLen(false, len(m.Topics))
+	w.ArrayLen(flex, len(m.Topics))
 	for _, t := range m.Topics {
-		w.String(false, t.Name)
-		w.ArrayLen(false, len(t.Partitions))
+		w.String(flex, t.Name)
+		w.ArrayLen(flex, len(t.Partitions))
 		for _, p := range t.Partitions {
 			w.Int32(p.Index)
 			w.Int64(p.Offset)
 			if v >= 6 {
 				w.Int32(p.LeaderEpoch)
 			}
-			w.String(false, p.Metadata)
+			w.String(flex, p.Metadata)
+			w.Tags(flex)
 		}
+		w.Tags(flex)
 	}
+	w.Tags(flex)
 }
 
 // PartitionError is a partition index with an error code.
@@ -116,33 +128,44 @@ type OffsetCommitResponse struct{ Topics []OffsetCommitTopicResponse }
 
 // Decode implements Message.
 func (m *OffsetCommitResponse) Decode(r *Reader, v int16) {
+	flex := v >= 8
 	if v >= 3 {
 		r.Int32() // ThrottleTimeMs
 	}
-	m.Topics = Array(r, false, func() OffsetCommitTopicResponse {
-		return OffsetCommitTopicResponse{Name: r.String(false), Partitions: Array(r, false, func() PartitionError {
-			return PartitionError{Index: r.Int32(), ErrorCode: r.Int16()}
-		})}
+	m.Topics = Array(r, flex, func() OffsetCommitTopicResponse {
+		t := OffsetCommitTopicResponse{Name: r.String(flex)}
+		t.Partitions = Array(r, flex, func() PartitionError {
+			p := PartitionError{Index: r.Int32(), ErrorCode: r.Int16()}
+			r.Tags(flex)
+			return p
+		})
+		r.Tags(flex)
+		return t
 	})
+	r.Tags(flex)
 }
 
 // Encode implements Message.
 func (m *OffsetCommitResponse) Encode(w *Writer, v int16) {
+	flex := v >= 8
 	if v >= 3 {
 		w.Int32(0)
 	}
-	w.ArrayLen(false, len(m.Topics))
+	w.ArrayLen(flex, len(m.Topics))
 	for _, t := range m.Topics {
-		w.String(false, t.Name)
-		w.ArrayLen(false, len(t.Partitions))
+		w.String(flex, t.Name)
+		w.ArrayLen(flex, len(t.Partitions))
 		for _, p := range t.Partitions {
 			w.Int32(p.Index)
 			w.Int16(p.ErrorCode)
+			w.Tags(flex)
 		}
+		w.Tags(flex)
 	}
+	w.Tags(flex)
 }
 
-// --- OffsetFetch (key 9), versions 1 to 5 ---
+// --- OffsetFetch (key 9), versions 1 to 9 ---
 
 // OffsetFetchTopic is one topic of an OffsetFetch request.
 type OffsetFetchTopic struct {
@@ -150,43 +173,105 @@ type OffsetFetchTopic struct {
 	Partitions []int32
 }
 
-// OffsetFetchRequest is the body of an OffsetFetch request.
-type OffsetFetchRequest struct {
+// OffsetFetchGroup is what one group asks for: the only one before v8, one
+// of several from v8.
+type OffsetFetchGroup struct {
 	GroupID string
+	// MemberID and MemberEpoch (v9) name a member of a consumer-protocol
+	// group; MemberID is empty if not given.
+	MemberID    string
+	MemberEpoch int32
 	// AllTopics is set when the topic array is null (v2+): every partition
 	// the group has committed.
 	AllTopics bool
 	Topics    []OffsetFetchTopic
 }
 
-// Decode implements Message.
-func (m *OffsetFetchRequest) Decode(r *Reader, v int16) {
-	m.GroupID = r.String(false)
-	n := r.ArrayLen(false)
+// OffsetFetchRequest is the body of an OffsetFetch request. Before v8 it
+// is for one group, which is Groups[0]; from v8 it may be for several.
+type OffsetFetchRequest struct {
+	Groups []OffsetFetchGroup
+}
+
+func decodeFetchTopics(r *Reader, v int16, flex bool, g *OffsetFetchGroup) {
+	n := r.ArrayLen(flex)
 	if n < 0 {
 		if v < 2 {
 			r.fail("null topic array before version 2")
 		}
-		m.AllTopics = r.Err() == nil
+		g.AllTopics = r.Err() == nil
 		return
 	}
 	for ; n > 0 && r.Err() == nil; n-- {
-		m.Topics = append(m.Topics, OffsetFetchTopic{Name: r.String(false), Partitions: readInt32s(r, false)})
+		g.Topics = append(g.Topics, OffsetFetchTopic{Name: r.String(flex), Partitions: readInt32s(r, flex)})
+		r.Tags(flex)
 	}
+}
+
+func encodeFetchTopics(w *Writer, v int16, flex bool, g OffsetFetchGroup) {
+	if g.AllTopics && v >= 2 {
+		w.ArrayLen(flex, -1)
+		return
+	}
+	w.ArrayLen(flex, len(g.Topics))
+	for _, t := range g.Topics {
+		w.String(flex, t.Name)
+		writeInt32s(w, flex, t.Partitions)
+		w.Tags(flex)
+	}
+}
+
+// Decode implements Message.
+func (m *OffsetFetchRequest) Decode(r *Reader, v int16) {
+	flex := v >= 6
+	if v >= 8 {
+		m.Groups = Array(r, flex, func() OffsetFetchGroup {
+			g := OffsetFetchGroup{GroupID: r.String(flex)}
+			if v >= 9 {
+				g.MemberID, _ = r.NullableString(flex)
+				g.MemberEpoch = r.Int32()
+			}
+			decodeFetchTopics(r, v, flex, &g)
+			r.Tags(flex)
+			return g
+		})
+	} else {
+		g := OffsetFetchGroup{GroupID: r.String(flex)}
+		decodeFetchTopics(r, v, flex, &g)
+		m.Groups = []OffsetFetchGroup{g}
+	}
+	if v >= 7 {
+		r.Bool() // RequireStable
+	}
+	r.Tags(flex)
 }
 
 // Encode implements Message.
 func (m *OffsetFetchRequest) Encode(w *Writer, v int16) {
-	w.String(false, m.GroupID)
-	if m.AllTopics && v >= 2 {
-		w.ArrayLen(false, -1)
-		return
+	flex := v >= 6
+	if v >= 8 {
+		w.ArrayLen(flex, len(m.Groups))
+		for _, g := range m.Groups {
+			w.String(flex, g.GroupID)
+			if v >= 9 {
+				w.optString(flex, g.MemberID)
+				w.Int32(g.MemberEpoch)
+			}
+			encodeFetchTopics(w, v, flex, g)
+			w.Tags(flex)
+		}
+	} else {
+		var g OffsetFetchGroup
+		if len(m.Groups) > 0 {
+			g = m.Groups[0]
+		}
+		w.String(flex, g.GroupID)
+		encodeFetchTopics(w, v, flex, g)
 	}
-	w.ArrayLen(false, len(m.Topics))
-	for _, t := range m.Topics {
-		w.String(false, t.Name)
-		writeInt32s(w, false, t.Partitions)
+	if v >= 7 {
+		w.Bool(false)
 	}
+	w.Tags(flex)
 }
 
 // OffsetFetchPartition is one partition's committed offset.
@@ -204,115 +289,233 @@ type OffsetFetchTopicResponse struct {
 	Partitions []OffsetFetchPartition
 }
 
-// OffsetFetchResponse is the body of an OffsetFetch response.
-type OffsetFetchResponse struct {
+// OffsetFetchGroupResponse is the answer about one group.
+type OffsetFetchGroupResponse struct {
+	GroupID   string // v8+
 	Topics    []OffsetFetchTopicResponse
 	ErrorCode int16 // v2+
 }
 
-// Decode implements Message.
-func (m *OffsetFetchResponse) Decode(r *Reader, v int16) {
-	if v >= 3 {
-		r.Int32() // ThrottleTimeMs
-	}
-	m.Topics = Array(r, false, func() OffsetFetchTopicResponse {
-		return OffsetFetchTopicResponse{Name: r.String(false), Partitions: Array(r, false, func() OffsetFetchPartition {
+// OffsetFetchResponse is the body of an OffsetFetch response. Before v8 it
+// answers for one group, which is Groups[0].
+type OffsetFetchResponse struct {
+	Groups []OffsetFetchGroupResponse
+}
+
+func decodeFetchedTopics(r *Reader, v int16, flex bool) []OffsetFetchTopicResponse {
+	return Array(r, flex, func() OffsetFetchTopicResponse {
+		t := OffsetFetchTopicResponse{Name: r.String(flex)}
+		t.Partitions = Array(r, flex, func() OffsetFetchPartition {
 			p := OffsetFetchPartition{Index: r.Int32(), Offset: r.Int64(), LeaderEpoch: -1}
 			if v >= 5 {
 				p.LeaderEpoch = r.Int32()
 			}
-			p.Metadata = r.nullableString()
+			p.Metadata, _ = r.NullableString(flex)
 			p.ErrorCode = r.Int16()
+			r.Tags(flex)
 			return p
-		})}
+		})
+		r.Tags(flex)
+		return t
 	})
-	if v >= 2 {
-		m.ErrorCode = r.Int16()
-	}
 }
 
-// Encode implements Message.
-func (m *OffsetFetchResponse) Encode(w *Writer, v int16) {
-	if v >= 3 {
-		w.Int32(0)
-	}
-	w.ArrayLen(false, len(m.Topics))
-	for _, t := range m.Topics {
-		w.String(false, t.Name)
-		w.ArrayLen(false, len(t.Partitions))
+func encodeFetchedTopics(w *Writer, v int16, flex bool, topics []OffsetFetchTopicResponse) {
+	w.ArrayLen(flex, len(topics))
+	for _, t := range topics {
+		w.String(flex, t.Name)
+		w.ArrayLen(flex, len(t.Partitions))
 		for _, p := range t.Partitions {
 			w.Int32(p.Index)
 			w.Int64(p.Offset)
 			if v >= 5 {
 				w.Int32(p.LeaderEpoch)
 			}
-			w.String(false, p.Metadata)
+			w.String(flex, p.Metadata)
 			w.Int16(p.ErrorCode)
+			w.Tags(flex)
 		}
-	}
-	if v >= 2 {
-		w.Int16(m.ErrorCode)
+		w.Tags(flex)
 	}
 }
 
-// --- FindCoordinator (key 10), versions 0 to 2 ---
+// Decode implements Message.
+func (m *OffsetFetchResponse) Decode(r *Reader, v int16) {
+	flex := v >= 6
+	if v >= 3 {
+		r.Int32() // ThrottleTimeMs
+	}
+	if v >= 8 {
+		m.Groups = Array(r, flex, func() OffsetFetchGroupResponse {
+			g := OffsetFetchGroupResponse{GroupID: r.String(flex)}
+			g.Topics = decodeFetchedTopics(r, v, flex)
+			g.ErrorCode = r.Int16()
+			r.Tags(flex)
+			return g
+		})
+	} else {
+		g := OffsetFetchGroupResponse{Topics: decodeFetchedTopics(r, v, flex)}
+		if v >= 2 {
+			g.ErrorCode = r.Int16()
+		}
+		m.Groups = []OffsetFetchGroupResponse{g}
+	}
+	r.Tags(flex)
+}
 
-// FindCoordinatorRequest is the body of a FindCoordinator request.
+// Encode implements Message.
+func (m *OffsetFetchResponse) Encode(w *Writer, v int16) {
+	flex := v >= 6
+	if v >= 3 {
+		w.Int32(0)
+	}
+	if v >= 8 {
+		w.ArrayLen(flex, len(m.Groups))
+		for _, g := range m.Groups {
+			w.String(flex, g.GroupID)
+			encodeFetchedTopics(w, v, flex, g.Topics)
+			w.Int16(g.ErrorCode)
+			w.Tags(flex)
+		}
+	} else {
+		var g OffsetFetchGroupResponse
+		if len(m.Groups) > 0 {
+			g = m.Groups[0]
+		}
+		encodeFetchedTopics(w, v, flex, g.Topics)
+		if v >= 2 {
+			w.Int16(g.ErrorCode)
+		}
+	}
+	w.Tags(flex)
+}
+
+// --- FindCoordinator (key 10), versions 0 to 4 ---
+
+// Coordinator key types.
+const (
+	KeyTypeGroup       int8 = 0
+	KeyTypeTransaction int8 = 1
+)
+
+// FindCoordinatorRequest is the body of a FindCoordinator request. Before
+// v4 it names one key, Keys[0].
 type FindCoordinatorRequest struct {
-	Key     string
 	KeyType int8 // v1+; 0 is a consumer group
+	Keys    []string
 }
 
 // Decode implements Message.
 func (m *FindCoordinatorRequest) Decode(r *Reader, v int16) {
-	m.Key = r.String(false)
+	flex := v >= 3
+	var key string
+	if v <= 3 {
+		key = r.String(flex)
+	}
 	if v >= 1 {
 		m.KeyType = r.Int8()
 	}
+	if v >= 4 {
+		m.Keys = readStrings(r, flex)
+	} else {
+		m.Keys = []string{key}
+	}
+	r.Tags(flex)
 }
 
 // Encode implements Message.
 func (m *FindCoordinatorRequest) Encode(w *Writer, v int16) {
-	w.String(false, m.Key)
+	flex := v >= 3
+	if v <= 3 {
+		key := ""
+		if len(m.Keys) > 0 {
+			key = m.Keys[0]
+		}
+		w.String(flex, key)
+	}
 	if v >= 1 {
 		w.Int8(m.KeyType)
 	}
+	if v >= 4 {
+		writeStrings(w, flex, m.Keys)
+	}
+	w.Tags(flex)
+}
+
+// FindCoordinatorResult is the answer for one key.
+type FindCoordinatorResult struct {
+	Key          string // v4+
+	ErrorCode    int16
+	ErrorMessage string
+	NodeID       int32
+	Host         string
+	Port         int32
 }
 
 // FindCoordinatorResponse is the body of a FindCoordinator response.
+// Before v4 it answers for one key, Coordinators[0].
 type FindCoordinatorResponse struct {
-	ErrorCode int16
-	NodeID    int32
-	Host      string
-	Port      int32
+	Coordinators []FindCoordinatorResult
 }
 
 // Decode implements Message.
 func (m *FindCoordinatorResponse) Decode(r *Reader, v int16) {
+	flex := v >= 3
 	if v >= 1 {
 		r.Int32() // ThrottleTimeMs
 	}
-	m.ErrorCode = r.Int16()
-	if v >= 1 {
-		r.nullableString() // ErrorMessage
+	if v >= 4 {
+		m.Coordinators = Array(r, flex, func() FindCoordinatorResult {
+			c := FindCoordinatorResult{Key: r.String(flex), NodeID: r.Int32(), Host: r.String(flex), Port: r.Int32(), ErrorCode: r.Int16()}
+			c.ErrorMessage, _ = r.NullableString(flex)
+			r.Tags(flex)
+			return c
+		})
+	} else {
+		var c FindCoordinatorResult
+		c.ErrorCode = r.Int16()
+		if v >= 1 {
+			c.ErrorMessage, _ = r.NullableString(flex)
+		}
+		c.NodeID = r.Int32()
+		c.Host = r.String(flex)
+		c.Port = r.Int32()
+		m.Coordinators = []FindCoordinatorResult{c}
 	}
-	m.NodeID = r.Int32()
-	m.Host = r.String(false)
-	m.Port = r.Int32()
+	r.Tags(flex)
 }
 
 // Encode implements Message.
 func (m *FindCoordinatorResponse) Encode(w *Writer, v int16) {
+	flex := v >= 3
 	if v >= 1 {
 		w.Int32(0)
 	}
-	w.Int16(m.ErrorCode)
-	if v >= 1 {
-		w.NullString(false)
+	if v >= 4 {
+		w.ArrayLen(flex, len(m.Coordinators))
+		for _, c := range m.Coordinators {
+			w.String(flex, c.Key)
+			w.Int32(c.NodeID)
+			w.String(flex, c.Host)
+			w.Int32(c.Port)
+			w.Int16(c.ErrorCode)
+			w.optString(flex, c.ErrorMessage)
+			w.Tags(flex)
+		}
+	} else {
+		var c FindCoordinatorResult
+		if len(m.Coordinators) > 0 {
+			c = m.Coordinators[0]
+		}
+		w.Int16(c.ErrorCode)
+		if v >= 1 {
+			w.optString(flex, c.ErrorMessage)
+		}
+		w.Int32(c.NodeID)
+		w.String(flex, c.Host)
+		w.Int32(c.Port)
 	}
-	w.Int32(m.NodeID)
-	w.String(false, m.Host)
-	w.Int32(m.Port)
+	w.Tags(flex)
 }
 
 // --- JoinGroup (key 11), versions 0 to 5 ---

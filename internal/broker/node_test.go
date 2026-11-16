@@ -277,7 +277,7 @@ func TestAPIVersions(t *testing.T) {
 		if resp.ErrorCode != 0 || len(resp.APIs) != len(wire.APIs) {
 			t.Fatalf("v%d: %+v", v, resp)
 		}
-		if resp.APIs[0] != (wire.APIRange{Key: wire.KeyProduce, Min: 0, Max: 8}) {
+		if resp.APIs[0] != (wire.APIRange{Key: wire.KeyProduce, Min: 0, Max: 9}) {
 			t.Errorf("v%d: produce advertised as %+v", v, resp.APIs[0])
 		}
 	}
