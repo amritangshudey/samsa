@@ -5,7 +5,7 @@ Written for whoever works on Samsa next, a person or another coding tool.
 merged PR is to update this file (CLAUDE.md says so). If the date below is old,
 check `git log` and `docs/PRODUCTION.md` before trusting it.
 
-**Last updated: 2026-11-16, 02:56 IST.**
+**Last updated: 2026-11-16, 20:45 IST.**
 
 ## 1. Read these first, in this order
 
@@ -57,15 +57,17 @@ check `git log` and `docs/PRODUCTION.md` before trusting it.
 
 ## 4. State on 2026-11-16
 
-**Done and merged to `main`:** items 1 to 13, 18a, 19, 23a, 24, and item 17's
+**Done and merged to `main` (or in PR for item 18):** items 1 to 13, 18a, 18, 19, 23a, 24, and item 17's
 packaging/runbook/security review (see the status table in
 `docs/PRODUCTION.md`), including retention and compaction (ADR 0026, 0027,
 0029), storage damage repair (ADR 0030), fetch from the nearest replica
 (ADR 0031, PR #37), profiles and `samsa doctor` (PR #35), four more fault kinds
 (PR #35), packaging/runbook/security review (PR #36), the 24-hour soak
-(`docs/reports/g5-soak.md`, `docs/soak/run1/`, `docs/soak/run2/`, PR #39), and
+(`docs/reports/g5-soak.md`, `docs/soak/run1/`, `docs/soak/run2/`, PR #39),
 topic IDs and Kafka 3.1 protocol versions (`docs/reports/c18a-topic-ids.md`,
-ADR 0032, format level 4, snapshot v9).
+ADR 0032, format level 4, snapshot v9, PR #40), and KIP-848 consumer groups
+(`docs/reports/c18-kip848.md`, ADR 0033, format level 5, snapshot v10).
+Tags `v0.3.0`, `v0.4.0`, `v0.5.0`, and `v0.6.0` are created and pushed.
 
 **Soak (item 6):** done. Run 1 (before the memory-leak fix, `docs/BUGS.md` L1)
 failed on memory only (peak RSS 173 MiB). Run 2 on the fixed build (`7d877ab`)
@@ -77,11 +79,8 @@ v0.3.0 to v0.6.0 are in `docs/releases/`.
 
 ## 5. Next, in order
 
-1. **18 KIP-848 consumer groups** (ConsumerGroupHeartbeat 68, Describe 69;
-   server-side range and uniform assignors; plus DescribeTopicPartitions 75,
-   OffsetCommit v8, OffsetFetch v6–8, FindCoordinator v3–4, ListOffsets v6–7,
-   Produce v9), then **22 share groups** (76 to 79) after 18; **15
-   transactions**; **23b** fault testing for them.
+1. **22 share groups** (KIP-932: 76 to 79), **15 transactions**, **23b** fault
+   testing for them.
 2. **20 and 21 object storage:** design and prototype first, one design for
    tiered and diskless, behind the pluggable connector (section 3). Open
    questions are in `docs/PRODUCTION.md` section 7.

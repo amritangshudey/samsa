@@ -81,8 +81,8 @@ func (h *harness) commit(c sys.ConnID, generation int32, id string, offset int64
 func (h *harness) committed(c sys.ConnID) int64 {
 	h.t.Helper()
 	var resp wire.OffsetFetchResponse
-	h.call(c, wire.KeyOffsetFetch, 5, &wire.OffsetFetchRequest{GroupID: "g", Topics: []wire.OffsetFetchTopic{{Name: "t", Partitions: []int32{0}}}}, &resp)
-	return resp.Topics[0].Partitions[0].Offset
+	h.call(c, wire.KeyOffsetFetch, 5, &wire.OffsetFetchRequest{Groups: []wire.OffsetFetchGroup{{GroupID: "g", Topics: []wire.OffsetFetchTopic{{Name: "t", Partitions: []int32{0}}}}}}, &resp)
+	return resp.Groups[0].Topics[0].Partitions[0].Offset
 }
 
 func (h *harness) leave(c sys.ConnID, id string) int16 {
@@ -372,17 +372,17 @@ func TestOffsetCommitAndFetchEdges(t *testing.T) {
 	// Asking for everything returns exactly what was committed; a
 	// partition without a commit reads as -1 with no error.
 	var all, one wire.OffsetFetchResponse
-	h.call(1, wire.KeyOffsetFetch, 5, &wire.OffsetFetchRequest{GroupID: "g", AllTopics: true}, &all)
-	if len(all.Topics) != 1 || len(all.Topics[0].Partitions) != 1 || all.Topics[0].Partitions[0] != (wire.OffsetFetchPartition{Index: 1, Offset: 5, LeaderEpoch: 3, Metadata: "note"}) {
+	h.call(1, wire.KeyOffsetFetch, 5, &wire.OffsetFetchRequest{Groups: []wire.OffsetFetchGroup{{GroupID: "g", AllTopics: true}}}, &all)
+	if len(all.Groups[0].Topics) != 1 || len(all.Groups[0].Topics[0].Partitions) != 1 || all.Groups[0].Topics[0].Partitions[0] != (wire.OffsetFetchPartition{Index: 1, Offset: 5, LeaderEpoch: 3, Metadata: "note"}) {
 		t.Fatalf("fetch all: %+v", all)
 	}
-	h.call(1, wire.KeyOffsetFetch, 5, &wire.OffsetFetchRequest{GroupID: "g", Topics: []wire.OffsetFetchTopic{{Name: "t", Partitions: []int32{0}}}}, &one)
-	if p := one.Topics[0].Partitions[0]; p.Offset != -1 || p.ErrorCode != 0 {
+	h.call(1, wire.KeyOffsetFetch, 5, &wire.OffsetFetchRequest{Groups: []wire.OffsetFetchGroup{{GroupID: "g", Topics: []wire.OffsetFetchTopic{{Name: "t", Partitions: []int32{0}}}}}}, &one)
+	if p := one.Groups[0].Topics[0].Partitions[0]; p.Offset != -1 || p.ErrorCode != 0 {
 		t.Fatalf("fetch of an uncommitted partition: %+v", p)
 	}
 	var fc wire.FindCoordinatorResponse
-	h.call(1, wire.KeyFindCoord, 2, &wire.FindCoordinatorRequest{Key: "g"}, &fc)
-	if fc.ErrorCode != 0 || fc.NodeID != 1 || fc.Port != 9092 {
+	h.call(1, wire.KeyFindCoord, 2, &wire.FindCoordinatorRequest{Keys: []string{"g"}}, &fc)
+	if fc.Coordinators[0].ErrorCode != 0 || fc.Coordinators[0].NodeID != 1 || fc.Coordinators[0].Port != 9092 {
 		t.Fatalf("find coordinator: %+v", fc)
 	}
 }

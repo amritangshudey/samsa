@@ -27,8 +27,16 @@ public class GroupMember {
         p.put("value.deserializer", "org.apache.kafka.common.serialization.StringDeserializer");
         p.put("enable.auto.commit", "false");
         p.put("auto.offset.reset", "earliest");
-        p.put("session.timeout.ms", "6000"); // so that a killed member is noticed quickly
-        p.put("heartbeat.interval.ms", "500");
+        String protocol = args.length > 3 ? args[3] : "classic";
+        p.put("group.protocol", protocol);
+        if ("consumer".equals(protocol)) {
+            if (args.length > 4 && !args[4].isEmpty()) {
+                p.put("group.remote.assignor", args[4]);
+            }
+        } else {
+            p.put("session.timeout.ms", "6000"); // so that a killed member is noticed quickly
+            p.put("heartbeat.interval.ms", "500");
+        }
         // With one broker, a broker restart leaves no broker reachable, and the
         // default ("rebootstrap") then empties the client's cached metadata. The
         // group leader sees its topic vanish and rejoins: a client decision that

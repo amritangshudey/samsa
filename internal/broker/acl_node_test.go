@@ -124,22 +124,22 @@ func TestEveryAPIAllowedAndDenied(t *testing.T) {
 		}},
 		{"OffsetFetch, group", []wire.ACL{allowAlice(resGroup, "g", opDescribe), allowAlice(resTopic, "t", opDescribe)}, wire.ErrGroupAuthorizationFailed, func(h *harness) int16 {
 			var r wire.OffsetFetchResponse
-			h.call(user, wire.KeyOffsetFetch, 5, &wire.OffsetFetchRequest{GroupID: "g", Topics: []wire.OffsetFetchTopic{{Name: "t", Partitions: []int32{0}}}}, &r)
-			if r.ErrorCode == 0 && r.Topics[0].Partitions[0].Offset != 1 {
-				h.t.Errorf("allowed offset fetch read %d", r.Topics[0].Partitions[0].Offset)
+			h.call(user, wire.KeyOffsetFetch, 5, &wire.OffsetFetchRequest{Groups: []wire.OffsetFetchGroup{{GroupID: "g", Topics: []wire.OffsetFetchTopic{{Name: "t", Partitions: []int32{0}}}}}}, &r)
+			if r.Groups[0].ErrorCode == 0 && r.Groups[0].Topics[0].Partitions[0].Offset != 1 {
+				h.t.Errorf("allowed offset fetch read %d", r.Groups[0].Topics[0].Partitions[0].Offset)
 			}
-			return r.ErrorCode
+			return r.Groups[0].ErrorCode
 		}},
 		{"OffsetFetch, topic", []wire.ACL{allowAlice(resTopic, "t", opDescribe)}, wire.ErrTopicAuthorizationFailed, func(h *harness) int16 {
 			h.createACLs(admin, allowAlice(resGroup, "g", opDescribe))
 			var r wire.OffsetFetchResponse
-			h.call(user, wire.KeyOffsetFetch, 5, &wire.OffsetFetchRequest{GroupID: "g", Topics: []wire.OffsetFetchTopic{{Name: "t", Partitions: []int32{0}}}}, &r)
-			return r.Topics[0].Partitions[0].ErrorCode
+			h.call(user, wire.KeyOffsetFetch, 5, &wire.OffsetFetchRequest{Groups: []wire.OffsetFetchGroup{{GroupID: "g", Topics: []wire.OffsetFetchTopic{{Name: "t", Partitions: []int32{0}}}}}}, &r)
+			return r.Groups[0].Topics[0].Partitions[0].ErrorCode
 		}},
 		{"FindCoordinator", []wire.ACL{allowAlice(resGroup, "g", opDescribe)}, wire.ErrGroupAuthorizationFailed, func(h *harness) int16 {
 			var r wire.FindCoordinatorResponse
-			h.call(user, wire.KeyFindCoord, 2, &wire.FindCoordinatorRequest{Key: "g"}, &r)
-			return r.ErrorCode
+			h.call(user, wire.KeyFindCoord, 2, &wire.FindCoordinatorRequest{Keys: []string{"g"}}, &r)
+			return r.Coordinators[0].ErrorCode
 		}},
 		{"JoinGroup", []wire.ACL{allowAlice(resGroup, "g", opRead)}, wire.ErrGroupAuthorizationFailed, func(h *harness) int16 {
 			var r wire.JoinGroupResponse

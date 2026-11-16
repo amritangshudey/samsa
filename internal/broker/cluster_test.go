@@ -128,8 +128,8 @@ func TestOnlyTheLeaderServes(t *testing.T) {
 		t.Fatalf("follower metadata: %+v", md)
 	}
 	var fc wire.FindCoordinatorResponse
-	follower.call(1, wire.KeyFindCoord, 2, &wire.FindCoordinatorRequest{Key: "g"}, &fc)
-	if fc.ErrorCode != 0 || fc.NodeID != 1 || fc.Host != "host1" {
+	follower.call(1, wire.KeyFindCoord, 2, &wire.FindCoordinatorRequest{Keys: []string{"g"}}, &fc)
+	if fc.Coordinators[0].ErrorCode != 0 || fc.Coordinators[0].NodeID != 1 || fc.Coordinators[0].Host != "host1" {
 		t.Fatalf("follower FindCoordinator: %+v", fc)
 	}
 	var pr wire.ProduceResponse
@@ -161,7 +161,7 @@ func TestOnlyTheLeaderServes(t *testing.T) {
 	var oc wire.OffsetCommitResponse
 	follower.call(1, wire.KeyOffsetCommit, 7, &wire.OffsetCommitRequest{GroupID: "g", GenerationID: -1, Topics: []wire.OffsetCommitTopic{{Name: "t", Partitions: []wire.OffsetCommitPartition{{Index: 0, Offset: 1}}}}}, &oc)
 	var of wire.OffsetFetchResponse
-	follower.call(1, wire.KeyOffsetFetch, 5, &wire.OffsetFetchRequest{GroupID: "g", Topics: []wire.OffsetFetchTopic{{Name: "t", Partitions: []int32{0}}}}, &of)
+	follower.call(1, wire.KeyOffsetFetch, 5, &wire.OffsetFetchRequest{Groups: []wire.OffsetFetchGroup{{GroupID: "g", Topics: []wire.OffsetFetchTopic{{Name: "t", Partitions: []int32{0}}}}}}, &of)
 	for name, got := range map[string][2]int16{
 		"Produce":       {pr.Topics[0].Partitions[0].ErrorCode, wire.ErrNotLeaderOrFollower},
 		"Fetch":         {fr.Topics[0].Partitions[0].ErrorCode, wire.ErrNotLeaderOrFollower},
@@ -172,8 +172,8 @@ func TestOnlyTheLeaderServes(t *testing.T) {
 		"Heartbeat":     {hb.ErrorCode, wire.ErrNotCoordinator},
 		"LeaveGroup":    {lg.ErrorCode, wire.ErrNotCoordinator},
 		"OffsetCommit":  {oc.Topics[0].Partitions[0].ErrorCode, wire.ErrNotCoordinator},
-		"OffsetFetch":   {of.ErrorCode, wire.ErrNotCoordinator},
-		"OffsetFetch/p": {of.Topics[0].Partitions[0].ErrorCode, wire.ErrNotCoordinator},
+		"OffsetFetch":   {of.Groups[0].ErrorCode, wire.ErrNotCoordinator},
+		"OffsetFetch/p": {of.Groups[0].Topics[0].Partitions[0].ErrorCode, wire.ErrNotCoordinator},
 	} {
 		if got[0] != got[1] {
 			t.Errorf("%s on a follower: error code %d, want %d", name, got[0], got[1])

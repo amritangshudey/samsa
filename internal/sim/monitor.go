@@ -58,6 +58,10 @@ func (w *world) monitor(inc *incarnation) {
 		return
 	}
 	w.checkRot(nd, r.Recovering())
+	if err := inc.n.ConsumerGroupCheck(); err != nil {
+		w.fail("%v", err)
+		return
+	}
 	nd.term, nd.vote, nd.voted = term, vote, voted
 	if serving := inc.n.Serving(); serving != nd.serving {
 		nd.serving = serving

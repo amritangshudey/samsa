@@ -35,6 +35,7 @@ type softGroup struct {
 	// was applied. The next generation is formed without them.
 	gone      map[string]bool
 	sessions  map[string]sys.TimerID // member id to its session timer
+	revoke    map[string]sys.TimerID // consumer-protocol member id to its revoke timer
 	syncs     []*heldSync
 	syncing   bool        // a GroupAssignment is in the log, not yet applied
 	syncTimer sys.TimerID // deadline for the leader's SyncGroup; 0 if unarmed
@@ -104,7 +105,7 @@ func ms(v int32) time.Duration { return time.Duration(v) * time.Millisecond }
 func (n *Node) soft(name string) *softGroup {
 	sg := n.groups[name]
 	if sg == nil {
-		sg = &softGroup{name: name, issued: map[string]sys.TimerID{}, gone: map[string]bool{}, sessions: map[string]sys.TimerID{}}
+		sg = &softGroup{name: name, issued: map[string]sys.TimerID{}, gone: map[string]bool{}, sessions: map[string]sys.TimerID{}, revoke: map[string]sys.TimerID{}}
 		n.groups[name] = sg
 	}
 	return sg
@@ -115,6 +116,10 @@ func (n *Node) soft(name string) *softGroup {
 func (n *Node) startGroups() {
 	for _, name := range sortedKeys(n.st.groups) {
 		g := n.st.groups[name]
+		if g.cg != nil && len(g.cg.members) > 0 {
+			n.startConsumerGroups(name, g.cg)
+			continue
+		}
 		if len(g.members) == 0 {
 			continue
 		}
@@ -424,18 +429,24 @@ func (sg *softGroup) size(g *group) int {
 }
 
 func (n *Node) findCoordinator(c *conn, req *wire.FindCoordinatorRequest) *wire.FindCoordinatorResponse {
-	if req.KeyType != 0 { // only groups have a coordinator here
-		return &wire.FindCoordinatorResponse{ErrorCode: wire.ErrCoordinatorNotAvailable, NodeID: -1}
-	}
-	if !n.may(c, opDescribe, resGroup, req.Key) {
-		return &wire.FindCoordinatorResponse{ErrorCode: wire.ErrGroupAuthorizationFailed, NodeID: -1}
-	}
-	// The leader coordinates every group. Any node can say who that is.
+	resp := &wire.FindCoordinatorResponse{}
 	p, ok := n.leader()
-	if !ok {
-		return &wire.FindCoordinatorResponse{ErrorCode: wire.ErrCoordinatorNotAvailable, NodeID: -1}
+	for _, key := range req.Keys {
+		var r wire.FindCoordinatorResult
+		r.Key, r.NodeID = key, -1
+		switch {
+		case req.KeyType != wire.KeyTypeGroup: // only groups have a coordinator here
+			r.ErrorCode = wire.ErrCoordinatorNotAvailable
+		case !n.may(c, opDescribe, resGroup, key):
+			r.ErrorCode = wire.ErrGroupAuthorizationFailed
+		case !ok:
+			r.ErrorCode = wire.ErrCoordinatorNotAvailable
+		default:
+			r.NodeID, r.Host, r.Port = p.ID, p.Host, p.Port
+		}
+		resp.Coordinators = append(resp.Coordinators, r)
 	}
-	return &wire.FindCoordinatorResponse{NodeID: p.ID, Host: p.Host, Port: p.Port}
+	return resp
 }
 
 func (n *Node) joinGroup(c *conn, h wire.RequestHeader, req *wire.JoinGroupRequest) {
@@ -461,6 +472,10 @@ func (n *Node) joinGroup(c *conn, h wire.RequestHeader, req *wire.JoinGroupReque
 		return
 	}
 	g := n.st.group(req.GroupID)
+	if g.cg != nil && len(g.cg.members) > 0 {
+		fail(wire.ErrInconsistentGroupProtocol)
+		return
+	}
 	session := ms(req.SessionTimeoutMs)
 	switch {
 	case session < n.cfg.MinSessionTimeout || session > n.cfg.MaxSessionTimeout:
@@ -665,8 +680,15 @@ func (n *Node) offsetCommit(c *conn, h wire.RequestHeader, req *wire.OffsetCommi
 		for _, code := range accepted {
 			*code = res.errCode
 		}
-		if sg := n.groups[req.GroupID]; res.errCode == wire.ErrNone && sg != nil && sg.active(n.st.group(req.GroupID), req.MemberID) {
-			n.touch(sg, n.st.group(req.GroupID).member(req.MemberID)) // a commit shows the member is alive
+		if sg := n.groups[req.GroupID]; res.errCode == wire.ErrNone && sg != nil {
+			g := n.st.group(req.GroupID)
+			if sg.active(g, req.MemberID) {
+				n.touch(sg, g.member(req.MemberID)) // a commit shows the member is alive
+			} else if g.cg != nil {
+				if m := g.cg.member(req.MemberID); m != nil {
+					n.cgTouch(sg, m)
+				}
+			}
 		}
 		n.respond(c, h, resp)
 	})
@@ -676,38 +698,49 @@ func (n *Node) offsetCommit(c *conn, h wire.RequestHeader, req *wire.OffsetCommi
 // topics the client may not describe are refused by name and left out of
 // an all-topics answer (KafkaApis.handleOffsetFetchRequest).
 func (n *Node) offsetFetch(c *conn, req *wire.OffsetFetchRequest) *wire.OffsetFetchResponse {
-	offsets := n.st.group(req.GroupID).offsets
 	resp := &wire.OffsetFetchResponse{}
-	groupOK := n.may(c, opDescribe, resGroup, req.GroupID)
-	if !groupOK {
-		resp.ErrorCode = wire.ErrGroupAuthorizationFailed // v2+; v1 sees it per partition
-	}
-	topics := req.Topics
-	if req.AllTopics {
-		topics = nil
-		for _, name := range sortedKeys(offsets) {
-			if groupOK && n.may(c, opDescribe, resTopic, name) {
-				topics = append(topics, wire.OffsetFetchTopic{Name: name, Partitions: sortedKeys(offsets[name])})
+	for _, fg := range req.Groups {
+		g := n.st.group(fg.GroupID)
+		offsets := g.offsets
+		gr := wire.OffsetFetchGroupResponse{GroupID: fg.GroupID}
+		groupOK := n.may(c, opDescribe, resGroup, fg.GroupID)
+		if !groupOK {
+			gr.ErrorCode = wire.ErrGroupAuthorizationFailed // v2+; v1 sees it per partition
+		} else if fg.MemberID != "" && fg.MemberEpoch >= 0 && g.cg != nil {
+			if code := g.cg.checkCommit(fg.MemberEpoch, fg.MemberID, n.st.noFencing); code != wire.ErrNone {
+				gr.ErrorCode = code
+				resp.Groups = append(resp.Groups, gr)
+				continue
 			}
 		}
-	}
-	for _, t := range topics {
-		tr := wire.OffsetFetchTopicResponse{Name: t.Name}
-		topicOK := n.may(c, opDescribe, resTopic, t.Name)
-		for _, index := range t.Partitions {
-			// No commit is not an error: the consumer falls back to its
-			// reset policy.
-			pr := wire.OffsetFetchPartition{Index: index, Offset: -1, LeaderEpoch: -1}
-			if !groupOK {
-				pr.ErrorCode = wire.ErrGroupAuthorizationFailed
-			} else if !topicOK {
-				pr.ErrorCode = wire.ErrTopicAuthorizationFailed
-			} else if o, ok := offsets[t.Name][index]; ok {
-				pr.Offset, pr.LeaderEpoch, pr.Metadata = o.offset, o.leaderEpoch, o.metadata
+		topics := fg.Topics
+		if fg.AllTopics {
+			topics = nil
+			for _, name := range sortedKeys(offsets) {
+				if groupOK && n.may(c, opDescribe, resTopic, name) {
+					topics = append(topics, wire.OffsetFetchTopic{Name: name, Partitions: sortedKeys(offsets[name])})
+				}
 			}
-			tr.Partitions = append(tr.Partitions, pr)
 		}
-		resp.Topics = append(resp.Topics, tr)
+		for _, t := range topics {
+			tr := wire.OffsetFetchTopicResponse{Name: t.Name}
+			topicOK := n.may(c, opDescribe, resTopic, t.Name)
+			for _, index := range t.Partitions {
+				// No commit is not an error: the consumer falls back to its
+				// reset policy.
+				pr := wire.OffsetFetchPartition{Index: index, Offset: -1, LeaderEpoch: -1}
+				if !groupOK {
+					pr.ErrorCode = wire.ErrGroupAuthorizationFailed
+				} else if !topicOK {
+					pr.ErrorCode = wire.ErrTopicAuthorizationFailed
+				} else if o, ok := offsets[t.Name][index]; ok {
+					pr.Offset, pr.LeaderEpoch, pr.Metadata = o.offset, o.leaderEpoch, o.metadata
+				}
+				tr.Partitions = append(tr.Partitions, pr)
+			}
+			gr.Topics = append(gr.Topics, tr)
+		}
+		resp.Groups = append(resp.Groups, gr)
 	}
 	return resp
 }

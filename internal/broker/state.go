@@ -47,6 +47,9 @@ const (
 	cmdRelocate     byte = 17
 	// Key compaction (docs/design/c2b-compaction.md).
 	cmdCompact byte = 18
+	// The consumer group protocol (docs/design/c18-kip848.md).
+	cmdCGBeat   byte = 19
+	cmdCGRemove byte = 20
 )
 
 // formatLevel is the highest cluster format level this build reads and
@@ -55,9 +58,11 @@ const (
 // topic configurations, relocated batches and state snapshot version 8;
 // level 3 compaction: cmdCompact, and the config values compact,
 // delete.retention.ms and min.compaction.lag.ms; level 4 topic IDs in
-// cmdCreateTopic, cmdDeleteTopic and state snapshot version 9 (ADR 0032).
+// cmdCreateTopic, cmdDeleteTopic and state snapshot version 9 (ADR 0032);
+// level 5 groups of the consumer protocol: cmdCGBeat, cmdCGRemove and
+// state snapshot version 10 (ADR 0033).
 // Raise it with every change to what the log or a snapshot may hold.
-const formatLevel = 4
+const formatLevel = 5
 
 // errBadCommand marks a command in the log that cannot be decoded. The log
 // is checksummed, so this means a bug or a newer on-disk format, and the
@@ -427,6 +432,8 @@ type state struct {
 	// bugs from Config.
 	keepOffsetsOnDelete, trimResetsStart, reuseTopicID bool
 	deletedIDs                                         map[string]wire.UUID
+	// assignEarly is Config.UnsafeAssignBeforeRevoke, a deliberate bug.
+	assignEarly bool
 	// expired counts the producers this replica forgot since it started or
 	// restored a snapshot. Diagnostic only: not hashed, not in snapshots.
 	expired int
@@ -479,6 +486,9 @@ type group struct {
 	members      []*member // in the order of the GroupGeneration command
 	assigned     bool
 	offsets      map[string]map[int32]committedOffset // topic, then partition
+	// cg is set for a group of the consumer protocol, which has no
+	// classic members, and for one that had been of it and is empty.
+	cg *cgroup
 }
 
 // member returns the member with the given id, or nil.
@@ -515,6 +525,9 @@ func (s *state) forWrite(name string) *group {
 // apply, so the generation it compares with is the one current at the
 // commit's position in the log: this is what fences a zombie (G4).
 func (g *group) checkCommit(generation int32, memberID string, noFencing bool) int16 {
+	if g.cg != nil && len(g.cg.members) > 0 {
+		return g.cg.checkCommit(generation, memberID, noFencing)
+	}
 	if generation == -1 && memberID == "" {
 		// A consumer that assigns partitions itself. It may not write
 		// under a group that has members.
@@ -607,6 +620,8 @@ func (s *state) partition(name string, index int32) *partition {
 // proposed it.
 type result struct {
 	errCode    int16
+	errMsg     string // CGBeat: why
+	cg         *wire.ConsumerGroupHeartbeatResponse // CGBeat: the answer
 	applied    bool       // Compact: the batch was replaced
 	baseOffset int64      // Append: offset assigned to the batch's first record; DeleteRecords: the new start
 	topicID    wire.UUID  // CreateTopic: the topic's UUID
@@ -747,6 +762,9 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 			return result{errCode: wire.ErrIllegalGeneration}, nil
 		}
 		g := s.forWrite(name)
+		if g.cg != nil && len(g.cg.members) > 0 {
+			return result{errCode: wire.ErrInconsistentGroupProtocol}, nil
+		}
 		next.offsets = g.offsets
 		*g = next
 		return result{}, nil
@@ -1056,6 +1074,20 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 		}
 		return result{}, nil
 
+	case cmdCGBeat:
+		b, ok := decodeCGBeat(r)
+		if !ok || s.level < 5 {
+			return result{}, fmt.Errorf("%w: consumer group heartbeat at index %d", errBadCommand, index)
+		}
+		return s.applyCGBeat(index, b)
+
+	case cmdCGRemove:
+		group, member, epoch := r.String(false), r.String(false), r.Int32()
+		if r.Err() != nil || r.Len() != 0 || s.level < 5 {
+			return result{}, fmt.Errorf("%w: consumer group removal at index %d", errBadCommand, index)
+		}
+		return s.applyCGRemove(group, member, epoch), nil
+
 	case cmdGroupAssignment:
 		name, generation := r.String(false), r.Int32()
 		assignments := wire.Array(r, false, func() wire.MemberAssignment {
@@ -1157,6 +1189,25 @@ func (s *state) hash() uint32 {
 		}
 		if g.assigned {
 			add(1)
+		}
+		if cg := g.cg; cg != nil { // absent before level 5: older hashes unchanged
+			str("cg", cg.assignor)
+			add(int64(cg.epoch), int64(cg.targetEpoch), int64(len(cg.members)))
+			for _, m := range cg.members {
+				str(m.id, m.rack, m.assignor)
+				add(int64(m.epoch), int64(m.prevEpoch), int64(m.rebalanceMs), int64(len(m.subscribed)), int64(len(m.owned)), int64(len(m.target)))
+				for _, t := range m.subscribed {
+					str(t)
+				}
+				for _, p := range m.owned {
+					sum = crc32.Update(sum, table, p.id[:])
+					add(int64(p.part))
+				}
+				for _, p := range m.target {
+					sum = crc32.Update(sum, table, p.id[:])
+					add(int64(p.part))
+				}
+			}
 		}
 		for _, topic := range sortedKeys(g.offsets) {
 			str(topic)

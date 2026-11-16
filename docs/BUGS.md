@@ -305,6 +305,13 @@ for how much that is worth.
   while `Min: 1` continues to reject version 0 requests, and `scram.Server.Final`
   accepts both `r=<cnonce><snonce>` and `r=<cnonce><cnonce><snonce>`.
 
+### C4. DescribeTopicPartitions null ELR lists caused NullPointerException in Kafka 4.4.0 CLI (C18, before merge)
+
+- **Test:** `TestJavaKIP848ConsumerGroup` (`kafka-consumer-groups.sh --describe`).
+- **Symptom:** `kafka-consumer-groups.sh` crashed with `NullPointerException: Cannot invoke "java.util.List.stream()" because the return value of "DescribeTopicPartitionsResponsePartition.eligibleLeaderReplicas()" is null`.
+- **Root cause:** Although `DescribeTopicPartitionsResponse.json` marks `EligibleLeaderReplicas` and `LastKnownElr` as `nullableVersions: "0+"`, Kafka 4.4.0's `DescribeTopicPartitionsResponse.partitionToTopicPartitionInfo` calls `.stream()` on `eligibleLeaderReplicas()` without a null check.
+- **Fix:** `DescribeTopicPartitionsResponse.Encode` writes empty arrays (`ArrayLen(true, 0)`) instead of null (`-1`) for `EligibleLeaderReplicas` and `LastKnownElr`.
+
 ## Bugs found by the soak
 
 ### L1. Raft kept one term per entry ever written (G5)
@@ -831,3 +838,10 @@ would happen against Kafka too (not tested against Kafka).
   request ends without an answer, and `checkCompactedFinal` tracks
   `oldTombUntil[k]`, the latest time an unacknowledged old tombstone of key `k`
   remained in flight (`oldTombUntil[k] >= r.sent`).
+
+### M21. Un-snapshotted `topicsVersion` caused S4 state divergence after snapshot restore (C18, before merge)
+
+- **Seeds:** 13, 105, 1946.
+- **Reported as:** `S4: nodes 1 and 2 applied the same 59 entries and differ: state hash 17e448e7 and 5e1bdbee`.
+- **Root cause:** `state.topicsVersion` and `cgroup.seen` were not persisted in snapshots, so a node restoring from a snapshot started with `topicsVersion = 0` and `cg.seen = 0`. If a topic had been created before the snapshot and no `cmdCGBeat` ran before the snapshot, the node replaying from the log saw `cg.seen != s.topicsVersion` on the next `cmdCGBeat` while the snapshot-restored node saw `cg.seen == s.topicsVersion` and skipped `retarget`.
+- **Fix:** removed `topicsVersion` and `cg.seen`; `cgNeedsApply` and `applyCGBeat` compare `cg.meta` directly against `metaOf(s.subscribedTopics(cg))`.

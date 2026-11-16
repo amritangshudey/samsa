@@ -318,6 +318,93 @@ func TestJavaConsumerGroup(t *testing.T) {
 	}
 }
 
+// TestJavaKIP848ConsumerGroup exercises the KIP-848 consumer group protocol
+// (group.protocol=consumer) with the official Java 4.4.0 client and
+// kafka-consumer-groups.sh --describe (ConsumerGroupDescribe 69 +
+// DescribeTopicPartitions 75).
+func TestJavaKIP848ConsumerGroup(t *testing.T) {
+	java, jars := javaAndJars(t)
+	bin, javaHome := kafkaTools(t)
+	b := startBroker(t)
+	const topic, parts, group = "j848", 4, "java-kip848-group"
+	createTopic(t, franz(t, b), topic, parts)
+
+	l := newLedger()
+	start := func(name, assignor string) *exec.Cmd {
+		cmd := exec.Command(java, "-cp", jars, "java/GroupMember.java", b.addr, topic, group, "consumer", assignor)
+		out, err := cmd.StdoutPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd.Stderr = os.Stderr
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
+		go func() {
+			for sc := bufio.NewScanner(out); sc.Scan(); {
+				f := strings.Fields(sc.Text())
+				switch {
+				case len(f) == 2 && f[0] == "ASSIGNED":
+					l.mu.Lock()
+					var n int
+					fmt.Sscan(f[1], &n)
+					l.assigned[name] = n
+					l.mu.Unlock()
+				case len(f) == 4 && f[0] == "REC":
+					var p int32
+					var off int64
+					fmt.Sscan(f[1], &p)
+					fmt.Sscan(f[2], &off)
+					l.record(name, p, off)
+				case len(f) == 1 && f[0] == "COMMITTED":
+					l.mu.Lock()
+					l.idle[name] = true
+					l.mu.Unlock()
+				}
+			}
+		}()
+		return cmd
+	}
+	start("A", "uniform")
+	victim := start("B", "uniform")
+	l.wait(t, "both KIP-848 Java members to hold two partitions", func() bool { return l.assigned["A"] == 2 && l.assigned["B"] == 2 })
+
+	produceN(t, b, topic, parts, 0, 200)
+	l.wait(t, "the first 200 records, committed", func() bool { return len(l.by) == 200 && l.idle["A"] && l.idle["B"] })
+	if a, bb := l.readBy("A"), l.readBy("B"); a != 100 || bb != 100 {
+		t.Fatalf("records were not shared evenly: A read %d, B read %d", a, bb)
+	}
+
+	// kafka-consumer-groups.sh --describe uses ConsumerGroupDescribe (69) and DescribeTopicPartitions (75).
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cli := exec.CommandContext(ctx, bin+"/kafka-consumer-groups.sh", "--bootstrap-server", b.addr, "--describe", "--group", group)
+	cli.Env = append(os.Environ(), "JAVA_HOME="+javaHome)
+	out, err := cli.CombinedOutput()
+	if err != nil {
+		t.Fatalf("kafka-consumer-groups.sh --describe: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), topic) {
+		t.Fatalf("kafka-consumer-groups.sh --describe output missing %s:\n%s", topic, out)
+	}
+
+	victim.Process.Kill() // SIGKILL: triggers server-side session expiry (45s default)
+	l.mu.Lock()
+	l.idle["A"] = false
+	l.mu.Unlock()
+	produceN(t, b, topic, parts, 200, 200)
+	l.wait(t, "A to take over all partitions and read the rest", func() bool { return len(l.by) == 400 && l.idle["A"] })
+	if a := l.readBy("A"); a != 300 {
+		t.Fatalf("A read %d records in total, want 300", a)
+	}
+
+	b.kill()
+	b.start()
+	produceN(t, b, topic, parts, 400, 100)
+	l.wait(t, "A to continue after the broker restart", func() bool { return len(l.by) == 500 })
+}
+
 // kcat (librdkafka) as a group member: it reads everything, commits on
 // exit, and a second run in the same group starts where the first stopped.
 func TestKcatConsumerGroup(t *testing.T) {

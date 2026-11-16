@@ -135,6 +135,11 @@ type Config struct {
 	// group member may ask for. Defaults 6s and 30m, as in Kafka.
 	MinSessionTimeout time.Duration
 	MaxSessionTimeout time.Duration
+	// ConsumerHeartbeatInterval and ConsumerSessionTimeout are the
+	// broker-side intervals for the consumer group protocol (KIP-848).
+	// Defaults 5s and 45s, as in Kafka.
+	ConsumerHeartbeatInterval time.Duration
+	ConsumerSessionTimeout    time.Duration
 	// MaxGroupSize bounds the members of one consumer group. Default 1000.
 	MaxGroupSize int
 	// Logger receives structured logs. Default: discard.
@@ -180,6 +185,10 @@ type Config struct {
 	// UnsafeReuseTopicID gives a recreated topic the UUID of the deleted
 	// topic of the same name (design C18a).
 	UnsafeReuseTopicID bool
+	// UnsafeAssignBeforeRevoke assigns a partition from the target to a
+	// new member before the previous owner has confirmed revoking it
+	// (design C18).
+	UnsafeAssignBeforeRevoke bool
 }
 
 func (c Config) withDefaults() Config {
@@ -233,6 +242,12 @@ func (c Config) withDefaults() Config {
 	}
 	if c.MaxSessionTimeout <= 0 {
 		c.MaxSessionTimeout = 30 * time.Minute
+	}
+	if c.ConsumerHeartbeatInterval <= 0 {
+		c.ConsumerHeartbeatInterval = 5 * time.Second
+	}
+	if c.ConsumerSessionTimeout <= 0 {
+		c.ConsumerSessionTimeout = 45 * time.Second
 	}
 	if c.MaxGroupSize <= 0 {
 		c.MaxGroupSize = 1000
@@ -392,6 +407,7 @@ func (n *Node) adopt(st *state) {
 	st.noFencing, st.noSequences = n.cfg.UnsafeNoFencing, n.cfg.UnsafeNoSequenceCheck
 	st.keepOffsetsOnDelete, st.trimResetsStart = n.cfg.UnsafeKeepOffsetsOnDelete, n.cfg.UnsafeTrimResetsStart
 	st.reuseTopicID = n.cfg.UnsafeReuseTopicID
+	st.assignEarly = n.cfg.UnsafeAssignBeforeRevoke
 	n.st = st
 	n.snapStart = st.logStart // every state adopted is a snapshot's
 	// A snapshot older than version 8 has no batch sizes; the cleaner's
@@ -666,7 +682,9 @@ func (n *Node) settle() error {
 		// A read met damage: record it, so that the restart repairs it
 		// wherever it lies (scrub.go).
 		n.damageNoted = true
-		_ = n.raft.MarkDamage(-1) // a failure leaves the node to stop, as it would
+		if err := n.raft.MarkDamage(-1); err != nil {
+			return err
+		}
 	}
 	return n.fatal
 }
@@ -1082,6 +1100,15 @@ func (n *Node) dispatch(c *conn, frame []byte) {
 	case wire.KeyDescribeClientQuotas:
 		m := &wire.DescribeClientQuotasRequest{}
 		req, handle = m, func() { n.respond(c, h, n.describeQuotas(c)) }
+	case wire.KeyConsumerGroupHeartbeat:
+		m := &wire.ConsumerGroupHeartbeatRequest{}
+		req, handle = m, func() { n.consumerHeartbeat(c, h, m) }
+	case wire.KeyConsumerGroupDescribe:
+		m := &wire.ConsumerGroupDescribeRequest{}
+		req, handle = m, func() { n.respond(c, h, n.consumerGroupDescribe(c, m)) }
+	case wire.KeyDescribeTopicPartitions:
+		m := &wire.DescribeTopicPartitionsRequest{}
+		req, handle = m, func() { n.respond(c, h, n.describeTopicPartitions(c, m)) }
 	default: // unreachable while wire.APIs and this switch agree
 		n.drop(c, fmt.Sprintf("no handler for key %d", h.Key))
 		return

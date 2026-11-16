@@ -21,6 +21,12 @@ const (
 	KeyDescribeConfigs  int16 = 32
 	KeyCreatePartitions int16 = 37
 	KeyDescribeCluster  int16 = 60
+	// KeyConsumerGroupHeartbeat and KeyConsumerGroupDescribe are the
+	// consumer group protocol of KIP-848 (C18); KeyDescribeTopicPartitions
+	// is how tools read topic metadata a page at a time.
+	KeyConsumerGroupHeartbeat  int16 = 68
+	KeyConsumerGroupDescribe   int16 = 69
+	KeyDescribeTopicPartitions int16 = 75
 	// KeyIncrementalAlterConfigs sets topic configurations (C2).
 	KeyIncrementalAlterConfigs int16 = 44
 	KeyAPIVersions             int16 = 18
@@ -68,6 +74,12 @@ const (
 	ErrUnknownMemberID             int16 = 25
 	ErrInvalidSessionTimeout       int16 = 26
 	ErrRebalanceInProgress         int16 = 27
+	ErrCoordinatorLoadInProgress   int16 = 14
+	ErrGroupIDNotFound             int16 = 69
+	ErrFencedMemberEpoch           int16 = 110
+	ErrUnreleasedInstanceID        int16 = 111
+	ErrUnsupportedAssignor         int16 = 112
+	ErrStaleMemberEpoch            int16 = 113
 	ErrTopicAuthorizationFailed    int16 = 29
 	ErrGroupAuthorizationFailed    int16 = 30
 	ErrClusterAuthorizationFailed  int16 = 31
@@ -120,13 +132,13 @@ type API struct {
 // APIs lists every supported API in ascending key order. ADR 0006 explains
 // the ranges.
 var APIs = []API{
-	{Key: KeyProduce, Min: 3, Max: 8, AdvertisedMin: 0, FlexFrom: 9},
+	{Key: KeyProduce, Min: 3, Max: 9, AdvertisedMin: 0, FlexFrom: 9},
 	{Key: KeyFetch, Min: 4, Max: 13, AdvertisedMin: 4, FlexFrom: 12},
-	{Key: KeyListOffsets, Min: 1, Max: 5, AdvertisedMin: 1, FlexFrom: 6},
+	{Key: KeyListOffsets, Min: 1, Max: 7, AdvertisedMin: 1, FlexFrom: 6},
 	{Key: KeyMetadata, Min: 1, Max: 12, AdvertisedMin: 1, FlexFrom: 9},
-	{Key: KeyOffsetCommit, Min: 2, Max: 7, AdvertisedMin: 2, FlexFrom: 8},
-	{Key: KeyOffsetFetch, Min: 1, Max: 5, AdvertisedMin: 1, FlexFrom: 6},
-	{Key: KeyFindCoord, Min: 0, Max: 2, AdvertisedMin: 0, FlexFrom: 3},
+	{Key: KeyOffsetCommit, Min: 2, Max: 9, AdvertisedMin: 2, FlexFrom: 8},
+	{Key: KeyOffsetFetch, Min: 1, Max: 9, AdvertisedMin: 1, FlexFrom: 6},
+	{Key: KeyFindCoord, Min: 0, Max: 4, AdvertisedMin: 0, FlexFrom: 3},
 	{Key: KeyJoinGroup, Min: 0, Max: 5, AdvertisedMin: 0, FlexFrom: 6},
 	{Key: KeyHeartbeat, Min: 0, Max: 3, AdvertisedMin: 0, FlexFrom: 4},
 	{Key: KeyLeaveGroup, Min: 0, Max: 3, AdvertisedMin: 0, FlexFrom: 4},
@@ -152,6 +164,9 @@ var APIs = []API{
 	{Key: KeyAddRaftVoter, Min: 0, Max: 1, AdvertisedMin: 0, FlexFrom: 0},
 	{Key: KeyRemoveRaftVoter, Min: 0, Max: 0, AdvertisedMin: 0, FlexFrom: 0},
 	{Key: KeyDescribeCluster, Min: 0, Max: 2, AdvertisedMin: 0, FlexFrom: 0},
+	{Key: KeyConsumerGroupHeartbeat, Min: 0, Max: 1, AdvertisedMin: 0, FlexFrom: 0},
+	{Key: KeyConsumerGroupDescribe, Min: 0, Max: 1, AdvertisedMin: 0, FlexFrom: 0},
+	{Key: KeyDescribeTopicPartitions, Min: 0, Max: 0, AdvertisedMin: 0, FlexFrom: 0},
 }
 
 // LookupAPI returns the entry for key.
