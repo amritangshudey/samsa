@@ -210,8 +210,8 @@ func (cl *client) sgFetch() {
 		MaxWaitMs:         20,
 		MinBytes:          1,
 		MaxBytes:          1 << 20,
-		MaxRecords:        10,
-		BatchSize:         10,
+		MaxRecords:        50,
+		BatchSize:         50,
 	}
 	tp := TP{catalogue[0].name, 0}
 	part := wire.ShareFetchPartition{Index: 0}
