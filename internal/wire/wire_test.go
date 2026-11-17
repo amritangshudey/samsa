@@ -157,7 +157,7 @@ func messages() map[string]struct {
 			func() Message { return &ProduceResponse{} }},
 		"FetchRequest": {KeyFetch, &FetchRequest{MaxWaitMs: 500, MinBytes: 1, MaxBytes: 1 << 20, RackID: "a", Topics: []FetchTopic{{TopicID: UUID{1, 2, 3}, Partitions: []FetchPartition{{Index: 0, Offset: 5, MaxBytes: 1 << 16}}}}},
 			func() Message { return &FetchRequest{} }},
-		"FetchResponse": {KeyFetch, &FetchResponse{Topics: []FetchTopicResponse{{TopicID: UUID{1, 2, 3}, Partitions: []FetchPartitionResponse{{Index: 0, HighWatermark: 9, Records: []byte("batches")}, {Index: 1, ErrorCode: 1, PreferredReadReplica: 3, HasPreferred: true}}}}},
+		"FetchResponse": {KeyFetch, &FetchResponse{Topics: []FetchTopicResponse{{TopicID: UUID{1, 2, 3}, Partitions: []FetchPartitionResponse{{Index: 0, HighWatermark: 9, LastStableOffset: 9, HasLastStableOffset: true, Records: []byte("batches")}, {Index: 1, ErrorCode: 1, HasLastStableOffset: true, PreferredReadReplica: 3, HasPreferred: true}}}}},
 			func() Message { return &FetchResponse{} }},
 		"ListOffsetsRequest": {KeyListOffsets, &ListOffsetsRequest{Topics: []ListOffsetsTopic{{Name: "a", Partitions: []ListOffsetsPartition{{Index: 0, Timestamp: TimestampEarliest}}}}},
 			func() Message { return &ListOffsetsRequest{} }},
@@ -254,12 +254,34 @@ func messages() map[string]struct {
 			func() Message { return &SyncGroupRequest{} }},
 		"SyncGroupResponse": {KeySyncGroup, &SyncGroupResponse{ErrorCode: 22, Assignment: []byte("a")},
 			func() Message { return &SyncGroupResponse{} }},
-		"InitProducerIdRequest": {KeyInitProducerID, &InitProducerIDRequest{},
+		"InitProducerIdRequest": {KeyInitProducerID, &InitProducerIDRequest{TransactionTimeoutMs: 1<<31 - 1, ProducerID: -1, ProducerEpoch: -1},
 			func() Message { return &InitProducerIDRequest{} }},
-		"InitProducerIdRequestTransactional": {KeyInitProducerID, &InitProducerIDRequest{Transactional: true},
+		"InitProducerIdRequestTransactional": {KeyInitProducerID, &InitProducerIDRequest{Transactional: true, TransactionTimeoutMs: 1<<31 - 1, ProducerID: -1, ProducerEpoch: -1},
 			func() Message { return &InitProducerIDRequest{} }},
 		"InitProducerIdResponse": {KeyInitProducerID, &InitProducerIDResponse{ErrorCode: 42, ProducerID: 1<<47 | 5, ProducerEpoch: 3},
 			func() Message { return &InitProducerIDResponse{} }},
+		"AddPartitionsToTxnRequest": {KeyAddPartitionsToTxn, &AddPartitionsToTxnRequest{Transactions: []AddPartitionsToTxnTransaction{{
+			TransactionalID: "tx", ProducerID: 7, ProducerEpoch: 1,
+			Topics: []AddPartitionsToTxnTopic{{Name: "t", Partitions: []int32{0, 2}}},
+		}}}, func() Message { return &AddPartitionsToTxnRequest{} }},
+		"AddPartitionsToTxnResponse": {KeyAddPartitionsToTxn, &AddPartitionsToTxnResponse{ResultsByTransaction: []AddPartitionsToTxnResult{{
+			TopicResults: []AddPartitionsToTxnTopicResult{{Name: "t", Partitions: []AddPartitionsToTxnPartitionResult{{PartitionIndex: 0, ErrorCode: 0}}}},
+		}}}, func() Message { return &AddPartitionsToTxnResponse{} }},
+		"AddOffsetsToTxnRequest": {KeyAddOffsetsToTxn, &AddOffsetsToTxnRequest{TransactionalID: "tx", ProducerID: 7, ProducerEpoch: 1, GroupID: "g"},
+			func() Message { return &AddOffsetsToTxnRequest{} }},
+		"AddOffsetsToTxnResponse": {KeyAddOffsetsToTxn, &AddOffsetsToTxnResponse{ErrorCode: 48},
+			func() Message { return &AddOffsetsToTxnResponse{} }},
+		"EndTxnRequest": {KeyEndTxn, &EndTxnRequest{TransactionalID: "tx", ProducerID: 7, ProducerEpoch: 1, Committed: true},
+			func() Message { return &EndTxnRequest{} }},
+		"EndTxnResponse": {KeyEndTxn, &EndTxnResponse{ErrorCode: 0, ProducerID: -1, ProducerEpoch: -1},
+			func() Message { return &EndTxnResponse{} }},
+		"TxnOffsetCommitRequest": {KeyTxnOffsetCommit, &TxnOffsetCommitRequest{
+			TransactionalID: "tx", GroupID: "g", ProducerID: 7, ProducerEpoch: 1, GenerationID: -1,
+			Topics: []TxnOffsetCommitTopic{{Name: "t", Partitions: []TxnOffsetCommitPartition{{Index: 0, Offset: 5, LeaderEpoch: -1, Metadata: "m", HasMetadata: true}}}},
+		}, func() Message { return &TxnOffsetCommitRequest{} }},
+		"TxnOffsetCommitResponse": {KeyTxnOffsetCommit, &TxnOffsetCommitResponse{
+			Topics: []TxnOffsetCommitTopicResponse{{Name: "t", Partitions: []TxnOffsetCommitPartitionResponse{{Index: 0, ErrorCode: 0}}}},
+		}, func() Message { return &TxnOffsetCommitResponse{} }},
 
 		"DeleteTopicsRequest": {KeyDeleteTopics, &DeleteTopicsRequest{Topics: []DeleteTopic{{Name: "a"}, {Name: "b"}}, TimeoutMs: 30000},
 			func() Message { return &DeleteTopicsRequest{} }},
@@ -435,8 +457,8 @@ func TestSupported(t *testing.T) {
 		{KeyCreateTopics, 7, true},
 		{KeyCreateTopics, 8, false},
 		{KeyInitProducerID, 0, true},
-		{KeyInitProducerID, 4, true},
-		{KeyInitProducerID, 5, false}, // adds only an error for transactions
+		{KeyInitProducerID, 5, true},
+		{KeyInitProducerID, 6, false},
 		{99, 0, false},
 	}
 	for _, tt := range tests {
@@ -449,7 +471,7 @@ func TestSupported(t *testing.T) {
 func TestFetchNameAndTopicID(t *testing.T) {
 	reqByName := &FetchRequest{MaxWaitMs: 500, MinBytes: 1, MaxBytes: 1 << 20, RackID: "r",
 		Topics: []FetchTopic{{Name: "orders", Partitions: []FetchPartition{{Index: 0, Offset: 5, MaxBytes: 4096}}}}}
-	respByName := &FetchResponse{Topics: []FetchTopicResponse{{Name: "orders", Partitions: []FetchPartitionResponse{{Index: 0, HighWatermark: 9}}}}}
+	respByName := &FetchResponse{Topics: []FetchTopicResponse{{Name: "orders", Partitions: []FetchPartitionResponse{{Index: 0, HighWatermark: 9, LastStableOffset: 9, HasLastStableOffset: true}}}}}
 	for v := int16(4); v <= 12; v++ {
 		var w Writer
 		reqByName.Encode(&w, v)
@@ -523,7 +545,7 @@ func TestParseBatchRejects(t *testing.T) {
 		}
 	}
 	// Flags can only be tested with a correct CRC, so re-encode by hand.
-	for name, flag := range map[string]byte{"control batch": attrControl, "transactional batch": attrTransactional} {
+	for name, flag := range map[string]byte{"control batch": attrControl, "transactional batch without producer": attrTransactional} {
 		b := mutate(func(b []byte) {
 			b[batchAttributesAt+1] |= flag
 			w := Writer{B: b[:batchCRCAt]}

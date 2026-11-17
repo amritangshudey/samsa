@@ -1,7 +1,6 @@
 package broker
 
 import (
-	"fmt"
 	"slices"
 	"sort"
 	"time"
@@ -284,7 +283,11 @@ func (n *Node) listOffsets(c *conn, req *wire.ListOffsetsRequest) *wire.ListOffs
 			case p == nil:
 				pr.ErrorCode = wire.ErrUnknownTopicOrPartition
 			case q.Timestamp == wire.TimestampLatest:
-				pr.Offset = p.next
+				if req.IsolationLevel == 1 && !n.st.readUncommitted {
+					pr.Offset = p.lso()
+				} else {
+					pr.Offset = p.next
+				}
 			case q.Timestamp == wire.TimestampEarliest:
 				pr.Offset = p.start
 			case q.Timestamp < 0:
@@ -414,8 +417,14 @@ func (n *Node) hasNewData(v int16, req *wire.FetchRequest) bool {
 			name = n.st.byID[t.TopicID]
 		}
 		for _, q := range t.Partitions {
-			if p := n.st.partition(name, q.Index); p != nil && p.next > q.Offset {
-				return true
+			if p := n.st.partition(name, q.Index); p != nil {
+				limit := p.next
+				if req.IsolationLevel == 1 && !n.st.readUncommitted {
+					limit = p.lso()
+				}
+				if limit > q.Offset {
+					return true
+				}
 			}
 		}
 	}
@@ -458,9 +467,17 @@ func (n *Node) buildFetch(c *conn, v int16, req *wire.FetchRequest) (resp *wire.
 				pr.ErrorCode, pr.HighWatermark, pr.LogStartOffset = wire.ErrOffsetOutOfRange, p.next, p.start
 			default:
 				pr.HighWatermark, pr.LogStartOffset = p.next, p.start
+				maxOff := p.next
+				if req.IsolationLevel == 1 && !n.st.readUncommitted {
+					maxOff = p.lso()
+				}
+				pr.LastStableOffset, pr.HasLastStableOffset = maxOff, true
+				if req.IsolationLevel == 1 && !n.st.readUncommitted {
+					pr.AbortedTransactions = p.abortedInRange(q.Offset, maxOff)
+				}
 				// The response's first batch is sent whatever its size, so
 				// a consumer can always make progress.
-				pr.Records = n.readBatches(p, q.Offset, min(int(q.MaxBytes), budget-size), size == 0)
+				pr.Records = n.readBatches(p, q.Offset, maxOff, min(int(q.MaxBytes), budget-size), size == 0)
 				size += len(pr.Records)
 			}
 			failed = failed || pr.ErrorCode != wire.ErrNone
@@ -474,13 +491,13 @@ func (n *Node) buildFetch(c *conn, v int16, req *wire.FetchRequest) (resp *wire.
 // readBatches returns whole record batches of p, starting with the one that
 // contains offset, up to limit bytes; if force is set the first batch is
 // returned even if it is larger. Each batch gets its assigned base offset.
-func (n *Node) readBatches(p *partition, offset int64, limit int, force bool) []byte {
+func (n *Node) readBatches(p *partition, offset, maxOffset int64, limit int, force bool) []byte {
 	// The last batch whose base is <= offset. Offsets are dense, so it
 	// contains offset whenever offset < p.next, except that a compacted
 	// partition has gaps: then offset may lie after the batch's last record,
 	// and the read starts at the next batch.
 	i := sort.Search(len(p.batches), func(i int) bool { return p.batches[i].base > offset }) - 1
-	if offset >= p.next {
+	if offset >= maxOffset {
 		return nil
 	}
 	if i < 0 {
@@ -492,16 +509,13 @@ func (n *Node) readBatches(p *partition, offset int64, limit int, force bool) []
 	var out []byte
 	for ; i < len(p.batches); i++ {
 		ref := p.batches[i]
-		cmd, _, err := n.raft.Read(ref.logIndex)
-		if err != nil {
-			// A read failure of committed data: the log is corrupt or
-			// poisoned. Never guess; stop the node.
-			if n.fatal == nil {
-				n.fatal = fmt.Errorf("read committed batch at log index %d: %w", ref.logIndex, err)
-			}
+		if ref.base >= maxOffset {
+			break
+		}
+		batch, ok := n.readBatch(ref)
+		if !ok {
 			return out
 		}
-		batch := appendBatch(cmd)
 		if len(out) == 0 && ref.base+int64(wire.BatchLastOffsetDelta(batch)) < offset {
 			continue // the whole batch lies before offset: offset is in a gap
 		}

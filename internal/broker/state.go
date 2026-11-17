@@ -56,6 +56,12 @@ const (
 	cmdShareAcquire byte = 23
 	cmdShareAck     byte = 24
 	cmdShareExpire  byte = 25
+	// Transactions (docs/design/c15-transactions.md).
+	cmdTxnInit         byte = 26
+	cmdTxnAddParts     byte = 27
+	cmdTxnAddOffsets   byte = 28
+	cmdTxnOffsetCommit byte = 29
+	cmdTxnEnd          byte = 30
 )
 
 // formatLevel is the highest cluster format level this build reads and
@@ -68,9 +74,10 @@ const (
 // level 5 groups of the consumer protocol: cmdCGBeat, cmdCGRemove and
 // state snapshot version 10 (ADR 0033); level 6 share groups: cmdSGBeat,
 // cmdSGRemove, cmdShareAcquire, cmdShareAck, cmdShareExpire and state
-// snapshot version 11 (ADR 0034).
+// snapshot version 11 (ADR 0034); level 7 transactions: cmdTxnInit..cmdTxnEnd
+// and state snapshot version 12 (ADR 0035).
 // Raise it with every change to what the log or a snapshot may hold.
-const formatLevel = 6
+const formatLevel = 7
 
 // errBadCommand marks a command in the log that cannot be decoded. The log
 // is checksummed, so this means a bug or a newer on-disk format, and the
@@ -300,6 +307,11 @@ type batchRef struct {
 	// the cleaner. It is not hashed; 0 means unknown, after a snapshot
 	// older than version 8.
 	size int32
+	// control is non-zero for transaction marker batches synthesized on commit (2)
+	// or abort (1) without a separate Raft log batch payload.
+	control      uint8
+	controlPID   int64
+	controlEpoch int16
 }
 
 type partition struct {
@@ -312,6 +324,10 @@ type partition struct {
 	// Expired by ExpireProducers (docs/design/a2-idempotent-producer.md,
 	// section 7).
 	producers map[int64]*producer
+	// openTxns tracks active transactions on this partition (pid -> firstOffset).
+	openTxns map[int64]txnOpen
+	// aborted records closed aborted transactions overlapping [start, next).
+	aborted []abortedTxn
 }
 
 // maxProducerBatches is how many of a producer's latest batches a partition
@@ -445,6 +461,8 @@ type state struct {
 	// dropShareLock is Config.UnsafeDropShareLock, a deliberate bug.
 	dropShareLock      bool
 	shareDeliveryLimit int16
+	readUncommitted    bool // Config.UnsafeReadUncommittedInReadCommitted
+	txns               map[string]*txnState
 	// expired counts the producers this replica forgot since it started or
 	// restored a snapshot. Diagnostic only: not hashed, not in snapshots.
 	expired int
@@ -457,6 +475,7 @@ func newState() *state {
 		groups:     map[string]*group{},
 		creds:      map[string][]scram.Credential{},
 		deletedIDs: map[string]wire.UUID{},
+		txns:       map[string]*txnState{},
 	}
 }
 
@@ -638,6 +657,10 @@ type result struct {
 	sgBeat        *wire.ShareGroupHeartbeatResponse      // SGBeat: the answer
 	shareAcquired map[tpKey][]wire.AcquiredRange         // ShareAcquire
 	shareAckErrs  map[tpKey]int16                        // ShareAck
+	txnPID        int64                                  // TxnInit / TxnEnd
+	txnEpoch      int16                                  // TxnInit / TxnEnd
+	txnPartErrs   map[tpName]int16                       // TxnAddParts
+	txnOffsetErrs map[tpName]int16                       // TxnOffsetCommit
 	applied       bool                                   // Compact / ShareExpire
 	baseOffset int64      // Append: offset assigned to the batch's first record; DeleteRecords: the new start
 	topicID    wire.UUID  // CreateTopic: the topic's UUID
@@ -715,6 +738,15 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 			return result{errCode: wire.ErrUnknownTopicOrPartition, baseOffset: -1}, nil
 		}
 		idempotent := info.ProducerID >= 0 && !s.noSequences
+		if info.Transactional {
+			txn := s.txnByPID(info.ProducerID)
+			switch {
+			case txn == nil || txn.phase != txnOngoing:
+				return result{errCode: wire.ErrInvalidTxnState, baseOffset: -1}, nil
+			case txn.epoch != info.ProducerEpoch:
+				return result{errCode: wire.ErrInvalidProducerEpoch, baseOffset: -1}, nil
+			}
+		}
 		if idempotent {
 			// Refused or repeated, the entry stays in the log and changes
 			// nothing: only here, after everything before it, is it known
@@ -730,6 +762,17 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 		p.next += int64(info.Count)
 		if idempotent {
 			p.remember(info, base, index)
+		}
+		if info.Transactional {
+			if p.openTxns == nil {
+				p.openTxns = map[int64]txnOpen{}
+			}
+			if _, ok := p.openTxns[info.ProducerID]; !ok {
+				p.openTxns[info.ProducerID] = txnOpen{epoch: info.ProducerEpoch, firstOffset: base}
+			}
+			if txn := s.txnByPID(info.ProducerID); txn != nil {
+				txn.addPart(name, part)
+			}
 		}
 		return result{baseOffset: base}, nil
 
@@ -820,6 +863,7 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 				} else {
 					p.start = max(p.start, start)
 				}
+				p.trimAborted()
 			}
 		}
 		return result{}, nil
@@ -900,6 +944,7 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 			keep = len(p.batches)
 		}
 		p.batches = slices.Delete(p.batches, 0, max(keep, 0))
+		p.trimAborted()
 		return result{baseOffset: p.start}, nil
 
 	case cmdCreateACL:
@@ -1139,6 +1184,41 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 		}
 		return s.applyShareExpire(nowMs), nil
 
+	case cmdTxnInit:
+		cmd, ok := decodeTxnInit(r)
+		if !ok || s.level < 7 {
+			return result{}, fmt.Errorf("%w: txn init at index %d", errBadCommand, index)
+		}
+		return s.applyTxnInit(index, cmd), nil
+
+	case cmdTxnAddParts:
+		cmd, ok := decodeTxnAddParts(r)
+		if !ok || s.level < 7 {
+			return result{}, fmt.Errorf("%w: txn add parts at index %d", errBadCommand, index)
+		}
+		return s.applyTxnAddParts(cmd), nil
+
+	case cmdTxnAddOffsets:
+		cmd, ok := decodeTxnAddOffsets(r)
+		if !ok || s.level < 7 {
+			return result{}, fmt.Errorf("%w: txn add offsets at index %d", errBadCommand, index)
+		}
+		return s.applyTxnAddOffsets(cmd), nil
+
+	case cmdTxnOffsetCommit:
+		cmd, ok := decodeTxnOffsetCommit(r)
+		if !ok || s.level < 7 {
+			return result{}, fmt.Errorf("%w: txn offset commit at index %d", errBadCommand, index)
+		}
+		return s.applyTxnOffsetCommit(cmd), nil
+
+	case cmdTxnEnd:
+		cmd, ok := decodeTxnEnd(r)
+		if !ok || s.level < 7 {
+			return result{}, fmt.Errorf("%w: txn end at index %d", errBadCommand, index)
+		}
+		return s.applyTxnEnd(index, cmd), nil
+
 	case cmdGroupAssignment:
 		name, generation := r.String(false), r.Int32()
 		assignments := wire.Array(r, false, func() wire.MemberAssignment {
@@ -1304,6 +1384,38 @@ func (s *state) hash() uint32 {
 	for _, a := range s.acls {
 		str(a.ResourceName, a.Principal, a.Host)
 		add(int64(a.ResourceType), int64(a.PatternType), int64(a.Operation), int64(a.Permission))
+	}
+	for _, id := range sortedKeys(s.txns) {
+		tx := s.txns[id]
+		str(tx.id)
+		add(tx.pid, int64(tx.epoch), tx.prevPID, int64(tx.prevEpoch), int64(tx.phase), int64(tx.timeoutMs), tx.startedMs, int64(len(tx.parts)), int64(len(tx.groups)))
+		for _, tp := range tx.parts {
+			str(tp.topic)
+			add(int64(tp.part))
+		}
+		for _, g := range tx.groups {
+			str(g)
+		}
+		for _, g := range sortedKeys(tx.pendingOffsets) {
+			str(g)
+			for _, tp := range sortedTPNames(tx.pendingOffsets[g]) {
+				o := tx.pendingOffsets[g][tp]
+				str(tp.topic, o.metadata)
+				add(int64(tp.part), o.offset, int64(o.leaderEpoch), o.time)
+			}
+		}
+	}
+	for _, name := range s.names {
+		for _, p := range s.topics[name].parts {
+			add(int64(len(p.openTxns)), int64(len(p.aborted)))
+			for _, pid := range sortedKeys(p.openTxns) {
+				ot := p.openTxns[pid]
+				add(pid, int64(ot.epoch), ot.firstOffset)
+			}
+			for _, ab := range p.aborted {
+				add(ab.pid, ab.firstOffset, ab.lastOffset)
+			}
+		}
 	}
 	add(int64(s.level))
 	return sum

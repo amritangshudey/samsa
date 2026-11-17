@@ -82,8 +82,10 @@ type options struct {
 	consumers   int
 	vandals     int
 	members     int
-	cgMembers   int // KIP-848 consumer group members (cg.go)
-	sgMembers   int // KIP-932 share group members (sg.go)
+	cgMembers    int // KIP-848 consumer group members (cg.go)
+	sgMembers    int // KIP-932 share group members (sg.go)
+	txnProducers int // transactional producers (txn.go)
+	rcConsumers  int // read_committed consumers (txn.go)
 	idempotent  int // idempotent producers (idempotent.go)
 	expiry      time.Duration // producer expiry as chosen, before any mutation
 	classic     bool          // Raft without PreVote and CheckQuorum
@@ -201,6 +203,8 @@ func Run(cfg Config) Result {
 	}
 	w.opts.cgMembers = pick.Intn(4) // drawn last
 	w.opts.sgMembers = pick.Intn(4) // drawn last
+	w.opts.txnProducers = pick.Intn(3)
+	w.opts.rcConsumers = pick.Intn(2)
 	if cfg.Calm {
 		w.opts.drop, w.opts.dup = 0, 0
 	}
@@ -213,6 +217,14 @@ func Run(cfg Config) Result {
 		}
 		if w.bcfg.UnsafeDropShareLock && w.opts.sgMembers < 1 {
 			w.opts.sgMembers = 1
+		}
+		if w.bcfg.UnsafeReadUncommittedInReadCommitted {
+			if w.opts.txnProducers < 1 {
+				w.opts.txnProducers = 1
+			}
+			if w.opts.rcConsumers < 1 {
+				w.opts.rcConsumers = 1
+			}
 		}
 	}
 	strict := w.bcfg.Sync == broker.SyncAlways
@@ -280,7 +292,7 @@ func Run(cfg Config) Result {
 	behaviours := []struct {
 		n    int
 		step func(*client)
-	}{{w.opts.producers, (*client).produce}, {w.opts.consumers, (*client).consume}, {w.opts.vandals, (*client).vandalise}, {w.opts.members, (*client).groupMember}, {w.opts.cgMembers, (*client).cgMember}, {w.opts.sgMembers, (*client).sgMember}, {w.opts.idempotent, (*client).produceIdempotent}, {w.opts.admins, (*client).admin}, {voterClients(w.opts.changes), (*client).changeVoters}}
+	}{{w.opts.producers, (*client).produce}, {w.opts.consumers, (*client).consume}, {w.opts.vandals, (*client).vandalise}, {w.opts.members, (*client).groupMember}, {w.opts.cgMembers, (*client).cgMember}, {w.opts.sgMembers, (*client).sgMember}, {w.opts.txnProducers, (*client).txnProduce}, {w.opts.rcConsumers, (*client).rcConsume}, {w.opts.idempotent, (*client).produceIdempotent}, {w.opts.admins, (*client).admin}, {voterClients(w.opts.changes), (*client).changeVoters}}
 	for _, b := range behaviours {
 		for range b.n {
 			cl := &client{w: w, lane: len(w.clients), rng: rng.Fork(), step: b.step, cursors: map[TP]int64{}, idem: &idemProducer{id: -1}}

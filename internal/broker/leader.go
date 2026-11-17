@@ -165,6 +165,22 @@ func refusal(req wire.Message) wire.Message {
 			resp.Groups = append(resp.Groups, wire.DescribedGroup{ErrorCode: wire.ErrNotCoordinator, ID: g})
 		}
 		return resp
+	case *wire.AddPartitionsToTxnRequest:
+		resp := &wire.AddPartitionsToTxnResponse{ErrorCode: wire.ErrNotCoordinator}
+		for _, tx := range m.Transactions {
+			res := wire.AddPartitionsToTxnResult{TransactionalID: tx.TransactionalID}
+			for _, t := range tx.Topics {
+				res.TopicResults = append(res.TopicResults, topicTxnErr(t, wire.ErrNotCoordinator))
+			}
+			resp.ResultsByTransaction = append(resp.ResultsByTransaction, res)
+		}
+		return resp
+	case *wire.AddOffsetsToTxnRequest:
+		return &wire.AddOffsetsToTxnResponse{ErrorCode: wire.ErrNotCoordinator}
+	case *wire.EndTxnRequest:
+		return &wire.EndTxnResponse{ErrorCode: wire.ErrNotCoordinator, ProducerID: -1, ProducerEpoch: -1}
+	case *wire.TxnOffsetCommitRequest:
+		return txnOffsetCommitAllErr(m, wire.ErrNotCoordinator)
 	}
 	// APIVersions, Metadata, FindCoordinator, DescribeConfigs,
 	// DescribeCluster and DescribeAcls are answered by every node, and

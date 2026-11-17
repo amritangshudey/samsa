@@ -851,3 +851,9 @@ would happen against Kafka too (not tested against Kafka).
 - **Seeds:** 24, 81 (reported as `S8: t0/0 offset 1093 was already acknowledged/rejected and was delivered again`).
 - **Root cause:** When a `ShareFetch` request carried `AckBatches` whose `applyShareAck` failed (for example `ErrInvalidRecordState` after an acquisition lock expired) and no records were immediately available to acquire, `shareFetch` parked a `parkedShareFetch` without saving `res.shareAckErrs`. On timer expiry or wakeup, `completeShareFetch` passed `nil` for `ackErrs` to `buildShareFetchResp`, returning `AckErrorCode = 0` (`ErrNone`) for a failed acknowledgement.
 - **Fix:** `parkedShareFetch` stores `ackErrs` and `completeShareFetch` forwards `pf.ackErrs` to `acquireAndRespondShareFetch` and `buildShareFetchResp`.
+
+### C15-1. `wire.PeekBatch` omitted `Transactional` flag on `cmdAppend` (C15, before merge)
+
+- **Found by:** `TestTransactionLifecycleCommitAbortTimeoutAndKIP890` (`READ_COMMITTED saw uncommitted data: lso=1 recs=72`).
+- **Root cause:** `parseBatch` decoded `attrTransactional` into `BatchInfo.Transactional`, but `PeekBatch` (used by `state.apply` on `cmdAppend`) did not read the attributes field, leaving `info.Transactional == false` and skipping `p.openTxns` registration.
+- **Fix:** `PeekBatch` decodes `attrs` (`Transactional` and `Control` flags).

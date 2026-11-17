@@ -1,7 +1,6 @@
 package broker
 
 import (
-	"fmt"
 	"strconv"
 	"time"
 
@@ -169,12 +168,10 @@ func (n *Node) clean() bool {
 				if copied >= cleanBatchBytes {
 					return true // the rest in the next round
 				}
-				cmd, _, err := n.raft.Read(b.logIndex)
-				if err != nil {
-					n.fatal = fmt.Errorf("read committed batch at log index %d to relocate it: %w", b.logIndex, err)
+				data, ok := n.readBatch(b)
+				if !ok {
 					return false
 				}
-				data := appendBatch(cmd)
 				copied += len(data)
 				n.stats.relocatedBytes += int64(len(data))
 				n.cleaning++

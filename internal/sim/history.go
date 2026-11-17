@@ -98,6 +98,7 @@ type Model struct {
 	rebatched bool
 	groups    groupModel
 	share     shareModel
+	txn       txnModel
 	// compact and keyst are set by Compaction (compaction.go).
 	compact map[string]*compactRules
 	keyst   map[string]*[compactKeys]keyState
@@ -134,6 +135,7 @@ func (m *Model) PowerLoss() {
 	}
 	m.groups.forget()
 	m.share.forget()
+	m.txn.forget()
 	for _, p := range m.parts { // order-independent: every entry gets the same update
 		p.floor, p.start = 0, 0 // a lost Trim may come back as a lower start
 	}
