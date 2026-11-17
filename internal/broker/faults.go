@@ -158,7 +158,10 @@ func (f *faulter) inject(kind string) bool {
 // req is not one it applies to.
 func notLeaderFault(req wire.Message) wire.Message {
 	switch req.(type) {
-	case *wire.ProduceRequest, *wire.FetchRequest, *wire.OffsetCommitRequest:
+	case *wire.ProduceRequest, *wire.FetchRequest, *wire.OffsetCommitRequest,
+		*wire.AddPartitionsToTxnRequest, *wire.AddOffsetsToTxnRequest, *wire.EndTxnRequest, *wire.TxnOffsetCommitRequest,
+		*wire.ConsumerGroupHeartbeatRequest, *wire.ShareGroupHeartbeatRequest,
+		*wire.ShareFetchRequest, *wire.ShareAcknowledgeRequest:
 		return refusal(req)
 	}
 	return nil

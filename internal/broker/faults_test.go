@@ -207,3 +207,146 @@ func TestFaultExpire(t *testing.T) {
 		t.Fatalf("the expired member's next heartbeat: %d", code)
 	}
 }
+
+func TestFaultsTxnKIP848Share(t *testing.T) {
+	h := newHarness(t, Config{})
+	h.open(1)
+	if code := h.createTopic(1, "t", 1); code != wire.ErrNone {
+		t.Fatalf("create topic: %d", code)
+	}
+	h.produce(1, "t", 0, "a")
+	tid := h.node.st.topics["t"].id
+
+	// 1. Transactions: notleader on AddPartitionsToTxn/EndTxn/TxnOffsetCommit; lostack on EndTxn.
+	var initResp wire.InitProducerIDResponse
+	h.call(1, wire.KeyInitProducerID, 5, &wire.InitProducerIDRequest{
+		Transactional: true, TransactionalID: "txf", TransactionTimeoutMs: 60000,
+		ProducerID: -1, ProducerEpoch: -1,
+	}, &initResp)
+	pid, ep := initResp.ProducerID, initResp.ProducerEpoch
+
+	h.node.faults = faulter{cfg: Faults{Seed: 1, Rate: 1, Kinds: []string{FaultNotLeader}}, state: 1}
+	var addP wire.AddPartitionsToTxnResponse
+	h.call(1, wire.KeyAddPartitionsToTxn, 5, &wire.AddPartitionsToTxnRequest{
+		Transactions: []wire.AddPartitionsToTxnTransaction{{
+			TransactionalID: "txf", ProducerID: pid, ProducerEpoch: ep,
+			Topics: []wire.AddPartitionsToTxnTopic{{Name: "t", Partitions: []int32{0}}},
+		}},
+	}, &addP)
+	if addP.ErrorCode != wire.ErrNotCoordinator {
+		t.Fatalf("AddPartitionsToTxn notleader: %+v", addP)
+	}
+	var endNL wire.EndTxnResponse
+	h.call(1, wire.KeyEndTxn, 5, &wire.EndTxnRequest{
+		TransactionalID: "txf", ProducerID: pid, ProducerEpoch: ep, Committed: true,
+	}, &endNL)
+	if endNL.ErrorCode != wire.ErrNotCoordinator {
+		t.Fatalf("EndTxn notleader: %+v", endNL)
+	}
+
+	h.node.faults = faulter{}
+	addP = wire.AddPartitionsToTxnResponse{}
+	h.call(1, wire.KeyAddPartitionsToTxn, 5, &wire.AddPartitionsToTxnRequest{
+		Transactions: []wire.AddPartitionsToTxnTransaction{{
+			TransactionalID: "txf", ProducerID: pid, ProducerEpoch: ep,
+			Topics: []wire.AddPartitionsToTxnTopic{{Name: "t", Partitions: []int32{0}}},
+		}},
+	}, &addP)
+	h.node.faults = faulter{cfg: Faults{Seed: 1, Rate: 1, Kinds: []string{FaultLostAck}}, state: 1}
+	corr := h.send(1, wire.KeyEndTxn, 5, &wire.EndTxnRequest{
+		TransactionalID: "txf", ProducerID: pid, ProducerEpoch: ep, Committed: true,
+	})
+	h.run()
+	var endLA wire.EndTxnResponse
+	if h.recv(1, wire.KeyEndTxn, 5, corr, &endLA) {
+		t.Fatalf("EndTxn lostack should have closed connection, got %+v", endLA)
+	}
+	if tx := h.node.st.txns["txf"]; tx == nil || tx.phase != txnCompleteCommit || tx.epoch != 1 {
+		t.Fatalf("EndTxn lostack should have committed txn: %+v", tx)
+	}
+
+	// 2. KIP-848: rebalance returns empty HasAssignment, expire returns ErrUnknownMemberID.
+	h.open(2)
+	h.node.faults = faulter{}
+	var cg wire.ConsumerGroupHeartbeatResponse
+	h.call(2, wire.KeyConsumerGroupHeartbeat, 1, &wire.ConsumerGroupHeartbeatRequest{
+		GroupID: "cgf", MemberID: "m1", MemberEpoch: 0, RebalanceTimeoutMs: 5000, SubscribedTopics: []string{"t"},
+	}, &cg)
+	if cg.ErrorCode != wire.ErrNone || len(cg.Assignment) == 0 {
+		t.Fatalf("KIP-848 join: %+v", cg)
+	}
+	h.node.faults = faulter{cfg: Faults{Seed: 1, Rate: 1, Kinds: []string{FaultRebalance}}, state: 1}
+	var cgReb wire.ConsumerGroupHeartbeatResponse
+	h.call(2, wire.KeyConsumerGroupHeartbeat, 1, &wire.ConsumerGroupHeartbeatRequest{
+		GroupID: "cgf", MemberID: "m1", MemberEpoch: cg.MemberEpoch,
+	}, &cgReb)
+	if cgReb.ErrorCode != wire.ErrNone || !cgReb.HasAssignment || len(cgReb.Assignment) != 0 {
+		t.Fatalf("KIP-848 rebalance fault: %+v", cgReb)
+	}
+	h.node.faults = faulter{cfg: Faults{Seed: 1, Rate: 1, Kinds: []string{FaultExpire}}, state: 1}
+	var cgExp wire.ConsumerGroupHeartbeatResponse
+	h.call(2, wire.KeyConsumerGroupHeartbeat, 1, &wire.ConsumerGroupHeartbeatRequest{
+		GroupID: "cgf", MemberID: "m1", MemberEpoch: cg.MemberEpoch,
+	}, &cgExp)
+	if cgExp.ErrorCode != wire.ErrUnknownMemberID {
+		t.Fatalf("KIP-848 expire fault: %+v", cgExp)
+	}
+
+	// 3. Share groups: rebalance, emptyfetch, lostack, expire.
+	h.node.faults = faulter{}
+	var sg wire.ShareGroupHeartbeatResponse
+	h.call(2, wire.KeyShareGroupHeartbeat, 1, &wire.ShareGroupHeartbeatRequest{
+		GroupID: "sgf", MemberID: "s1", MemberEpoch: 0, SubscribedTopics: []string{"t"},
+	}, &sg)
+	if sg.ErrorCode != wire.ErrNone || len(sg.Assignment) == 0 {
+		t.Fatalf("share join: %+v", sg)
+	}
+	h.node.faults = faulter{cfg: Faults{Seed: 1, Rate: 1, Kinds: []string{FaultRebalance}}, state: 1}
+	var sgReb wire.ShareGroupHeartbeatResponse
+	h.call(2, wire.KeyShareGroupHeartbeat, 1, &wire.ShareGroupHeartbeatRequest{
+		GroupID: "sgf", MemberID: "s1", MemberEpoch: sg.MemberEpoch,
+	}, &sgReb)
+	if sgReb.ErrorCode != wire.ErrNone || !sgReb.HasAssignment || len(sgReb.Assignment) != 0 {
+		t.Fatalf("share rebalance fault: %+v", sgReb)
+	}
+	h.node.faults = faulter{cfg: Faults{Seed: 1, Rate: 1, Kinds: []string{FaultEmptyFetch}}, state: 1}
+	var sfEmpty wire.ShareFetchResponse
+	h.call(2, wire.KeyShareFetch, 2, &wire.ShareFetchRequest{
+		GroupID: "sgf", MemberID: "s1", ShareSessionEpoch: 0, MaxRecords: 10,
+		Topics: []wire.ShareFetchTopic{{TopicID: tid, Partitions: []wire.ShareFetchPartition{{Index: 0}}}},
+	}, &sfEmpty)
+	if sfEmpty.ErrorCode != wire.ErrNone || len(sfEmpty.Responses) != 0 {
+		t.Fatalf("share emptyfetch fault: %+v", sfEmpty)
+	}
+	h.node.faults = faulter{}
+	var sf wire.ShareFetchResponse
+	h.call(2, wire.KeyShareFetch, 2, &wire.ShareFetchRequest{
+		GroupID: "sgf", MemberID: "s1", ShareSessionEpoch: 1, MaxRecords: 10,
+		Topics: []wire.ShareFetchTopic{{TopicID: tid, Partitions: []wire.ShareFetchPartition{{Index: 0}}}},
+	}, &sf)
+	if len(sf.Responses[0].Partitions[0].Acquired) == 0 {
+		t.Fatalf("share fetch: %+v", sf)
+	}
+	h.node.faults = faulter{cfg: Faults{Seed: 1, Rate: 1, Kinds: []string{FaultLostAck}}, state: 1}
+	ackCorr := h.send(2, wire.KeyShareAcknowledge, 2, &wire.ShareAcknowledgeRequest{
+		GroupID: "sgf", MemberID: "s1", ShareSessionEpoch: 2,
+		Topics: []wire.ShareFetchTopic{{TopicID: tid, Partitions: []wire.ShareFetchPartition{{
+			Index:      0,
+			AckBatches: []wire.ShareAckBatch{{FirstOffset: 0, LastOffset: 0, AcknowledgeTypes: []int8{wire.AckAccept}}},
+		}}}},
+	})
+	h.run()
+	var ackResp wire.ShareAcknowledgeResponse
+	if h.recv(2, wire.KeyShareAcknowledge, 2, ackCorr, &ackResp) {
+		t.Fatalf("ShareAcknowledge lostack should close connection, got %+v", ackResp)
+	}
+	h.open(3)
+	h.node.faults = faulter{cfg: Faults{Seed: 1, Rate: 1, Kinds: []string{FaultExpire}}, state: 1}
+	var sgExp wire.ShareGroupHeartbeatResponse
+	h.call(3, wire.KeyShareGroupHeartbeat, 1, &wire.ShareGroupHeartbeatRequest{
+		GroupID: "sgf", MemberID: "s1", MemberEpoch: sg.MemberEpoch,
+	}, &sgExp)
+	if sgExp.ErrorCode != wire.ErrUnknownMemberID {
+		t.Fatalf("share expire fault: %+v", sgExp)
+	}
+}

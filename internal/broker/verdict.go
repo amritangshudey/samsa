@@ -79,8 +79,12 @@ func Judge(disk sys.Disk, cfg Config, p Pipeline) (Verdict, error) {
 		}
 	}
 	var g *group
+	var inTopicID [16]byte
 	if p.Group != "" {
 		g = st.group(p.Group)
+		if t := st.topics[p.In]; t != nil {
+			inTopicID = t.id
+		}
 	}
 	add := func(list *[]RecordRef, x rec, n int) {
 		if len(*list) < MaxExamples {
@@ -95,7 +99,7 @@ func Judge(disk sys.Disk, cfg Config, p Pipeline) (Verdict, error) {
 		case n > 1:
 			v.Duplicated++
 			add(&v.DuplicatedRecords, x, n)
-		case g == nil || committedPast(g, p.In, x):
+		case g == nil || (g.sg != nil && shareDone(g.sg, inTopicID, x)) || (g.sg == nil && committedPast(g, p.In, x)):
 			v.Lost++
 			add(&v.LostRecords, x, 0)
 		default:
@@ -111,15 +115,37 @@ func committedPast(g *group, topic string, x rec) bool {
 	return ok && c.offset > x.offset
 }
 
+func shareDone(sg *shareGroup, tid [16]byte, x rec) bool {
+	sp := sg.parts[tpKey{tid, x.part}]
+	if sp == nil {
+		return false
+	}
+	if x.offset < sp.spso {
+		return true
+	}
+	l := sp.locks[x.offset]
+	return l != nil && (l.state == shareAcked || l.state == shareArchived)
+}
+
 type rec struct {
 	part   int32
 	offset int64
 	key    []byte
 }
 
-// records returns every record of topic, by partition, then offset.
-// It reads only what the replayed state references, so trimmed and
-// deleted batches are never read.
+func isAbortedRecord(aborted []abortedTxn, pid int64, off int64) bool {
+	for _, ab := range aborted {
+		if ab.pid == pid && off >= ab.firstOffset && off < ab.lastOffset {
+			return true
+		}
+	}
+	return false
+}
+
+// records returns every committed data record of topic, by partition, then
+// offset. It skips control batches, uncommitted records at or above LSO, and
+// aborted transactional records, and reads only what the replayed state
+// references so trimmed and deleted batches are never read.
 func records(r *raft.Raft, st *state, topic string) ([]rec, error) {
 	t := st.topics[topic]
 	if t == nil {
@@ -130,17 +156,33 @@ func records(r *raft.Raft, st *state, topic string) ([]rec, error) {
 		if p.start > 0 {
 			return nil, fmt.Errorf("%s/%d starts at offset %d: records were deleted, so the verdict cannot see them all", topic, i, p.start)
 		}
+		lso := p.lso()
 		for _, ref := range p.batches {
+			if ref.base >= lso {
+				break
+			}
 			cmd, _, err := r.Read(ref.logIndex)
 			if err != nil {
 				return nil, fmt.Errorf("%s/%d: read log entry %d: %w", topic, i, ref.logIndex, err)
 			}
-			_, recs, err := wire.DecodeBatch(appendBatch(cmd))
+			if len(cmd) == 0 || cmd[0] != cmdAppend {
+				continue // control marker batch (e.g. cmdTxnEnd)
+			}
+			raw := appendBatch(cmd)
+			info, ok := wire.PeekBatch(raw)
+			if ok && info.Control {
+				continue
+			}
+			_, recs, err := wire.DecodeBatch(raw)
 			if err != nil {
 				return nil, fmt.Errorf("%s/%d: batch at offset %d is compressed or malformed (the verdict reads uncompressed batches only): %w", topic, i, ref.base, err)
 			}
 			for j, x := range recs {
-				out = append(out, rec{part: int32(i), offset: ref.base + int64(j), key: x.Key})
+				off := ref.base + int64(j)
+				if off >= lso || (ok && info.Transactional && isAbortedRecord(p.aborted, info.ProducerID, off)) {
+					continue
+				}
+				out = append(out, rec{part: int32(i), offset: off, key: x.Key})
 			}
 		}
 	}

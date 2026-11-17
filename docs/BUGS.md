@@ -857,3 +857,9 @@ would happen against Kafka too (not tested against Kafka).
 - **Found by:** `TestTransactionLifecycleCommitAbortTimeoutAndKIP890` (`READ_COMMITTED saw uncommitted data: lso=1 recs=72`).
 - **Root cause:** `parseBatch` decoded `attrTransactional` into `BatchInfo.Transactional`, but `PeekBatch` (used by `state.apply` on `cmdAppend`) did not read the attributes field, leaving `info.Transactional == false` and skipping `p.openTxns` registration.
 - **Fix:** `PeekBatch` decodes `attrs` (`Transactional` and `Control` flags).
+
+### C23b-1. `verdict.records()` read `cmdTxnEnd` control entries as `cmdAppend` batches (C23b, before merge)
+
+- **Found by:** `TestJudgeTransactions` (`out/0: batch at offset 1 is compressed or malformed: wire: malformed input`).
+- **Root cause:** `EndTxn` appends a partition batch entry whose `logIndex` points to a `cmdTxnEnd` Raft log entry rather than a `cmdAppend` entry. `verdict.records()` passed the `cmdTxnEnd` payload directly to `appendBatch`/`wire.DecodeBatch`.
+- **Fix:** `verdict.records()` skips non-`cmdAppend` log entries, control batches, offsets `>= p.lso()`, and aborted transactional records.

@@ -55,9 +55,9 @@ check `git log` and `docs/PRODUCTION.md` before trusting it.
   settings (2026-11-15).
 - Still to ask about: test-only dependencies for item 16 (the client matrix).
 
-## 4. State on 2026-11-16
+## 4. State on 2026-11-17
 
-**Done and merged to `main` (or in PR for item 15):** items 1 to 13, 15, 18a, 18, 19, 22, 23a, 24, and item 17's
+**Done and merged to `main` (or in PR for item 23b):** items 1 to 13, 15, 18a, 18, 19, 22, 23a, 23b, 24, and item 17's
 packaging/runbook/security review (see the status table in
 `docs/PRODUCTION.md`), including retention and compaction (ADR 0026, 0027,
 0029), storage damage repair (ADR 0030), fetch from the nearest replica
@@ -68,8 +68,10 @@ topic IDs and Kafka 3.1 protocol versions (`docs/reports/c18a-topic-ids.md`,
 ADR 0032, format level 4, snapshot v9, PR #40), KIP-848 consumer groups
 (`docs/reports/c18-kip848.md`, ADR 0033, format level 5, snapshot v10, PR #41),
 KIP-932 share groups (`docs/reports/c22-share-groups.md`, ADR 0034, format
-level 6, snapshot v11, PR #42), and transactions (`docs/reports/c15-transactions.md`,
-ADR 0035, format level 7, snapshot v12).
+level 6, snapshot v11, PR #42), transactions (`docs/reports/c15-transactions.md`,
+ADR 0035, format level 7, snapshot v12, PR #43), and fault testing for
+transactions, KIP-848 groups, and share groups (`docs/reports/c23b-app-faults.md`,
+ADR 0036).
 Tags `v0.3.0`, `v0.4.0`, `v0.5.0`, and `v0.6.0` are created and pushed.
 
 **Soak (item 6):** done. Run 1 (before the memory-leak fix, `docs/BUGS.md` L1)
@@ -82,11 +84,10 @@ v0.3.0 to v0.6.0 are in `docs/releases/`.
 
 ## 5. Next, in order
 
-1. **23b** fault testing for transactions, KIP-848 groups, and share groups.
-2. **20 and 21 object storage:** design and prototype first, one design for
+1. **20 and 21 object storage:** design and prototype first, one design for
    tiered and diskless, behind the pluggable connector (section 3). Open
    questions are in `docs/PRODUCTION.md` section 7.
-3. **14 sharding**, decided by ADR after 21; **16** client matrix (ask about
+2. **14 sharding**, decided by ADR after 21; **16** client matrix (ask about
    dependencies); **17** the Kafka comparison benchmark (needs a quiet machine,
    after the soak) and tags.
 

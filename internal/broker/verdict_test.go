@@ -116,3 +116,139 @@ func TestJudgeRefuses(t *testing.T) {
 		})
 	}
 }
+
+func TestJudgeTransactions(t *testing.T) {
+	h := newHarness(t, Config{})
+	h.open(1)
+	for _, name := range []string{"in", "out"} {
+		if code := h.createTopic(1, name, 1); code != wire.ErrNone {
+			t.Fatalf("create %s: %d", name, code)
+		}
+	}
+	h.produceKeyed("in", 0, "k0", "k1", "k2")
+
+	// Start txn1 and commit k0 + offset 1 via TxnOffsetCommit.
+	var initResp wire.InitProducerIDResponse
+	h.call(1, wire.KeyInitProducerID, 5, &wire.InitProducerIDRequest{
+		Transactional: true, TransactionalID: "tx-app", TransactionTimeoutMs: 60000,
+		ProducerID: -1, ProducerEpoch: -1,
+	}, &initResp)
+	if initResp.ErrorCode != wire.ErrNone {
+		t.Fatalf("InitProducerID: %d", initResp.ErrorCode)
+	}
+	pid, ep := initResp.ProducerID, initResp.ProducerEpoch
+
+	addPart := func(e int16) {
+		var r wire.AddPartitionsToTxnResponse
+		h.call(1, wire.KeyAddPartitionsToTxn, 5, &wire.AddPartitionsToTxnRequest{
+			Transactions: []wire.AddPartitionsToTxnTransaction{{
+				TransactionalID: "tx-app", ProducerID: pid, ProducerEpoch: e,
+				Topics: []wire.AddPartitionsToTxnTopic{{Name: "out", Partitions: []int32{0}}},
+			}},
+		}, &r)
+		if r.ResultsByTransaction[0].TopicResults[0].Partitions[0].ErrorCode != wire.ErrNone {
+			t.Fatalf("AddPartitionsToTxn: %+v", r)
+		}
+	}
+	produceTx := func(key string, seq int32, e int16) {
+		b := wire.EncodeBatch([]wire.Record{{Key: []byte(key), Value: []byte("v")}})
+		wire.SetBatchProducer(b, pid, e, seq)
+		wire.SetBatchTransactional(b)
+		var r wire.ProduceResponse
+		h.call(1, wire.KeyProduce, 9, &wire.ProduceRequest{
+			TransactionalID: "tx-app", HasTransactionalID: true, Acks: -1, TimeoutMs: 1000,
+			Topics: []wire.ProduceTopic{{Name: "out", Partitions: []wire.ProducePartition{{Index: 0, Records: b}}}},
+		}, &r)
+		if r.Topics[0].Partitions[0].ErrorCode != wire.ErrNone {
+			t.Fatalf("produce %s: %d", key, r.Topics[0].Partitions[0].ErrorCode)
+		}
+	}
+	endTx := func(commit bool, e int16) (int64, int16) {
+		var r wire.EndTxnResponse
+		h.call(1, wire.KeyEndTxn, 5, &wire.EndTxnRequest{
+			TransactionalID: "tx-app", ProducerID: pid, ProducerEpoch: e, Committed: commit,
+		}, &r)
+		if r.ErrorCode != wire.ErrNone {
+			t.Fatalf("EndTxn(%v): %d", commit, r.ErrorCode)
+		}
+		return r.ProducerID, r.ProducerEpoch
+	}
+
+	// k0: committed in txn.
+	addPart(ep)
+	produceTx("k0", 0, ep)
+	var addOff wire.AddOffsetsToTxnResponse
+	h.call(1, wire.KeyAddOffsetsToTxn, 3, &wire.AddOffsetsToTxnRequest{
+		TransactionalID: "tx-app", ProducerID: pid, ProducerEpoch: ep, GroupID: "app",
+	}, &addOff)
+	var toc wire.TxnOffsetCommitResponse
+	h.call(1, wire.KeyTxnOffsetCommit, 3, &wire.TxnOffsetCommitRequest{
+		TransactionalID: "tx-app", GroupID: "app", ProducerID: pid, ProducerEpoch: ep,
+		GenerationID: -1,
+		Topics: []wire.TxnOffsetCommitTopic{{Name: "in", Partitions: []wire.TxnOffsetCommitPartition{
+			{Index: 0, Offset: 2, LeaderEpoch: -1},
+		}}},
+	}, &toc)
+	pid, ep = endTx(true, ep)
+
+	// k1: written in a second txn that ABORTS (and group already committed offset 2 past k1!).
+	addPart(ep)
+	produceTx("k1", 0, ep)
+	_, ep = endTx(false, ep)
+
+	// k2: written in an open (uncommitted) txn, not committed past in input group.
+	addPart(ep)
+	produceTx("k2", 0, ep)
+
+	v, err := Judge(h.disk, h.cfg, Pipeline{In: "in", Out: "out", Group: "app"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Inputs != 3 || v.Outputs != 1 || v.Once != 1 || v.Lost != 1 || v.Pending != 1 || v.Unmatched != 0 {
+		t.Fatalf("unexpected txn verdict: %+v", v)
+	}
+}
+
+func TestJudgeShareGroup(t *testing.T) {
+	h := newHarness(t, Config{})
+	h.open(1)
+	for _, name := range []string{"in", "out"} {
+		if code := h.createTopic(1, name, 1); code != wire.ErrNone {
+			t.Fatalf("create %s: %d", name, code)
+		}
+	}
+	h.produceKeyed("in", 0, "s0", "s1", "s2")
+	inID := h.node.st.topics["in"].id
+
+	// Member joins share group "sg", acquires 0..2, acks s0 (Accept), rejects s1 (Reject), leaves s2 acquired (Pending).
+	var hb wire.ShareGroupHeartbeatResponse
+	h.call(1, wire.KeyShareGroupHeartbeat, 1, &wire.ShareGroupHeartbeatRequest{
+		GroupID: "sg", MemberID: "m1", MemberEpoch: 0, SubscribedTopics: []string{"in"},
+	}, &hb)
+	var sf wire.ShareFetchResponse
+	h.call(1, wire.KeyShareFetch, 2, &wire.ShareFetchRequest{
+		GroupID: "sg", MemberID: "m1", ShareSessionEpoch: 0, MaxRecords: 3,
+		Topics: []wire.ShareFetchTopic{{TopicID: inID, Partitions: []wire.ShareFetchPartition{{Index: 0}}}},
+	}, &sf)
+	var ack wire.ShareAcknowledgeResponse
+	h.call(1, wire.KeyShareAcknowledge, 2, &wire.ShareAcknowledgeRequest{
+		GroupID: "sg", MemberID: "m1", ShareSessionEpoch: 1,
+		Topics: []wire.ShareFetchTopic{{TopicID: inID, Partitions: []wire.ShareFetchPartition{{
+			Index: 0,
+			AckBatches: []wire.ShareAckBatch{
+				{FirstOffset: 0, LastOffset: 0, AcknowledgeTypes: []int8{wire.AckAccept}},
+				{FirstOffset: 1, LastOffset: 1, AcknowledgeTypes: []int8{wire.AckReject}},
+			},
+		}}}},
+	}, &ack)
+	// Application only wrote s0 to "out" (s1 was rejected/archived without writing!).
+	h.produceKeyed("out", 0, "s0")
+
+	v, err := Judge(h.disk, h.cfg, Pipeline{In: "in", Out: "out", Group: "sg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Inputs != 3 || v.Outputs != 1 || v.Once != 1 || v.Lost != 1 || v.Pending != 1 {
+		t.Fatalf("unexpected share group verdict: %+v", v)
+	}
+}

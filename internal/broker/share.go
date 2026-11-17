@@ -709,6 +709,27 @@ func (n *Node) shareGroupHeartbeat(c *conn, h wire.RequestHeader, req *wire.Shar
 	if g.sg != nil {
 		if m := g.sg.member(b.member); m != nil && b.epoch != wire.EpochLeave {
 			n.sgTouch(sgSoft, m)
+			if b.epoch > 0 && b.epoch == m.epoch {
+				if n.faults.inject(FaultExpire) {
+					n.log.Info("fault injected", "kind", FaultExpire, "group", req.GroupID, "member", m.id, "fault", n.faults.count)
+					n.propose(encodeSGBeat(sgBeat{group: req.GroupID, member: m.id, epoch: wire.EpochLeave}), func(result) {
+						n.sgSync(sgSoft)
+						n.wakeShareFetches()
+						fail(wire.ErrUnknownMemberID, "member session expired (fault)")
+					})
+					return
+				}
+				if len(m.assigned) > 0 && n.faults.inject(FaultRebalance) {
+					n.log.Info("fault injected", "kind", FaultRebalance, "group", req.GroupID, "member", m.id, "fault", n.faults.count)
+					n.respond(c, h, &wire.ShareGroupHeartbeatResponse{
+						MemberID:            m.id,
+						MemberEpoch:         m.epoch,
+						HeartbeatIntervalMs: int32(n.cfg.ConsumerHeartbeatInterval.Milliseconds()),
+						HasAssignment:       true,
+					})
+					return
+				}
+			}
 		}
 	}
 	answer := func(resp *wire.ShareGroupHeartbeatResponse, code int16, msg string) {
@@ -955,6 +976,11 @@ func (n *Node) acquireAndRespondShareFetch(c *conn, h wire.RequestHeader, req *w
 		n.respond(c, h, n.buildShareFetchResp(c, req, sessionTPs, nil, ackErrs))
 		return
 	}
+	if n.faults.inject(FaultEmptyFetch) {
+		n.log.Info("fault injected", "kind", FaultEmptyFetch, "group", req.GroupID, "fault", n.faults.count)
+		n.respond(c, h, n.buildShareFetchResp(c, req, sessionTPs, nil, ackErrs))
+		return
+	}
 	acq := shareAcquireReq{
 		group: req.GroupID, member: req.MemberID,
 		nowMs: n.nowMs(), lockTimeoutMs: n.cfg.ShareAcquisitionLockTimeout.Milliseconds(),
@@ -1107,6 +1133,14 @@ func (n *Node) shareAcknowledge(c *conn, h wire.RequestHeader, req *wire.ShareAc
 	n.propose(encodeShareAck(cmd), func(res result) {
 		n.wakeShareFetches()
 		n.armShareLockTimer()
+		if n.faults.inject(FaultLostAck) {
+			n.log.Info("fault injected", "kind", FaultLostAck, "key", h.Key, "group", req.GroupID, "fault", n.faults.count)
+			if !c.closed {
+				c.closed = true
+				n.net.Close(c.id)
+			}
+			return
+		}
 		finish(res.shareAckErrs)
 	})
 }
