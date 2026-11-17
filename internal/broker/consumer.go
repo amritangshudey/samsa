@@ -750,6 +750,26 @@ func (n *Node) consumerHeartbeat(c *conn, h wire.RequestHeader, req *wire.Consum
 	if g.cg != nil {
 		if m := g.cg.member(b.member); m != nil && b.epoch != wire.EpochLeave {
 			n.cgTouch(sg, m) // it is alive, whatever else this heartbeat turns out to be
+			if b.epoch > 0 && b.epoch == m.epoch {
+				if n.faults.inject(FaultExpire) {
+					n.log.Info("fault injected", "kind", FaultExpire, "group", req.GroupID, "member", m.id, "fault", n.faults.count)
+					n.propose(encodeCGBeat(cgBeat{group: req.GroupID, member: m.id, epoch: wire.EpochLeave}), func(result) {
+						n.cgSync(sg)
+						fail(wire.ErrUnknownMemberID, "member session expired (fault)")
+					})
+					return
+				}
+				if len(m.owned) > 0 && n.faults.inject(FaultRebalance) {
+					n.log.Info("fault injected", "kind", FaultRebalance, "group", req.GroupID, "member", m.id, "fault", n.faults.count)
+					n.respond(c, h, &wire.ConsumerGroupHeartbeatResponse{
+						MemberID:            m.id,
+						MemberEpoch:         m.epoch,
+						HeartbeatIntervalMs: int32(n.cfg.ConsumerHeartbeatInterval.Milliseconds()),
+						HasAssignment:       true,
+					})
+					return
+				}
+			}
 		}
 	}
 	answer := func(resp *wire.ConsumerGroupHeartbeatResponse, code int16, msg string) {

@@ -764,6 +764,14 @@ func (n *Node) endTxn(c *conn, h wire.RequestHeader, req *wire.EndTxnRequest) {
 	n.propose(encodeTxnEnd(cmd), func(res result) {
 		n.armTxnTimer()
 		n.wakeFetches()
+		if res.errCode == wire.ErrNone && n.faults.inject(FaultLostAck) {
+			n.log.Info("fault injected", "kind", FaultLostAck, "key", h.Key, "fault", n.faults.count)
+			if !c.closed {
+				c.closed = true
+				n.net.Close(c.id)
+			}
+			return
+		}
 		n.respond(c, h, &wire.EndTxnResponse{
 			ErrorCode:     res.errCode,
 			ProducerID:    res.txnPID,
