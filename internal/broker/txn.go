@@ -427,7 +427,7 @@ func (s *state) applyTxnOffsetCommit(cmd txnOffsetCommitCmd) result {
 		return result{errCode: wire.ErrInvalidTxnState}
 	}
 	g := s.group(cmd.group)
-	if !(cmd.generation < 0 && cmd.memberID == "" && g.generation == 0) {
+	if cmd.generation >= 0 || cmd.memberID != "" || g.generation != 0 {
 		if code := g.checkCommit(cmd.generation, cmd.memberID, s.noFencing); code != wire.ErrNone {
 			return result{errCode: code}
 		}

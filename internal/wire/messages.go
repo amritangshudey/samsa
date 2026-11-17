@@ -1070,13 +1070,7 @@ func (m *InitProducerIDRequest) Encode(w *Writer, v int16) {
 	} else {
 		w.NullString(flex)
 	}
-	timeout := m.TransactionTimeoutMs
-	if timeout == 0 && m.Transactional {
-		timeout = 1<<31 - 1
-	} else if timeout == 0 {
-		timeout = 1<<31 - 1
-	}
-	w.Int32(timeout)
+	w.Int32(m.TransactionTimeoutMs)
 	if v >= 3 {
 		pid := m.ProducerID
 		ep := m.ProducerEpoch

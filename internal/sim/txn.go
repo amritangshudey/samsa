@@ -43,14 +43,6 @@ type txnModel struct {
 	afterLoss     bool
 }
 
-func newTxnModel() txnModel {
-	return txnModel{
-		open:          map[int64]map[TP][]int64{},
-		pendingCommit: map[int64]map[TP]map[int64]bool{},
-		committed:     map[TP]map[int64]bool{},
-	}
-}
-
 func (t *txnModel) forget() {
 	for _, parts := range t.pendingCommit {
 		for tp, offs := range parts {
