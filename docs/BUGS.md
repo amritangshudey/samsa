@@ -911,3 +911,9 @@ would happen against Kafka too (not tested against Kafka).
 - **Found by:** Simulator seed 199 (`dup=0.1`, `I1/I4: record 1179 is at t1/1 offset 53 but was acknowledged or read at offset 48`).
 - **Root cause:** Network packet duplication delivered the same `msgForward(cmdAppendRef)` twice to the leader; for non-idempotent producers (`ProducerID == -1`), applying it twice appended duplicate records.
 - **Fix:** `applyAppendRef` deduplicates by `c.objKey` against recent partition batches, returning the original `baseOffset`.
+
+### C21-6. `completeFetch` and `missingRemoteBatches` missed remote batches under long-poll wakeup and multi-partition budgets (C21)
+
+- **Found by:** Simulator seeds 273, 391, 400, 717, 850 (`I2: fetch returned nothing although HWM > offset` and `I2: OFFSET_NOT_AVAILABLE`).
+- **Root cause:** (1) `completeFetch` called `buildFetch` directly on long-poll wakeup without prefetching remote batches; (2) `missingRemoteBatches` subtracted Raft-framed sizes across partitions, skipping a partition's first remote batch that `buildFetch` later tried to read; (3) `gcObjects` could delete an expired object while an in-flight remote fetch was reading it.
+- **Fix:** `completeFetch` prefetches `missingRemoteBatches`; `missingRemoteBatches` always prefetches at least the first batch of every partition; `buildFetch` reports `ErrOffsetNotAvailable` per partition only on genuine cache miss; `gcObjects` uses a two-pass grace period.
