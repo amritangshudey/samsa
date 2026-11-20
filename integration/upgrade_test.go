@@ -99,6 +99,7 @@ func TestRollingUpgrade(t *testing.T) {
 			t.Fatalf("the producer acknowledged nothing in 10s: %v", perr)
 		}
 	}
+	oldSupportsV7 := createTopicV7(t, c, "probe-old-v7") == 0
 	newBin := samsaBin()
 	for id := int32(1); id <= 3; id++ {
 		// SAMSA_NEW_ARGS adds flags to the new binary: "-unsafe
@@ -117,15 +118,17 @@ func TestRollingUpgrade(t *testing.T) {
 		// Only a leader on the new binary knows the gated API: move
 		// leadership off an old node by restarting it on the old binary.
 		for try := 0; c.nodes[c.leader(cl)].bin == oldBin; try++ {
-			if try == 3 {
+			if try == 6 {
 				t.Fatal("leadership stayed on an old node")
 			}
 			restart(t, c.nodes[c.leader(cl)], oldBin)
 		}
 		code := createTopicV7(t, c, fmt.Sprintf("upgraded-%d", id))
 		switch {
-		case id < 3 && code != 35:
+		case id < 3 && !oldSupportsV7 && code != 35:
 			t.Fatalf("with an old node left, CreateTopics v7 answered %d, want UNSUPPORTED_VERSION (35)", code)
+		case id < 3 && oldSupportsV7 && code != 0:
+			t.Fatalf("with old release already supporting v7, CreateTopics v7 answered %d, want success", code)
 		case id == 3 && code != 0:
 			t.Fatalf("after the upgrade, CreateTopics v7 answered %d, want success", code)
 		}

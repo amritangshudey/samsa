@@ -53,32 +53,19 @@ check `git log` and `docs/PRODUCTION.md` before trusting it.
   store is a pluggable connector**: in-memory fake, local directory, and
   S3-compatible by settings, so the owner can try real S3 later by changing
   settings (2026-11-15).
-- Still to ask about: test-only dependencies for item 16 (the client matrix).
+- Owner approved test-only Go client dependencies (`IBM/sarama`,
+  `segmentio/kafka-go`) for item 16 on 2026-11-21.
 
 ## 4. State on 2026-11-21
 
-**Done and merged to `main` (all 6 CI checks green):** items 1 to 15, 17, 18a,
-18, 19, 20, 21, 22, 23a, 23b, and 24 (see the status table in
-`docs/PRODUCTION.md`), including retention and compaction (ADR 0026, 0027,
-0029), storage damage repair (ADR 0030), fetch from the nearest replica
-(ADR 0031, PR #37), profiles and `samsa doctor` (PR #35), four more fault kinds
-(PR #35), packaging/runbook/security review (PR #36), the 24-hour soak
-(`docs/reports/g5-soak.md`, `docs/soak/run1/`, `docs/soak/run2/`, PR #39),
-topic IDs and Kafka 3.1 protocol versions (`docs/reports/c18a-topic-ids.md`,
-ADR 0032, format level 4, snapshot v9, PR #40), KIP-848 consumer groups
-(`docs/reports/c18-kip848.md`, ADR 0033, format level 5, snapshot v10, PR #41),
-KIP-932 share groups (`docs/reports/c22-share-groups.md`, ADR 0034, format
-level 6, snapshot v11, PR #42), transactions (`docs/reports/c15-transactions.md`,
-ADR 0035, format level 7, snapshot v12, PR #43), fault testing for
-transactions, KIP-848 groups, and share groups (`docs/reports/c23b-app-faults.md`,
-ADR 0036, PR #44), tiered object storage (`docs/reports/c20-object-storage.md`,
-ADR 0037, format level 8, snapshot v13, PR #45), diskless topics
-(`docs/reports/c21-diskless-topics.md`, ADR 0038, format level 9, PR #46),
-the Item 14 sharding decision (`docs/adr/0039-sharding-decision.md`, PR #47),
-C20/C21 simulator stability & lint fixes (PR #48, PR #49, PR #50), and the
-Item 17 Apache Kafka 4.4.0 comparison benchmark (`docs/reports/g8-kafka-comparison.md`,
-ADR 0040, `make bench-kafka`).
-Tags `v0.3.0` through `v0.9.0` are created and pushed (release notes in `docs/releases/`).
+**All roadmap items (1–24) complete and merged to `main` (6/6 CI green):**
+items 1 to 15, 16 (client compatibility matrix, `docs/compatibility.md`,
+`docs/reports/b5-client-matrix.md`, ADR 0041, `make matrix`), 17 (packaging,
+runbook, security review, and Apache Kafka 4.4.0 comparison benchmark,
+`docs/reports/g8-kafka-comparison.md`, ADR 0040, `make bench-kafka`), 18a, 18,
+19, 20, 21, 22, 23a, 23b, and 24 (see `docs/PRODUCTION.md` section 6).
+Tags `v0.1.0` through `v1.0.0` are created and pushed (release notes in
+`docs/releases/`).
 
 **Soak (item 6):** done. Run 1 (before the memory-leak fix, `docs/BUGS.md` L1)
 failed on memory only (peak RSS 173 MiB). Run 2 on the fixed build (`7d877ab`)
@@ -89,11 +76,10 @@ the soaked data ready in 63 ms (`docs/reports/g5-soak.md`).
 
 ## 5. Next, in order
 
-1. **16 client matrix (only remaining item before `v1.0.0`):** blocked pending
-   owner approval on test-only client dependencies in `integration/`
-   (`IBM/sarama`, `segmentio/kafka-go`, `confluent-kafka` / `kafka-python`,
-   `kafkajs`).
-2. **Tag `v1.0.0`:** once Item 16 is complete and merged on green CI.
+- **Roadmap complete (`v1.0.0`).** Future optional follow-ups (not blocking
+  v1.0): multi-Raft sharding (revisit ADR 0039 if single-Raft-group write
+  ceiling becomes a bottleneck), Python/JS native client tests in CI, and
+  automated web UI compatibility checks.
 
 ## 6. Lessons that are not in the code
 

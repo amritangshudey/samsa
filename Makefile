@@ -23,7 +23,7 @@ VERSION ?=
 LDFLAGS := -ldflags "-X main.version=$(VERSION)"
 PLATFORMS := darwin/arm64 darwin/amd64 linux/arm64 linux/amd64
 
-.PHONY: soak build test race lint fuzz integration chaos sim shrink bench bench-kafka release image
+.PHONY: soak build test race lint fuzz integration matrix chaos sim shrink bench bench-kafka release image
 
 build:
 	CGO_ENABLED=0 go build -trimpath $(LDFLAGS) -o bin/samsa ./cmd/samsa
@@ -82,10 +82,14 @@ endif
 shrink:
 	go test ./internal/sim -count=1 -v -run '^TestShrinkSeed$$' -shrink=$(SEED) $(REPLAY)
 
-# Real clients (franz-go, kcat, the Java client) against the built binary.
+# Real clients (franz-go, sarama, kafka-go, kcat, Java 4.4.0, Kafka CLI) against the built binary.
 # Needs kcat and a JDK; set SAMSA_REQUIRE_CLIENTS=1 to fail when one is missing.
 integration: build $(JARS) $(KAFKA_DIST)
 	cd integration && SAMSA_BIN=$(CURDIR)/bin/samsa go test -count=1 -v ./...
+
+# Regenerate docs/compatibility.md from live client matrix test results (Item 16, G9).
+matrix: build $(JARS) $(KAFKA_DIST)
+	cd integration && SAMSA_BIN=$(CURDIR)/bin/samsa SAMSA_REQUIRE_CLIENTS=1 SAMSA_MATRIX_OUT=$(CURDIR)/docs/compatibility.md go test -count=1 -v -run '^TestClientMatrix$$' .
 
 # The chaos test alone, for CHAOS_DURATION (default here 10m); CHAOS_SEED
 # replays a scenario. Design: docs/design/a4-chaos.md.
