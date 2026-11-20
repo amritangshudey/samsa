@@ -105,6 +105,8 @@ func TestTieringLifecycleFaultsAndGC(t *testing.T) {
 	}, &dresp)
 	h.advance(2 * time.Second)
 	drainObj()
+	h.advance(2 * time.Second)
+	drainObj()
 	if shared.ObjectCount() != 0 {
 		t.Fatalf("expected GC to delete unreferenced objects, still have %d", shared.ObjectCount())
 	}

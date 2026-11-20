@@ -265,10 +265,18 @@ func (n *Node) gcObjects() {
 		}
 	}
 	for _, key := range sortedKeys(n.uploadedObjs) {
-		if !referenced[key] {
-			delete(n.uploadedObjs, key)
-			n.objDelete(key)
+		if referenced[key] {
+			n.uploadedObjs[key] = true
+			continue
 		}
+		// Two-pass grace period (1s): avoid deleting an object that an in-flight
+		// remote fetch just started reading before expiry applied.
+		if n.uploadedObjs[key] {
+			n.uploadedObjs[key] = false
+			continue
+		}
+		delete(n.uploadedObjs, key)
+		n.objDelete(key)
 	}
 }
 
@@ -286,7 +294,6 @@ func (n *Node) missingRemoteBatches(c *conn, v int16, req *wire.FetchRequest) []
 	}
 	var missing []batchRef
 	seen := map[objCacheKey]bool{}
-	size := 0
 	for _, t := range req.Topics {
 		name := t.Name
 		if v >= 13 {
@@ -311,7 +318,7 @@ func (n *Node) missingRemoteBatches(c *conn, v int16, req *wire.FetchRequest) []
 			if i < 0 {
 				i = 0
 			}
-			partLimit := min(int(q.MaxBytes), budget-size)
+			partLimit := min(int(q.MaxBytes), budget)
 			partBytes := 0
 			for ; i < len(p.batches); i++ {
 				ref := p.batches[i]
@@ -322,7 +329,7 @@ func (n *Node) missingRemoteBatches(c *conn, v int16, req *wire.FetchRequest) []
 				if bLen <= 0 {
 					bLen = int(ref.size)
 				}
-				if partBytes+bLen > partLimit && (partBytes > 0 || size > 0) {
+				if partBytes > 0 && partBytes+bLen > partLimit {
 					break
 				}
 				partBytes += bLen
@@ -336,7 +343,6 @@ func (n *Node) missingRemoteBatches(c *conn, v int16, req *wire.FetchRequest) []
 					}
 				}
 			}
-			size += partBytes
 		}
 	}
 	return missing

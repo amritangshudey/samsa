@@ -342,26 +342,8 @@ type parkedFetch struct {
 
 func (n *Node) fetch(c *conn, h wire.RequestHeader, req *wire.FetchRequest) {
 	if missing := n.missingRemoteBatches(c, h.Version, req); len(missing) > 0 {
-		n.fetchRemoteBatches(missing, func(ok bool) {
+		n.fetchRemoteBatches(missing, func(_ bool) {
 			if c.closed || n.fatal != nil {
-				return
-			}
-			if !ok {
-				resp := &wire.FetchResponse{}
-				for _, t := range req.Topics {
-					name := t.Name
-					if h.Version >= 13 {
-						name = n.st.byID[t.TopicID]
-					}
-					tr := wire.FetchTopicResponse{Name: name, TopicID: t.TopicID}
-					for _, q := range t.Partitions {
-						tr.Partitions = append(tr.Partitions, wire.FetchPartitionResponse{
-							Index: q.Index, ErrorCode: wire.ErrOffsetNotAvailable, HighWatermark: -1,
-						})
-					}
-					resp.Topics = append(resp.Topics, tr)
-				}
-				n.respond(c, h, resp)
 				return
 			}
 			n.finishFetch(c, h, req)
@@ -436,6 +418,20 @@ func (n *Node) completeFetch(f *parkedFetch) {
 	n.clock.CancelTimer(f.timer)
 	if !n.canRead() && !n.canServeFetch() { // the lease ran out while it waited
 		n.respond(f.c, f.h, refusal(f.req))
+		return
+	}
+	if missing := n.missingRemoteBatches(f.c, f.h.Version, f.req); len(missing) > 0 {
+		n.fetchRemoteBatches(missing, func(_ bool) {
+			if f.c.closed || n.fatal != nil {
+				return
+			}
+			if !n.canRead() && !n.canServeFetch() {
+				n.respond(f.c, f.h, refusal(f.req))
+				return
+			}
+			resp, _, _ := n.buildFetch(f.c, f.h.Version, f.req)
+			n.respond(f.c, f.h, resp)
+		})
 		return
 	}
 	resp, _, _ := n.buildFetch(f.c, f.h.Version, f.req)
@@ -526,7 +522,11 @@ func (n *Node) buildFetch(c *conn, v int16, req *wire.FetchRequest) (resp *wire.
 				}
 				// The response's first batch is sent whatever its size, so
 				// a consumer can always make progress.
-				pr.Records = n.readBatches(p, q.Offset, maxOff, min(int(q.MaxBytes), budget-size), size == 0)
+				var miss bool
+				pr.Records, miss = n.readBatches(p, q.Offset, maxOff, min(int(q.MaxBytes), budget-size), size == 0)
+				if miss && len(pr.Records) == 0 {
+					pr.ErrorCode = wire.ErrOffsetNotAvailable
+				}
 				size += len(pr.Records)
 			}
 			failed = failed || pr.ErrorCode != wire.ErrNone
@@ -540,19 +540,19 @@ func (n *Node) buildFetch(c *conn, v int16, req *wire.FetchRequest) (resp *wire.
 // readBatches returns whole record batches of p, starting with the one that
 // contains offset, up to limit bytes; if force is set the first batch is
 // returned even if it is larger. Each batch gets its assigned base offset.
-func (n *Node) readBatches(p *partition, offset, maxOffset int64, limit int, force bool) []byte {
+func (n *Node) readBatches(p *partition, offset, maxOffset int64, limit int, force bool) ([]byte, bool) {
 	// The last batch whose base is <= offset. Offsets are dense, so it
 	// contains offset whenever offset < p.next, except that a compacted
 	// partition has gaps: then offset may lie after the batch's last record,
 	// and the read starts at the next batch.
 	i := sort.Search(len(p.batches), func(i int) bool { return p.batches[i].base > offset }) - 1
 	if offset >= maxOffset {
-		return nil
+		return nil, false
 	}
 	if i < 0 {
 		i = 0 // below the first batch: a gap, or the start of a compacted partition
 		if len(p.batches) == 0 {
-			return nil
+			return nil, false
 		}
 	}
 	var out []byte
@@ -563,7 +563,7 @@ func (n *Node) readBatches(p *partition, offset, maxOffset int64, limit int, for
 		}
 		batch, ok := n.readBatch(ref)
 		if !ok {
-			return out
+			return out, ref.objKey != ""
 		}
 		if len(out) == 0 && ref.base+int64(wire.BatchLastOffsetDelta(batch)) < offset {
 			continue // the whole batch lies before offset: offset is in a gap
@@ -575,5 +575,5 @@ func (n *Node) readBatches(p *partition, offset, maxOffset int64, limit int, for
 		out = append(out, batch...)
 		wire.SetBatchBaseOffset(out[start:], ref.base)
 	}
-	return out
+	return out, false
 }
