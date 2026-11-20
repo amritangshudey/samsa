@@ -5,7 +5,7 @@ Written for whoever works on Samsa next, a person or another coding tool.
 merged PR is to update this file (CLAUDE.md says so). If the date below is old,
 check `git log` and `docs/PRODUCTION.md` before trusting it.
 
-**Last updated: 2026-11-16, 20:45 IST.**
+**Last updated: 2026-11-21, 01:05 IST.**
 
 ## 1. Read these first, in this order
 
@@ -55,10 +55,10 @@ check `git log` and `docs/PRODUCTION.md` before trusting it.
   settings (2026-11-15).
 - Still to ask about: test-only dependencies for item 16 (the client matrix).
 
-## 4. State on 2026-11-20
+## 4. State on 2026-11-21
 
-**Done and merged to `main` (or in PR for item 14 ADR):** items 1 to 14 (item 14 decided by ADR 0039: defer multi-Raft sharding after diskless topics), 15, 18a, 18, 19, 20, 21, 22, 23a, 23b, 24, and item 17's
-packaging/runbook/security review (see the status table in
+**Done and merged to `main` (all 6 CI checks green):** items 1 to 15, 17, 18a,
+18, 19, 20, 21, 22, 23a, 23b, and 24 (see the status table in
 `docs/PRODUCTION.md`), including retention and compaction (ADR 0026, 0027,
 0029), storage damage repair (ADR 0030), fetch from the nearest replica
 (ADR 0031, PR #37), profiles and `samsa doctor` (PR #35), four more fault kinds
@@ -73,24 +73,27 @@ ADR 0035, format level 7, snapshot v12, PR #43), fault testing for
 transactions, KIP-848 groups, and share groups (`docs/reports/c23b-app-faults.md`,
 ADR 0036, PR #44), tiered object storage (`docs/reports/c20-object-storage.md`,
 ADR 0037, format level 8, snapshot v13, PR #45), diskless topics
-(`docs/reports/c21-diskless-topics.md`, ADR 0038, format level 9, PR #46), and
-the Item 14 sharding decision (`docs/adr/0039-sharding-decision.md`).
-Tags `v0.3.0`, `v0.4.0`, `v0.5.0`, and `v0.6.0` are created and pushed.
+(`docs/reports/c21-diskless-topics.md`, ADR 0038, format level 9, PR #46),
+the Item 14 sharding decision (`docs/adr/0039-sharding-decision.md`, PR #47),
+C20/C21 simulator stability & lint fixes (PR #48, PR #49, PR #50), and the
+Item 17 Apache Kafka 4.4.0 comparison benchmark (`docs/reports/g8-kafka-comparison.md`,
+ADR 0040, `make bench-kafka`).
+Tags `v0.3.0` through `v0.9.0` are created and pushed (release notes in `docs/releases/`).
 
 **Soak (item 6):** done. Run 1 (before the memory-leak fix, `docs/BUGS.md` L1)
 failed on memory only (peak RSS 173 MiB). Run 2 on the fixed build (`7d877ab`)
 finished 2026-11-16 01:38 IST and **passed**: 43,196,136 records produced and
 consumed (41.2 GiB), 0 produce errors, 0 gaps, RSS 18–32 MiB (25 MiB at 24 h),
 data directory 29–256 MiB (198 MiB at 24 h), open files 16–26, and restart on
-the soaked data ready in 63 ms (`docs/reports/g5-soak.md`). Release notes for
-v0.3.0 to v0.6.0 are in `docs/releases/`.
+the soaked data ready in 63 ms (`docs/reports/g5-soak.md`).
 
 ## 5. Next, in order
 
-1. **16 client matrix:** blocked pending owner approval on test-only client
-   dependencies (`CLAUDE.md`).
-2. **17 Kafka comparison benchmark & release tags:** benchmark against Apache
-   Kafka on a quiet machine, plus `v0.7.0`–`v1.0.0` release notes/tags.
+1. **16 client matrix (only remaining item before `v1.0.0`):** blocked pending
+   owner approval on test-only client dependencies in `integration/`
+   (`IBM/sarama`, `segmentio/kafka-go`, `confluent-kafka` / `kafka-python`,
+   `kafkajs`).
+2. **Tag `v1.0.0`:** once Item 16 is complete and merged on green CI.
 
 ## 6. Lessons that are not in the code
 

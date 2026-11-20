@@ -68,5 +68,13 @@ removed: a cluster now refuses to start with those policies (ADR 0012).
 ## Not measured
 
 Consumers; many clients or partitions; compression; a real network; long
-runs (minutes, segment rolls, a large log); behaviour under faults. No
-comparison with Kafka or any other broker has been made.
+runs (minutes, segment rolls, a large log); behaviour under faults.
+
+## Comparison with Apache Kafka
+
+A head-to-head comparison against Apache Kafka 4.4.0 (KRaft) on the same
+machine — covering cold startup, idle RSS, produce throughput/latency (both
+page-cache and fsynced), sequential consume, 10/100/500-partition scaling, and
+3-node diskless storage — is in
+[docs/reports/g8-kafka-comparison.md](reports/g8-kafka-comparison.md)
+(`make bench-kafka`).
