@@ -70,6 +70,7 @@ func (s *NodeObjectStore) delay() time.Duration {
 	return time.Duration(s.rng.Uint64()%uint64(s.shared.Faults.MaxDelay)) + time.Millisecond
 }
 
+// Put schedules a simulated object upload for key under the configured fault profile.
 func (s *NodeObjectStore) Put(id sys.ObjOpID, key string, data []byte) {
 	cp := append([]byte(nil), data...)
 	d := s.delay()
@@ -88,6 +89,7 @@ func (s *NodeObjectStore) Put(id sys.ObjOpID, key string, data []byte) {
 	})
 }
 
+// Get schedules a simulated range read of key under the configured fault profile.
 func (s *NodeObjectStore) Get(id sys.ObjOpID, key string, offset, length int64) {
 	d := s.delay()
 	s.schedule(d, func() {
@@ -126,6 +128,7 @@ func (s *NodeObjectStore) Get(id sys.ObjOpID, key string, offset, length int64) 
 	})
 }
 
+// Delete schedules a simulated deletion of key from the shared object store.
 func (s *NodeObjectStore) Delete(id sys.ObjOpID, key string) {
 	d := s.delay()
 	s.schedule(d, func() {

@@ -102,15 +102,18 @@ func (s *S3Store) Close() {
 	s.wg.Wait()
 }
 
+// Put asynchronously uploads data under key and reports completion via onDone.
 func (s *S3Store) Put(id sys.ObjOpID, key string, data []byte) {
 	cp := append([]byte(nil), data...)
 	s.enqueue(objReq{kind: 1, id: id, key: key, data: cp})
 }
 
+// Get asynchronously fetches the byte range [offset, offset+length) of key (or the full object if length <= 0).
 func (s *S3Store) Get(id sys.ObjOpID, key string, offset, length int64) {
 	s.enqueue(objReq{kind: 2, id: id, key: key, offset: offset, length: length})
 }
 
+// Delete asynchronously removes key from the object store.
 func (s *S3Store) Delete(id sys.ObjOpID, key string) {
 	s.enqueue(objReq{kind: 3, id: id, key: key})
 }

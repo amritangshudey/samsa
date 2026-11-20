@@ -86,10 +86,11 @@ func (n *Node) onBrokerMessage(from sys.NodeID, msg []byte) {
 			return
 		}
 		need := byte(1) // cmdForwarded is level 1
-		if cmd[0] == cmdTopicConfigs {
+		switch cmd[0] {
+		case cmdTopicConfigs:
 			_, changes, _ := readTopicConfigs(wire.NewReader(cmd[1:])) // validForwarded checked it
 			need = changesLevel(changes)
-		} else if cmd[0] == cmdAppendRef {
+		case cmdAppendRef:
 			need = 9
 		}
 		if !n.canRead() || n.levelRefused(need) != "" {
