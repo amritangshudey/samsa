@@ -875,3 +875,39 @@ would happen against Kafka too (not tested against Kafka).
 - **Found by:** Simulator seeds 7, 13, 15, 20, 29 (`snapshot state: 0 bytes left, malformed true`).
 - **Root cause:** `cmdTrim` skipped `b.control != 0` batches even though control batches carry a non-zero `logIndex` from `cmdTxnEnd`; trimming past them left `b.logIndex < s.logStart`, which `decodeState` rejected.
 - **Fix:** `cmdTrim` checks `b.objKey == "" && b.logIndex < cut`, dropping trimmed control batches along with their trimmed transaction records while preserving tiered batches (`b.objKey != ""`).
+
+### C20-3. `gcObjects` deleted tiered object while `cmdTier` was still in flight (C20/C21)
+
+- **Found by:** Simulator seeds 184, 329 (`I2: the leader answered OFFSET_NOT_AVAILABLE`).
+- **Root cause:** `tierSegment` recorded `n.uploadedObjs[key] = true` before `cmdTier` applied; a concurrent `retain()` -> `gcObjects()` saw zero `batchRef`s referencing `key` in `state` and deleted `key` from `ObjectStore` before `cmdTier` committed.
+- **Fix:** Only add `key` to `n.uploadedObjs` inside the `cmdTier` / `cmdAppendRef` apply callback, and skip `gcObjects` while `n.tiering` is true.
+
+### C21-1. `OnObjectDone` did not call `n.settle()` after callback proposals (C21, before merge)
+
+- **Found by:** `TestDisklessProduceIdempotenceAndRaftBytes` (produce timed out waiting for `cmdAppendRef` to flush).
+- **Root cause:** `OnObjectDone` returned `n.fatal` directly instead of `n.settle()`, so Raft proposals enqueued inside an object-store completion callback were not flushed until a later unrelated timer fired.
+- **Fix:** `OnObjectDone` returns `n.settle()`, matching `OnTimer`, `OnConnData`, and `OnPeerMessage`.
+
+### C21-2. `cmdForwarded` whitelist rejected forwarded `cmdAppendRef` (C21, before merge)
+
+- **Found by:** `TestDisklessTopicsCluster` (`forwarded command at index 3`).
+- **Root cause:** `validForwarded` in `forward.go` allowed `cmdAppendRef`, but `case cmdForwarded:` in `state.go` still restricted inner commands to ACL and topic config commands.
+- **Fix:** Allow `cmdAppendRef` inside `case cmdForwarded:` in `state.go`.
+
+### C21-3. Diskless/tiered object keys collided after node restart in the same term (C21, before merge)
+
+- **Found by:** Simulator seeds 12, 56 (`I1/I4: record 537 is at t1/1 offset 0 but was acknowledged or read at offset 6`).
+- **Root cause:** Object keys used in-memory sequence counters (`disklessSeq` / `tierSeq`) + `raft.Term()`. Restarting in the same term reset the counter to 0, overwriting earlier committed objects in `ObjectStore`.
+- **Fix:** Include a 64-bit random nonce (`n.rand.Uint64()`) in every tiered and diskless object key.
+
+### C21-4. Multi-batch diskless `ProduceRequest` committed batches in separate Raft entries (C21, before merge)
+
+- **Found by:** Simulator seed 32 (`I1/I3: t1/0 offset 68 holds record 11545 but held record 11512`).
+- **Root cause:** Proposing each batch of a multi-batch `ProduceRequest` sequentially across async callbacks allowed a concurrent producer's `cmdAppendRef` to interleave between batch 0 and batch 1, breaking contiguous offset assignment.
+- **Fix:** Upload all batches of a partition in one `ObjectStore.Put` and commit them atomically in a single `cmdAppendRef` Raft entry.
+
+### C21-5. Duplicate forwarded `cmdAppendRef` appended non-idempotent records twice (C21, before merge)
+
+- **Found by:** Simulator seed 199 (`dup=0.1`, `I1/I4: record 1179 is at t1/1 offset 53 but was acknowledged or read at offset 48`).
+- **Root cause:** Network packet duplication delivered the same `msgForward(cmdAppendRef)` twice to the leader; for non-idempotent producers (`ProducerID == -1`), applying it twice appended duplicate records.
+- **Fix:** `applyAppendRef` deduplicates by `c.objKey` against recent partition batches, returning the original `baseOffset`.

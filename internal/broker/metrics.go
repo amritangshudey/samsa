@@ -35,8 +35,9 @@ type Metrics struct {
 	// CompactedRecords counts the records the compactor removed as leader.
 	CompactedRecords int64
 	// TieredBatches and TieredBytes count batches/bytes uploaded to object storage.
-	TieredBatches, TieredBytes  int64
-	ObjReadCount, ObjReadErrors int64
+	TieredBatches, TieredBytes     int64
+	DisklessBatches, DisklessBytes int64
+	ObjReadCount, ObjReadErrors    int64
 
 	Leader, Serving                               bool
 	Term, Committed, Applied, LogStart, LastIndex int64
@@ -56,6 +57,7 @@ type counters struct {
 	compactedRecords                int64
 	followerFetchBytes              int64
 	tieredBatches, tieredBytes      int64
+	disklessBatches, disklessBytes  int64
 	objReadCount, objReadErrors     int64
 }
 
@@ -69,6 +71,7 @@ func (n *Node) Metrics() Metrics {
 		Recovering: n.raft.Recovering(), Repaired: n.raft.Repaired(), Scrubbed: n.scrubbed,
 		RelocatedBytes: n.stats.relocatedBytes, CompactedRecords: n.stats.compactedRecords, FollowerFetchBytes: n.stats.followerFetchBytes, ForcedRetentionBytes: n.stats.forcedBytes,
 		TieredBatches: n.stats.tieredBatches, TieredBytes: n.stats.tieredBytes,
+		DisklessBatches: n.stats.disklessBatches, DisklessBytes: n.stats.disklessBytes,
 		ObjReadCount: n.stats.objReadCount, ObjReadErrors: n.stats.objReadErrors,
 		Leader: n.raft.Role() == raft.Leader, Serving: n.serving,
 		Term: n.raft.Term(), Committed: n.raft.Committed(), Applied: n.applied,

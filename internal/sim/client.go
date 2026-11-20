@@ -393,6 +393,10 @@ func (cl *client) createTopic() {
 			{Name: "min.compaction.lag.ms", Value: fmt.Sprint(cl.w.opts.compactLag)},
 		}
 	}
+	if name == "t1" && cl.w.opts.tier && !cl.w.bcfg.UnsafeDeleteBeforeUpload {
+		configured = true
+		req.Topics[0].Configs = append(req.Topics[0].Configs, wire.TopicConfig{Name: "diskless.enabled", Value: "true"})
+	}
 	resp := &wire.CreateTopicsResponse{}
 	cl.request(wire.KeyCreateTopics, v, req, resp, func(ok bool) {
 		if !ok {
@@ -523,6 +527,8 @@ func (cl *client) produce() {
 					w.stats.RecordsAcked += sp.n
 					w.tl.mark(w.opts.nodes+cl.lane, w.now, "ack", "")
 				}
+			case p.ErrorCode == wire.ErrNotLeaderOrFollower && w.opts.nodes > 1:
+				m.Unknown(sp.first, sp.n)
 			case sp.mustOK && !m.stale(epoch):
 				w.fail("the broker rejected a valid write to %v with code %d", sp.tp, p.ErrorCode)
 			default:

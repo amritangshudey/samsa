@@ -137,7 +137,7 @@ func (n *Node) OnObjectDone(id sys.ObjOpID, data []byte, err error) error {
 	}
 	delete(n.objOps, id)
 	fn(data, err)
-	return n.fatal
+	return n.settle()
 }
 
 func (n *Node) objPut(key string, data []byte, onDone func(error)) {
@@ -207,7 +207,7 @@ upload:
 		return false
 	}
 	n.tierSeq++
-	key := fmt.Sprintf("tier/%d-%d-%d-%d.obj", n.raft.Term(), start, end, n.tierSeq)
+	key := fmt.Sprintf("tier/%d-%d-%d-%016x.obj", n.raft.Term(), start, end, n.rand.Uint64())
 	n.tiering = true
 
 	// Deliberate bug mutation (Item 20): propose cmdTier (allowing local segment
@@ -237,11 +237,11 @@ upload:
 			ref := batchRef{objKey: key, objOffset: e.objOffset, objLen: e.objLen, objCRC: e.objCRC}
 			n.objCache.put(ref, buf[e.objOffset:e.objOffset+e.objLen])
 		}
-		n.uploadedObjs[key] = true
 		n.cleaning++
 		n.propose(encodeTier(key, entries), func(result) {
 			n.cleaning--
 			n.tiering = false
+			n.uploadedObjs[key] = true
 			n.stats.tieredBatches += int64(len(entries))
 			n.stats.tieredBytes += int64(len(buf))
 		})
@@ -251,7 +251,7 @@ upload:
 
 // gcObjects deletes uploaded objects that are no longer referenced by any batchRef.
 func (n *Node) gcObjects() {
-	if n.obj == nil || len(n.uploadedObjs) == 0 {
+	if n.obj == nil || n.tiering || len(n.uploadedObjs) == 0 {
 		return
 	}
 	referenced := map[string]bool{}

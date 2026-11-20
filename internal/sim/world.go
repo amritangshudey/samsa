@@ -434,9 +434,7 @@ func (w *world) start(nd *simNode) {
 			if inc.dead || w.err != nil {
 				return
 			}
-			if herr := inc.n.OnObjectDone(id, data, err); herr != nil {
-				w.fail("node %d OnObjectDone: %v", nd.id, herr)
-			}
+			w.call(inc, inc.n.OnObjectDone(id, data, err))
 		})
 	}
 	inc.n = broker.New(cfg, inc, inc, nd.disk, w.rng.Fork())

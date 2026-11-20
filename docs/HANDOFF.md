@@ -57,7 +57,7 @@ check `git log` and `docs/PRODUCTION.md` before trusting it.
 
 ## 4. State on 2026-11-20
 
-**Done and merged to `main` (or in PR for item 20):** items 1 to 13, 15, 18a, 18, 19, 20, 22, 23a, 23b, 24, and item 17's
+**Done and merged to `main` (or in PR for item 21):** items 1 to 13, 15, 18a, 18, 19, 20, 21, 22, 23a, 23b, 24, and item 17's
 packaging/runbook/security review (see the status table in
 `docs/PRODUCTION.md`), including retention and compaction (ADR 0026, 0027,
 0029), storage damage repair (ADR 0030), fetch from the nearest replica
@@ -71,8 +71,9 @@ KIP-932 share groups (`docs/reports/c22-share-groups.md`, ADR 0034, format
 level 6, snapshot v11, PR #42), transactions (`docs/reports/c15-transactions.md`,
 ADR 0035, format level 7, snapshot v12, PR #43), fault testing for
 transactions, KIP-848 groups, and share groups (`docs/reports/c23b-app-faults.md`,
-ADR 0036, PR #44), and tiered object storage (`docs/reports/c20-object-storage.md`,
-ADR 0037, format level 8, snapshot v13).
+ADR 0036, PR #44), tiered object storage (`docs/reports/c20-object-storage.md`,
+ADR 0037, format level 8, snapshot v13, PR #45), and diskless topics
+(`docs/reports/c21-diskless-topics.md`, ADR 0038, format level 9).
 Tags `v0.3.0`, `v0.4.0`, `v0.5.0`, and `v0.6.0` are created and pushed.
 
 **Soak (item 6):** done. Run 1 (before the memory-leak fix, `docs/BUGS.md` L1)
@@ -85,12 +86,10 @@ v0.3.0 to v0.6.0 are in `docs/releases/`.
 
 ## 5. Next, in order
 
-1. **21 diskless topics:** per-topic `diskless.enabled=true` on top of C20's
-   unified `ObjectStore` and `batchRef` references (`cmdAppendRef`, leaderless
-   produce).
-2. **14 sharding**, decided by ADR after 21; **16** client matrix (ask about
-   dependencies); **17** the Kafka comparison benchmark (needs a quiet machine,
-   after the soak) and tags.
+1. **14 sharding:** ADR deciding whether multi-Raft sharding is needed now that
+   diskless topics (item 21) handle leaderless writes and high-throughput data.
+2. **16 client matrix** (ask about test-only client dependencies); **17** the
+   Kafka comparison benchmark (needs a quiet machine, after the soak) and tags.
 
 ## 6. Lessons that are not in the code
 
