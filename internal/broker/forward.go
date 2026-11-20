@@ -33,6 +33,10 @@ type forward struct {
 // the leader to. Only idempotent commands come here: ACL changes and topic
 // configs, which may apply twice if a forward is retried.
 func (n *Node) proposeOrForward(cmd []byte, done func(result)) {
+	n.proposeOrForwardTimeout(cmd, forwardTimeout, done)
+}
+
+func (n *Node) proposeOrForwardTimeout(cmd []byte, timeout time.Duration, done func(result)) {
 	if n.canRead() {
 		n.propose(cmd, done)
 		return
@@ -45,7 +49,7 @@ func (n *Node) proposeOrForward(cmd []byte, done func(result)) {
 	}
 	tag := n.rand.Uint64()
 	f := &forward{done: done}
-	f.timer = n.after(forwardTimeout, func() {
+	f.timer = n.after(timeout, func() {
 		delete(n.forwards, tag)
 		notController()
 	})
@@ -85,6 +89,8 @@ func (n *Node) onBrokerMessage(from sys.NodeID, msg []byte) {
 		if cmd[0] == cmdTopicConfigs {
 			_, changes, _ := readTopicConfigs(wire.NewReader(cmd[1:])) // validForwarded checked it
 			need = changesLevel(changes)
+		} else if cmd[0] == cmdAppendRef {
+			need = 9
 		}
 		if !n.canRead() || n.levelRefused(need) != "" {
 			n.net.SendPeer(from, binary.BigEndian.AppendUint64([]byte{brokerMsg, msgForwardRefused}, tag))
@@ -112,6 +118,9 @@ func validForwarded(cmd []byte) bool {
 		return r.Err() == nil && r.Len() == 0 && validFilter(f)
 	case cmdTopicConfigs:
 		_, _, ok := readTopicConfigs(r)
+		return ok
+	case cmdAppendRef:
+		_, ok := decodeAppendRef(r)
 		return ok
 	}
 	return false

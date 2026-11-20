@@ -152,7 +152,7 @@ func (n *Node) clean() bool {
 	if end < 0 {
 		return false // the head is the segment being written
 	}
-	if n.obj != nil && n.st.level >= 8 && !n.cfg.UnsafeTrimLive {
+	if n.obj != nil && n.st.level >= 8 && !n.cfg.UnsafeTrimLive && !n.cfg.CompactionOff {
 		if n.tierSegment(start, end) {
 			return true
 		}

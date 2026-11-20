@@ -64,6 +64,8 @@ const (
 	cmdTxnEnd          byte = 30
 	// Object storage (docs/design/c20-object-storage.md, ADR 0037).
 	cmdTier byte = 31
+	// Diskless topics (docs/design/c21-diskless-topics.md, ADR 0038).
+	cmdAppendRef byte = 32
 )
 
 // formatLevel is the highest cluster format level this build reads and
@@ -78,9 +80,10 @@ const (
 // cmdSGRemove, cmdShareAcquire, cmdShareAck, cmdShareExpire and state
 // snapshot version 11 (ADR 0034); level 7 transactions: cmdTxnInit..cmdTxnEnd
 // and state snapshot version 12 (ADR 0035); level 8 object storage: cmdTier
-// and state snapshot version 13 (ADR 0037).
+// and state snapshot version 13 (ADR 0037); level 9 diskless topics:
+// cmdAppendRef and diskless.enabled (ADR 0038).
 // Raise it with every change to what the log or a snapshot may hold.
-const formatLevel = 8
+const formatLevel = 9
 
 // errBadCommand marks a command in the log that cannot be decoded. The log
 // is checksummed, so this means a bug or a newer on-disk format, and the
@@ -116,11 +119,14 @@ func topicUUID(name string) (u wire.UUID) {
 
 // topicConfigKeys are the topic configurations Samsa keeps (design C2,
 // section 3).
-var topicConfigKeys = []string{"cleanup.policy", "delete.retention.ms", "min.compaction.lag.ms", "retention.bytes", "retention.ms"}
+var topicConfigKeys = []string{"cleanup.policy", "delete.retention.ms", "diskless.enabled", "min.compaction.lag.ms", "retention.bytes", "retention.ms"}
 
 // configLevel is the format level a config setting needs: 2 for
-// retention, 3 for compaction.
+// retention, 3 for compaction, 9 for diskless topics.
 func configLevel(name, value string) byte {
+	if name == "diskless.enabled" && value == "true" {
+		return 9
+	}
 	if name == "delete.retention.ms" || name == "min.compaction.lag.ms" || name == "cleanup.policy" && value != "delete" {
 		return 3
 	}
@@ -168,6 +174,10 @@ func checkTopicConfig(name, value string) string {
 	case "delete.retention.ms", "min.compaction.lag.ms":
 		if v, err := strconv.ParseInt(value, 10, 64); err != nil || v < 0 {
 			return fmt.Sprintf("Invalid value %s for configuration %s: must be an integer of at least 0", value, name)
+		}
+	case "diskless.enabled":
+		if value != "true" && value != "false" {
+			return fmt.Sprintf("Invalid value %s for configuration %s: must be true or false", value, name)
 		}
 	case "cleanup.policy":
 		switch value {
@@ -1011,7 +1021,7 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 
 	case cmdForwarded:
 		origin, tag, inner := r.Int32(), r.Int64(), r.Rest()
-		if r.Err() != nil || len(inner) == 0 || (inner[0] != cmdCreateACL && inner[0] != cmdDeleteACLs && inner[0] != cmdTopicConfigs) {
+		if r.Err() != nil || len(inner) == 0 || (inner[0] != cmdCreateACL && inner[0] != cmdDeleteACLs && inner[0] != cmdTopicConfigs && inner[0] != cmdAppendRef) {
 			return result{}, fmt.Errorf("%w: forwarded command at index %d", errBadCommand, index)
 		}
 		res, err := s.apply(index, inner)
@@ -1229,6 +1239,9 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 
 	case cmdTier:
 		return s.applyTier(r, index)
+
+	case cmdAppendRef:
+		return s.applyAppendRef(r, index)
 
 	case cmdGroupAssignment:
 		name, generation := r.String(false), r.Int32()

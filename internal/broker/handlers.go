@@ -142,6 +142,8 @@ func (n *Node) createTopics(c *conn, h wire.RequestHeader, req *wire.CreateTopic
 			res.ErrorCode, res.ErrorMessage = wire.ErrTopicAlreadyExists, "topic already exists"
 		case configErr != "":
 			res.ErrorCode, res.ErrorMessage = wire.ErrInvalidConfig, configErr
+		case configs["diskless.enabled"] == "true" && n.obj == nil:
+			res.ErrorCode, res.ErrorMessage = wire.ErrInvalidConfig, "diskless.enabled requires object storage (-object-store-endpoint)"
 		case len(configs) > 0 && n.levelRefused(configsLevel(configs)) != "":
 			res.ErrorCode, res.ErrorMessage = wire.ErrUnsupportedVersion, n.levelRefused(configsLevel(configs))
 		case h.Version >= 7 && n.levelRefused(4) != "":
@@ -222,6 +224,7 @@ func (n *Node) produce(c *conn, h wire.RequestHeader, req *wire.ProduceRequest) 
 			// Validate every batch of the partition before proposing any,
 			// so a partition's records are accepted or rejected together.
 			var sizes []int
+			var infos []wire.BatchInfo
 			switch {
 			case req.Acks < -1 || req.Acks > 1:
 				res.ErrorCode = wire.ErrInvalidRequiredAcks
@@ -231,6 +234,8 @@ func (n *Node) produce(c *conn, h wire.RequestHeader, req *wire.ProduceRequest) 
 				res.ErrorCode = wire.ErrUnknownTopicOrPartition
 			case len(p.Records) == 0:
 				res.ErrorCode = wire.ErrInvalidRequest
+			case isDiskless(n.st.topics[t.Name]) && (n.obj == nil || n.st.level < 9):
+				res.ErrorCode = wire.ErrNotLeaderOrFollower
 			}
 			for rest := p.Records; res.ErrorCode == wire.ErrNone && len(rest) > 0; {
 				info, code := wire.ParseBatch(rest, n.cfg.MaxBatchBytes)
@@ -247,9 +252,22 @@ func (n *Node) produce(c *conn, h wire.RequestHeader, req *wire.ProduceRequest) 
 					}
 				}
 				sizes = append(sizes, info.Size)
+				infos = append(infos, info)
 				rest = rest[info.Size:]
 			}
 			if res.ErrorCode != wire.ErrNone {
+				continue
+			}
+			if isDiskless(n.st.topics[t.Name]) {
+				pending++
+				n.produceDisklessPartition(t.Name, p.Index, p.Records, sizes, infos, func(baseOffset int64, errCode int16) {
+					if errCode != wire.ErrNone {
+						res.ErrorCode = errCode
+					} else {
+						res.BaseOffset = baseOffset
+					}
+					done()
+				})
 				continue
 			}
 			rest := p.Records

@@ -416,6 +416,7 @@ type Node struct {
 	objCache     *objCache
 	tiering      bool
 	tierSeq      uint64
+	disklessSeq  uint64
 	uploadedObjs map[string]bool
 }
 
@@ -1214,12 +1215,15 @@ func (n *Node) dispatch(c *conn, frame []byte) {
 		return
 	}
 	var resp wire.Message
-	// A follower answers a consumer's fetch from what it has applied (follower.go).
+	// A follower answers a consumer's fetch from what it has applied (follower.go),
+	// and accepts diskless produce requests directly (diskless.go).
 	_, isFetch := req.(*wire.FetchRequest)
 	followerFetch := isFetch && !n.canRead() && h.Version >= 11 && n.canServeFetch()
-	if !n.canRead() && !followerFetch {
+	prodReq, isProduce := req.(*wire.ProduceRequest)
+	disklessProduce := isProduce && !n.canRead() && n.canServeDisklessProduce(prodReq)
+	if !n.canRead() && !followerFetch && !disklessProduce {
 		resp = refusal(req)
-	} else if f := notLeaderFault(req); !followerFetch && f != nil && n.faults.inject(FaultNotLeader) {
+	} else if f := notLeaderFault(req); !followerFetch && !disklessProduce && f != nil && n.faults.inject(FaultNotLeader) {
 		n.log.Info("fault injected", "kind", FaultNotLeader, "key", h.Key, "fault", n.faults.count)
 		resp = f
 	}
