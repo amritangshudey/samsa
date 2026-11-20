@@ -917,3 +917,9 @@ would happen against Kafka too (not tested against Kafka).
 - **Found by:** Simulator seeds 273, 391, 400, 717, 850 (`I2: fetch returned nothing although HWM > offset` and `I2: OFFSET_NOT_AVAILABLE`).
 - **Root cause:** (1) `completeFetch` called `buildFetch` directly on long-poll wakeup without prefetching remote batches; (2) `missingRemoteBatches` subtracted Raft-framed sizes across partitions, skipping a partition's first remote batch that `buildFetch` later tried to read; (3) `gcObjects` could delete an expired object while an in-flight remote fetch was reading it.
 - **Fix:** `completeFetch` prefetches `missingRemoteBatches`; `missingRemoteBatches` always prefetches at least the first batch of every partition; `buildFetch` reports `ErrOffsetNotAvailable` per partition only on genuine cache miss; `gcObjects` uses a two-pass grace period.
+
+### C21-7. Concurrent `cmdTier`/`cmdAppendRef` during remote prefetch and unsynced `DeleteRecords` rollback with object GC (C21)
+
+- **Found by:** Simulator seeds 924 and 1473 (`I2: the leader answered OFFSET_NOT_AVAILABLE`).
+- **Root cause:** (1) A concurrent `cmdTier` or `cmdAppendRef` applying while `fetchRemoteBatches` was in flight introduced a new uncached remote batch before `finishFetch` ran; (2) under `SyncInterval`/`SyncNever`, `gcObjects` deleted an object after `DeleteRecords` before a crash rolled back the unsynced `DeleteRecords`, resurrecting a `batchRef` to a deleted object.
+- **Fix:** `prefetchAndFetch` re-checks `missingRemoteBatches` (up to 4 passes) after a successful prefetch; `gcObjects` runs only under `SyncAlways`.
