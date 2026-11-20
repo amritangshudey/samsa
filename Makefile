@@ -23,7 +23,7 @@ VERSION ?=
 LDFLAGS := -ldflags "-X main.version=$(VERSION)"
 PLATFORMS := darwin/arm64 darwin/amd64 linux/arm64 linux/amd64
 
-.PHONY: soak build test race lint fuzz integration chaos sim shrink bench release image
+.PHONY: soak build test race lint fuzz integration chaos sim shrink bench bench-kafka release image
 
 build:
 	CGO_ENABLED=0 go build -trimpath $(LDFLAGS) -o bin/samsa ./cmd/samsa
@@ -103,6 +103,10 @@ soak: build
 # Takes about 15 minutes. Results go to bench.md.
 bench: build
 	cd integration && SAMSA_BIN=$(CURDIR)/bin/samsa SAMSA_BENCH=1 SAMSA_BENCH_OUT=$(CURDIR)/bench.md go test -count=1 -v -timeout 2h -run '^TestBench$$' .
+
+# Comparison benchmark against Apache Kafka 4.4.0 (KRaft); docs/design/g8-kafka-comparison.md.
+bench-kafka: build $(KAFKA_DIST)
+	cd integration && SAMSA_BIN=$(CURDIR)/bin/samsa SAMSA_BENCH_KAFKA=1 SAMSA_BENCH_KAFKA_OUT=$(CURDIR)/bench-kafka.md go test -count=1 -v -timeout 2h -run '^TestBenchKafka$$' .
 
 integration/.cache/kafka-clients-%.jar:
 	mkdir -p $(@D) && curl -sfL -o $@ $(MAVEN)/org/apache/kafka/kafka-clients/$*/kafka-clients-$*.jar
