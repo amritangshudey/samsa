@@ -341,16 +341,28 @@ type parkedFetch struct {
 }
 
 func (n *Node) fetch(c *conn, h wire.RequestHeader, req *wire.FetchRequest) {
-	if missing := n.missingRemoteBatches(c, h.Version, req); len(missing) > 0 {
-		n.fetchRemoteBatches(missing, func(_ bool) {
-			if c.closed || n.fatal != nil {
-				return
-			}
-			n.finishFetch(c, h, req)
-		})
-		return
+	n.prefetchAndFetch(c, h, req, 0, func() { n.finishFetch(c, h, req) })
+}
+
+func (n *Node) prefetchAndFetch(c *conn, h wire.RequestHeader, req *wire.FetchRequest, pass int, finish func()) {
+	if pass < 4 {
+		if missing := n.missingRemoteBatches(c, h.Version, req); len(missing) > 0 {
+			n.fetchRemoteBatches(missing, func(ok bool) {
+				if c.closed || n.fatal != nil {
+					return
+				}
+				if ok {
+					// A concurrent cmdTier or cmdAppendRef may have added a new
+					// remote batch while we waited; re-check before building.
+					n.prefetchAndFetch(c, h, req, pass+1, finish)
+					return
+				}
+				finish()
+			})
+			return
+		}
 	}
-	n.finishFetch(c, h, req)
+	finish()
 }
 
 func (n *Node) finishFetch(c *conn, h wire.RequestHeader, req *wire.FetchRequest) {
@@ -420,22 +432,14 @@ func (n *Node) completeFetch(f *parkedFetch) {
 		n.respond(f.c, f.h, refusal(f.req))
 		return
 	}
-	if missing := n.missingRemoteBatches(f.c, f.h.Version, f.req); len(missing) > 0 {
-		n.fetchRemoteBatches(missing, func(_ bool) {
-			if f.c.closed || n.fatal != nil {
-				return
-			}
-			if !n.canRead() && !n.canServeFetch() {
-				n.respond(f.c, f.h, refusal(f.req))
-				return
-			}
-			resp, _, _ := n.buildFetch(f.c, f.h.Version, f.req)
-			n.respond(f.c, f.h, resp)
-		})
-		return
-	}
-	resp, _, _ := n.buildFetch(f.c, f.h.Version, f.req)
-	n.respond(f.c, f.h, resp)
+	n.prefetchAndFetch(f.c, f.h, f.req, 0, func() {
+		if !n.canRead() && !n.canServeFetch() {
+			n.respond(f.c, f.h, refusal(f.req))
+			return
+		}
+		resp, _, _ := n.buildFetch(f.c, f.h.Version, f.req)
+		n.respond(f.c, f.h, resp)
+	})
 }
 
 // wakeFetches answers the parked fetches that newly applied data satisfies.

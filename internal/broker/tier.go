@@ -250,8 +250,10 @@ upload:
 }
 
 // gcObjects deletes uploaded objects that are no longer referenced by any batchRef.
+// Under non-strict sync policies (SyncInterval / SyncNever), a crash can roll back
+// an unsynced DeleteRecords and resurrect a batchRef, so GC only runs under SyncAlways.
 func (n *Node) gcObjects() {
-	if n.obj == nil || n.tiering || len(n.uploadedObjs) == 0 {
+	if n.obj == nil || n.tiering || n.cfg.Sync != SyncAlways || len(n.uploadedObjs) == 0 {
 		return
 	}
 	referenced := map[string]bool{}
