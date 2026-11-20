@@ -90,6 +90,8 @@ type Stats struct {
 	LeaderFaults, LeaderIsolated, TermsWithoutLeader int
 	// VoterChanges counts AddRaftVoter and RemoveRaftVoter acknowledged.
 	VoterChanges int
+	// TieredPuts and TieredGets count simulated object-store operations.
+	TieredPuts, TieredGets int
 }
 
 // simNode is one machine of the cluster: a disk that outlives the
@@ -144,6 +146,7 @@ type world struct {
 
 	model   *Model
 	clients []*client
+	objs    *simsys.SharedObjects
 	// I9: every producer id handed out
 	producerIDs map[int64]bool
 	quiet       bool // no new faults, no new client requests
@@ -424,7 +427,19 @@ func (w *world) start(nd *simNode) {
 		}
 	}
 	inc := &incarnation{w: w, node: nd, timers: map[sys.TimerID]uint64{}}
-	inc.n = broker.New(nd.cfg, inc, inc, nd.disk, w.rng.Fork())
+	cfg := nd.cfg
+	if w.objs != nil {
+		objRng := w.rng.Fork()
+		cfg.ObjectStore = simsys.NewNodeObjectStore(w.objs, objRng, w.after, func(id sys.ObjOpID, data []byte, err error) {
+			if inc.dead || w.err != nil {
+				return
+			}
+			if herr := inc.n.OnObjectDone(id, data, err); herr != nil {
+				w.fail("node %d OnObjectDone: %v", nd.id, herr)
+			}
+		})
+	}
+	inc.n = broker.New(cfg, inc, inc, nd.disk, w.rng.Fork())
 	w.note(nd.tag("node-start"), 0, nil)
 	w.tl.up(nd.id, w.now)
 	if err := inc.n.OnStart(); err != nil {

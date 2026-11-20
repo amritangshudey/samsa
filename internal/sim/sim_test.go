@@ -308,6 +308,7 @@ var mutations = []mutationCase{
 	{"assign a consumer partition before its owner revokes it", func(c *broker.Config) { c.UnsafeAssignBeforeRevoke = true }},
 	{"drop a share-group lock without redelivery", func(c *broker.Config) { c.UnsafeDropShareLock = true }},
 	{"ignore LSO in READ_COMMITTED fetch", func(c *broker.Config) { c.UnsafeReadUncommittedInReadCommitted = true }},
+	{"delete local segment before upload confirmed", func(c *broker.Config) { c.UnsafeDeleteBeforeUpload = true }},
 }
 
 // addStats adds every counter of s to total.

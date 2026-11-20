@@ -323,6 +323,37 @@ type parkedFetch struct {
 }
 
 func (n *Node) fetch(c *conn, h wire.RequestHeader, req *wire.FetchRequest) {
+	if missing := n.missingRemoteBatches(c, h.Version, req); len(missing) > 0 {
+		n.fetchRemoteBatches(missing, func(ok bool) {
+			if c.closed || n.fatal != nil {
+				return
+			}
+			if !ok {
+				resp := &wire.FetchResponse{}
+				for _, t := range req.Topics {
+					name := t.Name
+					if h.Version >= 13 {
+						name = n.st.byID[t.TopicID]
+					}
+					tr := wire.FetchTopicResponse{Name: name, TopicID: t.TopicID}
+					for _, q := range t.Partitions {
+						tr.Partitions = append(tr.Partitions, wire.FetchPartitionResponse{
+							Index: q.Index, ErrorCode: wire.ErrOffsetNotAvailable, HighWatermark: -1,
+						})
+					}
+					resp.Topics = append(resp.Topics, tr)
+				}
+				n.respond(c, h, resp)
+				return
+			}
+			n.finishFetch(c, h, req)
+		})
+		return
+	}
+	n.finishFetch(c, h, req)
+}
+
+func (n *Node) finishFetch(c *conn, h wire.RequestHeader, req *wire.FetchRequest) {
 	resp, size, failed := n.buildFetch(c, h.Version, req)
 	if !n.serving {
 		n.stats.followerFetchBytes += int64(size)

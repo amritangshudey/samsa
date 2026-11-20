@@ -207,3 +207,20 @@ type File interface {
 	// Close releases the file. It does not sync.
 	Close() error
 }
+
+// ObjOpID names one in-flight object-store operation. IDs are chosen by the node.
+type ObjOpID uint64
+
+// ObjectStore is an asynchronous S3-compatible object store boundary
+// (docs/design/c20-object-storage.md, ADR 0037). Each call starts an
+// operation and delivers its result via [ObjectHandler.OnObjectDone].
+type ObjectStore interface {
+	Put(id ObjOpID, key string, data []byte)
+	Get(id ObjOpID, key string, offset, length int64)
+	Delete(id ObjOpID, key string)
+}
+
+// ObjectHandler is optionally implemented by a [Handler] that uses an [ObjectStore].
+type ObjectHandler interface {
+	OnObjectDone(id ObjOpID, data []byte, err error) error
+}

@@ -15,10 +15,11 @@ import (
 // log index; version 5 the ACLs; version 6 the SCRAM credentials; version
 // 7 the format level; version 8 topic configurations and batch sizes
 // (design C2); version 9 topic IDs (ADR 0032); version 10 consumer-protocol
-// groups (ADR 0033); version 11 share groups (ADR 0034); version 12 transactions (ADR 0035). Each later field comes last,
+// groups (ADR 0033); version 11 share groups (ADR 0034); version 12 transactions (ADR 0035);
+// version 13 object storage batch references (ADR 0037). Each later field comes last,
 // so the encoder writes the oldest version that holds the state: an older
 // build in the cluster during a rolling upgrade can still read it (design G7).
-const snapshotVersion = 12
+const snapshotVersion = 13
 
 // encode returns the whole state machine as bytes, for a Raft snapshot
 // (docs/design/a1-snapshots.md). Maps are walked in sorted order, so equal
@@ -27,6 +28,8 @@ const snapshotVersion = 12
 func (s *state) encode() []byte {
 	version := byte(4)
 	switch {
+	case s.level >= 8:
+		version = 13
 	case s.level >= 7:
 		version = 12
 	case s.level >= 6:
@@ -323,6 +326,19 @@ func (s *state) encode() []byte {
 			}
 		}
 	}
+	if version >= 13 {
+		for _, name := range s.names {
+			for _, p := range s.topics[name].parts {
+				w.ArrayLen(false, len(p.batches))
+				for _, b := range p.batches {
+					w.String(false, b.objKey)
+					w.Int32(b.objOffset)
+					w.Int32(b.objLen)
+					w.Int32(int32(b.objCRC))
+				}
+			}
+		}
+	}
 	return w.B
 }
 
@@ -354,7 +370,9 @@ func decodeState(b []byte) (*state, error) {
 			// Not when compaction removed the batches around the start
 			// (the first batch may begin after it).
 			if p.start < 0 || p.start > p.next || len(p.batches) > 0 && (p.start == p.next ||
-				len(p.batches) > 1 && p.batches[1].base <= p.start || slices.ContainsFunc(p.batches, func(b batchRef) bool { return b.logIndex < s.logStart })) {
+				len(p.batches) > 1 && p.batches[1].base <= p.start || slices.ContainsFunc(p.batches, func(b batchRef) bool {
+				return b.logIndex < s.logStart && (v < 13 || b.logIndex != 0)
+			})) {
 				bad = true
 			}
 			if v >= 3 {
@@ -627,6 +645,38 @@ func decodeState(b []byte) (*state, error) {
 				p.aborted = wire.Array(r, false, func() abortedTxn {
 					return abortedTxn{pid: r.Int64(), firstOffset: r.Int64(), lastOffset: r.Int64()}
 				})
+			}
+		}
+	}
+	bad = bad || (v >= 13) != (s.level >= 8)
+	if v >= 13 {
+		for _, name := range s.names {
+			for _, p := range s.topics[name].parts {
+				objs := wire.Array(r, false, func() struct {
+					k string
+					o int32
+					l int32
+					c uint32
+				} {
+					return struct {
+						k string
+						o int32
+						l int32
+						c uint32
+					}{k: r.String(false), o: r.Int32(), l: r.Int32(), c: uint32(r.Int32())}
+				})
+				bad = bad || r.Err() == nil && len(objs) != len(p.batches)
+				if len(objs) == len(p.batches) {
+					for i := range p.batches {
+						p.batches[i].objKey = objs[i].k
+						p.batches[i].objOffset = objs[i].o
+						p.batches[i].objLen = objs[i].l
+						p.batches[i].objCRC = objs[i].c
+						if p.batches[i].logIndex == 0 && p.batches[i].objKey == "" && p.batches[i].control == 0 {
+							bad = true
+						}
+					}
+				}
 			}
 		}
 	}
