@@ -74,23 +74,24 @@ const (
 
 // options is the swarm configuration: what kind of run the seed selected.
 type options struct {
-	faults      []fault
-	diskCrash   bool // also crash inside recovery
-	disconnects bool
-	faultEvery  time.Duration
-	producers   int
-	consumers   int
-	vandals     int
-	members     int
-	cgMembers    int // KIP-848 consumer group members (cg.go)
-	sgMembers    int // KIP-932 share group members (sg.go)
-	txnProducers int // transactional producers (txn.go)
-	rcConsumers  int // read_committed consumers (txn.go)
-	idempotent  int // idempotent producers (idempotent.go)
-	expiry      time.Duration // producer expiry as chosen, before any mutation
-	classic     bool          // Raft without PreVote and CheckQuorum
-	admins      int           // admin clients (admin.go)
-	nodes       int
+	faults       []fault
+	diskCrash    bool // also crash inside recovery
+	disconnects  bool
+	faultEvery   time.Duration
+	producers    int
+	consumers    int
+	vandals      int
+	members      int
+	cgMembers    int           // KIP-848 consumer group members (cg.go)
+	sgMembers    int           // KIP-932 share group members (sg.go)
+	txnProducers int           // transactional producers (txn.go)
+	rcConsumers  int           // read_committed consumers (txn.go)
+	tier         bool          // tiered object storage (ADR 0037)
+	idempotent   int           // idempotent producers (idempotent.go)
+	expiry       time.Duration // producer expiry as chosen, before any mutation
+	classic      bool          // Raft without PreVote and CheckQuorum
+	admins       int           // admin clients (admin.go)
+	nodes        int
 	// changes adds spares nodes that start with no configuration and a
 	// client that adds and removes voters (voters.go, design C1).
 	changes bool
@@ -205,6 +206,7 @@ func Run(cfg Config) Result {
 	w.opts.sgMembers = pick.Intn(4) // drawn last
 	w.opts.txnProducers = pick.Intn(3)
 	w.opts.rcConsumers = pick.Intn(2)
+	w.opts.tier = pick.Chance(0.35) && !w.opts.rot && !w.opts.compact
 	if cfg.Calm {
 		w.opts.drop, w.opts.dup = 0, 0
 	}
@@ -226,6 +228,18 @@ func Run(cfg Config) Result {
 				w.opts.rcConsumers = 1
 			}
 		}
+		if w.bcfg.UnsafeDeleteBeforeUpload {
+			w.opts.tier = true
+			w.bcfg.SegmentBytes = 16384
+			w.bcfg.ObjCacheBytes = 1
+		}
+	}
+	if w.opts.tier {
+		faults := simsys.ObjFaults{LostPut: 0.15, LostGet: 0.10, TornRead: 0.15, MaxDelay: 20 * time.Millisecond}
+		if w.bcfg.UnsafeDeleteBeforeUpload {
+			faults.LostPut = 0.5
+		}
+		w.objs = simsys.NewSharedObjects(faults)
 	}
 	strict := w.bcfg.Sync == broker.SyncAlways
 	if w.opts.nodes > 1 && !strict {
@@ -314,6 +328,9 @@ func Run(cfg Config) Result {
 	w.quiet = true
 	w.heal()
 	w.opts.drop, w.opts.dup = 0, 0
+	if w.objs != nil {
+		w.objs.Faults = simsys.ObjFaults{}
+	}
 	for _, nd := range w.nodes {
 		nd.disk.CrashAfter(0)
 		nd.disk.SetSyncErrorRate(0)
@@ -321,6 +338,10 @@ func Run(cfg Config) Result {
 	w.runUntil(w.now+sys.Instant(2*answerBound), nil)
 	if w.err == nil {
 		w.finalChecks()
+	}
+	if w.objs != nil {
+		w.stats.TieredPuts = int(w.objs.Puts)
+		w.stats.TieredGets = int(w.objs.Gets)
 	}
 	var maxTerm int64
 	for _, nd := range w.nodes {

@@ -61,15 +61,18 @@ const (
 	evClose
 	evTimer
 	evPeer
+	evObject
 )
 
 type event struct {
-	kind  eventKind
-	conn  *tcpConn
-	data  []byte
-	timer sys.TimerID
-	gen   uint64
-	from  sys.NodeID
+	kind   eventKind
+	conn   *tcpConn
+	data   []byte
+	timer  sys.TimerID
+	gen    uint64
+	from   sys.NodeID
+	objOp  sys.ObjOpID
+	objErr error
 }
 
 // armed is one arming of a timer. gen tells a firing that is still wanted
@@ -206,8 +209,17 @@ func (l *Loop) deliver(h sys.Handler, ev event) error {
 		return h.OnTimer(ev.timer)
 	case evPeer:
 		return h.OnPeerMessage(ev.from, ev.data)
+	case evObject:
+		if oh, ok := h.(sys.ObjectHandler); ok {
+			return oh.OnObjectDone(ev.objOp, ev.data, ev.objErr)
+		}
 	}
 	return nil
+}
+
+// PostObjectDone delivers an asynchronous object-store completion to the loop's handler.
+func (l *Loop) PostObjectDone(id sys.ObjOpID, data []byte, err error) {
+	l.post(event{kind: evObject, objOp: id, data: data, objErr: err})
 }
 
 func (l *Loop) shutdown() {

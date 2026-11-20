@@ -549,6 +549,9 @@ func (n *Node) readBatch(ref batchRef) ([]byte, bool) {
 	if ref.control != 0 {
 		return wire.ControlBatch(ref.base, 0, ref.controlPID, ref.controlEpoch, ref.maxTimestamp, ref.control == 2), true
 	}
+	if ref.objKey != "" {
+		return n.objCache.get(ref)
+	}
 	cmd, _, err := n.raft.Read(ref.logIndex)
 	if err != nil {
 		if n.fatal == nil {

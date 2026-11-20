@@ -34,6 +34,9 @@ type Metrics struct {
 	FollowerFetchBytes int64
 	// CompactedRecords counts the records the compactor removed as leader.
 	CompactedRecords int64
+	// TieredBatches and TieredBytes count batches/bytes uploaded to object storage.
+	TieredBatches, TieredBytes  int64
+	ObjReadCount, ObjReadErrors int64
 
 	Leader, Serving                               bool
 	Term, Committed, Applied, LogStart, LastIndex int64
@@ -52,6 +55,8 @@ type counters struct {
 	relocatedBytes, forcedBytes     int64
 	compactedRecords                int64
 	followerFetchBytes              int64
+	tieredBatches, tieredBytes      int64
+	objReadCount, objReadErrors     int64
 }
 
 // Metrics returns the node's counters and gauges. A node is ready when it
@@ -63,6 +68,8 @@ func (n *Node) Metrics() Metrics {
 		Connections: n.stats.conns, Dropped: n.stats.drops, Open: len(n.conns), Faults: n.faults.count,
 		Recovering: n.raft.Recovering(), Repaired: n.raft.Repaired(), Scrubbed: n.scrubbed,
 		RelocatedBytes: n.stats.relocatedBytes, CompactedRecords: n.stats.compactedRecords, FollowerFetchBytes: n.stats.followerFetchBytes, ForcedRetentionBytes: n.stats.forcedBytes,
+		TieredBatches: n.stats.tieredBatches, TieredBytes: n.stats.tieredBytes,
+		ObjReadCount: n.stats.objReadCount, ObjReadErrors: n.stats.objReadErrors,
 		Leader: n.raft.Role() == raft.Leader, Serving: n.serving,
 		Term: n.raft.Term(), Committed: n.raft.Committed(), Applied: n.applied,
 		LogStart: n.raft.LogStart(), LastIndex: n.raft.LastIndex(), Snapshot: n.raft.SnapshotIndex(),

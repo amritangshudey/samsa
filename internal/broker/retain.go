@@ -39,6 +39,7 @@ func (n *Node) retain() {
 		if n.expiring == 0 {
 			n.expireRecords(now)
 		}
+		n.gcObjects()
 		n.cleanActive = true // clean decides
 		n.compactActive = true
 	}
@@ -120,7 +121,9 @@ func (n *Node) liveBytes() int64 {
 	for _, name := range n.st.names {
 		for _, p := range n.st.topics[name].parts {
 			for _, b := range p.batches {
-				live += int64(b.size)
+				if b.objKey == "" {
+					live += int64(b.size)
+				}
 			}
 		}
 	}
@@ -145,15 +148,27 @@ func (n *Node) clean() bool {
 		n.forceTrim(limit)
 		return false
 	}
+	end := n.raft.SegmentEnd(start)
+	if end < 0 {
+		return false // the head is the segment being written
+	}
+	if n.obj != nil && n.st.level >= 8 && !n.cfg.UnsafeTrimLive {
+		if n.tierSegment(start, end) {
+			return true
+		}
+		if end > n.trimProposed {
+			n.trimProposed = end
+			n.cleaning++
+			n.propose(encodeTrim(end), func(result) { n.cleaning-- })
+			return true
+		}
+		return false
+	}
 	// One segment more than the budget: then, either way, more than a
 	// segment of the log is dead, and every round frees some of it. Without
 	// that margin, a log of live data only could be copied around for ever.
 	if float64(disk) <= n.cfg.RetentionSlack*float64(max(live, segment))+float64(segment) && (limit <= 0 || disk <= limit) {
 		return false
-	}
-	end := n.raft.SegmentEnd(start)
-	if end < 0 {
-		return false // the head is the segment being written
 	}
 	copied := 0
 	for _, name := range n.st.names {
@@ -162,7 +177,7 @@ func (n *Node) clean() bool {
 		}
 		for i, p := range n.st.topics[name].parts {
 			for _, b := range p.batches {
-				if b.logIndex < start || b.logIndex >= end {
+				if b.objKey != "" || b.control != 0 || b.logIndex < start || b.logIndex >= end {
 					continue
 				}
 				if copied >= cleanBatchBytes {

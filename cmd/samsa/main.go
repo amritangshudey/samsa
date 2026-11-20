@@ -85,6 +85,7 @@ func run() error {
 	peersText := flag.String("peers", "", "every node of the cluster, this one included, as id=clientHost:port/peerHost:port[@rack],... (default: a cluster of this node alone); a rack lets consumers that name theirs read from a node in it")
 	join := flag.Bool("join", false, "with -peers: join a running cluster instead of founding one; -peers names this node and the current voters, and `samsa node add` makes it a voter")
 	retention := flag.Int64("retention-bytes", 0, "a safety limit on the whole log on disk: past it, the oldest data goes even if its topic would keep it (0: none)")
+	segmentBytes := flag.Int64("segment-bytes", 0, "command log segment size in bytes (0: 64 MiB default)")
 	retentionTime := flag.Duration("retention-time", 0, "how long a topic without retention.ms keeps records (0: forever)")
 	retentionPart := flag.Int64("retention-bytes-per-partition", 0, "how many bytes a partition of a topic without retention.bytes keeps (0: no limit)")
 	deleteRetention := flag.Duration("delete-retention-time", 0, "how long a tombstone of a compacted topic without delete.retention.ms is kept once it is the latest record of its key (0: 24h)")
@@ -107,6 +108,12 @@ func run() error {
 	superUsers := flag.String("super-users", "", "with -acl: principals allowed everything, comma-separated (User:admin,...)")
 	allowNoACL := flag.Bool("allow-if-no-acl", false, "with -acl: allow requests on resources that have no ACL (Kafka's allow.everyone.if.no.acl.found)")
 	faultsSpec := flag.String("faults", "", "inject Kafka-level faults to test applications: seed=N[,rate=R][,kinds=lostack+notleader+rebalance] (see docs/guides/testing-applications.md)")
+	objEndpoint := flag.String("object-store-endpoint", "", "S3-compatible endpoint (http://..., https://...) or file:///dir for tiered object storage")
+	objBucket := flag.String("object-store-bucket", "", "object storage bucket name")
+	objRegion := flag.String("object-store-region", "us-east-1", "object storage signing region")
+	objAccessKey := flag.String("object-store-access-key", "", "S3 access key ID (optional for unsigned/file backends)")
+	objSecretKey := flag.String("object-store-secret-key", "", "S3 secret access key")
+	objCacheBytes := flag.Int64("object-cache-bytes", 32<<20, "in-memory cache size in bytes for tiered remote batches")
 	configFile := flag.String("config", "", "file of key = value lines, one per flag; flags on the command line win")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	profileName := flag.String("profile", "", "dev, test or prod: defaults for the flags you did not set (`samsa doctor` shows what is in use and what is risky)")
@@ -260,13 +267,32 @@ func run() error {
 	if *slack <= 1 {
 		return errors.New("-retention-slack must be above 1: at 1 or below, every segment is always over budget")
 	}
+	var objStore sys.ObjectStore
+	if *objEndpoint != "" {
+		s3s, err := realsys.NewS3Store(realsys.S3Config{
+			Endpoint:  *objEndpoint,
+			Bucket:    *objBucket,
+			Region:    *objRegion,
+			AccessKey: *objAccessKey,
+			SecretKey: *objSecretKey,
+		}, loop)
+		if err != nil {
+			return fmt.Errorf("-object-store-endpoint: %w", err)
+		}
+		defer s3s.Close()
+		objStore = s3s
+	}
 	cfg := broker.Config{
 		NodeID: int32(*nodeID), Host: host, Port: int32(port), Peers: peers, Join: *join,
-		Sync: policy, SyncInterval: *syncInterval, Logger: logger, RetentionBytes: *retention, ProducerExpiry: *producerExpiry,
+		Sync: policy, SyncInterval: *syncInterval, Logger: logger, SegmentBytes: *segmentBytes, RetentionBytes: *retention, ProducerExpiry: *producerExpiry,
 		RetentionTime: *retentionTime, RetentionBytesPerPartition: *retentionPart, RetentionSlack: *slack,
 		DeleteRetentionTime: *deleteRetention, CompactionMapBytes: *mapBytes,
 		ScrubBytesPerSecond: *scrubRate, ScrubInterval: *scrubEvery,
+		ObjectStore: objStore, ObjCacheBytes: *objCacheBytes,
 		Faults: faults, SASL: sasl, Authorization: auth,
+	}
+	if *segmentBytes > 0 && *segmentBytes < 2<<20 {
+		cfg.MaxBatchBytes = int(*segmentBytes / 2)
 	}
 	if auth != nil && sasl == nil {
 		logger.Warn("ACLs without SASL: every client is User:ANONYMOUS")

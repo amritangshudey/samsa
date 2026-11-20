@@ -83,7 +83,7 @@ type Config struct {
 	// RetentionTime and RetentionBytesPerPartition are the retention of a
 	// topic that sets no retention.ms or retention.bytes (design C2). Zero
 	// keeps everything.
-	RetentionTime                time.Duration
+	RetentionTime              time.Duration
 	RetentionBytesPerPartition int64
 	// RetentionSlack is how many times the live data the log may grow to
 	// before the cleaner copies live batches out of its head segment.
@@ -115,6 +115,13 @@ type Config struct {
 	// UnsafeTrimLive makes the cleaner trim the head segment without
 	// copying its live batches first.
 	UnsafeTrimLive bool
+	// ObjectStore enables tiered object storage when non-nil (ADR 0037).
+	ObjectStore sys.ObjectStore
+	// ObjCacheBytes bounds the in-memory cache for remote batches. Default 32 MiB.
+	ObjCacheBytes int64
+	// UnsafeDeleteBeforeUpload makes the tierer propose cmdTier (allowing local
+	// segment trim) before ObjectStore.Put is confirmed (Item 20 mutation).
+	UnsafeDeleteBeforeUpload bool
 	// ProducerExpiry is how long an idempotent producer may write nothing
 	// before every partition forgets it (docs/design/a2-idempotent-producer.md,
 	// section 7). Default 24 h; negative never expires.
@@ -329,7 +336,7 @@ type Node struct {
 	rand  sys.Random
 	log   *slog.Logger
 
-	raft    *raft.Raft
+	raft *raft.Raft
 	// levels are the format levels other nodes reported to this leader;
 	// levelProposed is set while a cmdSetLevel is in flight; reportedTo
 	// is the leader this node last reported its level to (level.go).
@@ -339,9 +346,9 @@ type Node struct {
 	// confIndex is raft.ConfIndex when the transport was last told the
 	// voters' addresses (peerAddrs).
 	confIndex int64
-	pids    producerIDs
-	st      *state
-	applied int64 // every log entry below this index has been applied
+	pids      producerIDs
+	st        *state
+	applied   int64 // every log entry below this index has been applied
 	// serving is set while this node leads and has applied an entry of
 	// its own term: only then does it know that its state holds
 	// everything clients were ever told. servingTerm is that term.
@@ -359,35 +366,35 @@ type Node struct {
 	// compacting counts cmdCompact proposals in flight, and compactActive
 	// says the compactor had work at its last round. keyMaps is its soft
 	// state per compacted partition (compact.go).
-	compacting    int
+	compacting int
 	// The scrub (scrub.go): where it goes on reading, when it may start the
 	// next pass, and what it has read.
-	scrubAt     int64
-	damageNoted bool
-	scrubRestAt sys.Instant
-	scrubbed    int64
+	scrubAt       int64
+	damageNoted   bool
+	scrubRestAt   sys.Instant
+	scrubbed      int64
 	compactActive bool
 	keyMaps       map[*partition]*keyMap
-	retainAt           sys.Instant
-	cleanActive        bool // the cleaner had work at its last round
+	retainAt      sys.Instant
+	cleanActive   bool // the cleaner had work at its last round
 	// expirySamples are (time, applied index) pairs the serving leader
 	// wrote down, oldest first: soft state, so a new leader starts empty
 	// and expiry is only ever late.
 	expirySamples []expirySample
 
-	waiters    []waiter // ascending by index; non-empty only while serving
-	flushArmed bool
-	conns      map[sys.ConnID]*conn
+	waiters        []waiter // ascending by index; non-empty only while serving
+	flushArmed     bool
+	conns          map[sys.ConnID]*conn
 	parked         []*parkedFetch // in arrival order
 	parkedShare    []*parkedShareFetch
 	shareSessions  map[shareSessionKey]*shareSession
 	shareLockTimer sys.TimerID
 	txnTimer       sys.TimerID
-	nextTimer  sys.TimerID
-	timers     map[sys.TimerID]func() // armed by after; see groups.go
-	forwards   map[uint64]*forward    // ACL changes sent to the leader, by tag; see forward.go
-	change     *voterChange           // the voter change in progress; see membership.go
-	groups     map[string]*softGroup
+	nextTimer      sys.TimerID
+	timers         map[sys.TimerID]func() // armed by after; see groups.go
+	forwards       map[uint64]*forward    // ACL changes sent to the leader, by tag; see forward.go
+	change         *voterChange           // the voter change in progress; see membership.go
+	groups         map[string]*softGroup
 
 	// fatal is the first error after which the node cannot be trusted: a
 	// failed write or sync, or an undecodable command. Every handler
@@ -401,6 +408,15 @@ type Node struct {
 	// exist (sasl.go). Drawn only when SASL is on, so that a node without
 	// it draws exactly what it always did.
 	unknownKey []byte
+
+	// Object storage (tier.go, ADR 0037).
+	obj          sys.ObjectStore
+	nextObjOp    sys.ObjOpID
+	objOps       map[sys.ObjOpID]func([]byte, error)
+	objCache     *objCache
+	tiering      bool
+	tierSeq      uint64
+	uploadedObjs map[string]bool
 }
 
 // New returns a node that will use the given clock, network, disk and
@@ -413,7 +429,11 @@ func New(cfg Config, clock sys.Clock, net sys.Network, disk sys.Disk, rand sys.R
 		timers: map[sys.TimerID]func(){}, groups: map[string]*softGroup{}, forwards: map[uint64]*forward{},
 		shareSessions: map[shareSessionKey]*shareSession{},
 		levels:        map[sys.NodeID]levelReport{},
-		faults: faulter{cfg: cfg.Faults, state: cfg.Faults.Seed},
+		faults:        faulter{cfg: cfg.Faults, state: cfg.Faults.Seed},
+		obj:           cfg.ObjectStore,
+		objOps:        map[sys.ObjOpID]func([]byte, error){},
+		objCache:      newObjCache(cfg.ObjCacheBytes),
+		uploadedObjs:  map[string]bool{},
 	}
 	if cfg.SASL != nil {
 		for range 4 {

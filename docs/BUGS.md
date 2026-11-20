@@ -863,3 +863,15 @@ would happen against Kafka too (not tested against Kafka).
 - **Found by:** `TestJudgeTransactions` (`out/0: batch at offset 1 is compressed or malformed: wire: malformed input`).
 - **Root cause:** `EndTxn` appends a partition batch entry whose `logIndex` points to a `cmdTxnEnd` Raft log entry rather than a `cmdAppend` entry. `verdict.records()` passed the `cmdTxnEnd` payload directly to `appendBatch`/`wire.DecodeBatch`.
 - **Fix:** `verdict.records()` skips non-`cmdAppend` log entries, control batches, offsets `>= p.lso()`, and aborted transactional records.
+
+### C20-1. `decodeState` v13 rejected tiered batches with `logIndex == 0` (C20, before merge)
+
+- **Found by:** `TestTieringLifecycleFaultsAndGC` (`snapshot state: 0 bytes left, malformed true`).
+- **Root cause:** `decodeState` validated `b.logIndex >= s.logStart` for all batches before decoding v13's `objKey` fields; tiered batches have `b.logIndex == 0` and `b.objKey != ""`.
+- **Fix:** For `v >= 13`, allow `b.logIndex == 0` during the initial batch loop and verify in the v13 section that any batch with `b.logIndex == 0` has `b.objKey != ""` or `b.control != 0`.
+
+### C20-2. `cmdTrim` retained control batches with `logIndex < cut` (C20, before merge)
+
+- **Found by:** Simulator seeds 7, 13, 15, 20, 29 (`snapshot state: 0 bytes left, malformed true`).
+- **Root cause:** `cmdTrim` skipped `b.control != 0` batches even though control batches carry a non-zero `logIndex` from `cmdTxnEnd`; trimming past them left `b.logIndex < s.logStart`, which `decodeState` rejected.
+- **Fix:** `cmdTrim` checks `b.objKey == "" && b.logIndex < cut`, dropping trimmed control batches along with their trimmed transaction records while preserving tiered batches (`b.objKey != ""`).

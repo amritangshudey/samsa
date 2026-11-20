@@ -62,6 +62,8 @@ const (
 	cmdTxnAddOffsets   byte = 28
 	cmdTxnOffsetCommit byte = 29
 	cmdTxnEnd          byte = 30
+	// Object storage (docs/design/c20-object-storage.md, ADR 0037).
+	cmdTier byte = 31
 )
 
 // formatLevel is the highest cluster format level this build reads and
@@ -75,9 +77,10 @@ const (
 // state snapshot version 10 (ADR 0033); level 6 share groups: cmdSGBeat,
 // cmdSGRemove, cmdShareAcquire, cmdShareAck, cmdShareExpire and state
 // snapshot version 11 (ADR 0034); level 7 transactions: cmdTxnInit..cmdTxnEnd
-// and state snapshot version 12 (ADR 0035).
+// and state snapshot version 12 (ADR 0035); level 8 object storage: cmdTier
+// and state snapshot version 13 (ADR 0037).
 // Raise it with every change to what the log or a snapshot may hold.
-const formatLevel = 7
+const formatLevel = 8
 
 // errBadCommand marks a command in the log that cannot be decoded. The log
 // is checksummed, so this means a bug or a newer on-disk format, and the
@@ -312,6 +315,11 @@ type batchRef struct {
 	control      uint8
 	controlPID   int64
 	controlEpoch int16
+	// objKey is non-empty when this batch lives in object storage (logIndex == 0).
+	objKey    string
+	objOffset int32
+	objLen    int32
+	objCRC    uint32
 }
 
 type partition struct {
@@ -652,19 +660,19 @@ func (s *state) partition(name string, index int32) *partition {
 // proposed it.
 type result struct {
 	errCode       int16
-	errMsg        string                                 // CGBeat/SGBeat: why
-	cg            *wire.ConsumerGroupHeartbeatResponse   // CGBeat: the answer
-	sgBeat        *wire.ShareGroupHeartbeatResponse      // SGBeat: the answer
-	shareAcquired map[tpKey][]wire.AcquiredRange         // ShareAcquire
-	shareAckErrs  map[tpKey]int16                        // ShareAck
-	txnPID        int64                                  // TxnInit / TxnEnd
-	txnEpoch      int16                                  // TxnInit / TxnEnd
-	txnPartErrs   map[tpName]int16                       // TxnAddParts
-	txnOffsetErrs map[tpName]int16                       // TxnOffsetCommit
-	applied       bool                                   // Compact / ShareExpire
-	baseOffset int64      // Append: offset assigned to the batch's first record; DeleteRecords: the new start
-	topicID    wire.UUID  // CreateTopic: the topic's UUID
-	acls       []wire.ACL // DeleteAcls: the ACLs removed
+	errMsg        string                               // CGBeat/SGBeat: why
+	cg            *wire.ConsumerGroupHeartbeatResponse // CGBeat: the answer
+	sgBeat        *wire.ShareGroupHeartbeatResponse    // SGBeat: the answer
+	shareAcquired map[tpKey][]wire.AcquiredRange       // ShareAcquire
+	shareAckErrs  map[tpKey]int16                      // ShareAck
+	txnPID        int64                                // TxnInit / TxnEnd
+	txnEpoch      int16                                // TxnInit / TxnEnd
+	txnPartErrs   map[tpName]int16                     // TxnAddParts
+	txnOffsetErrs map[tpName]int16                     // TxnOffsetCommit
+	applied       bool                                 // Compact / ShareExpire
+	baseOffset    int64                                // Append: offset assigned to the batch's first record; DeleteRecords: the new start
+	topicID       wire.UUID                            // CreateTopic: the topic's UUID
+	acls          []wire.ACL                           // DeleteAcls: the ACLs removed
 	// origin and tag are set for a forwarded command: the node that is
 	// waiting for this result, and how it knows its request.
 	origin int32
@@ -845,7 +853,7 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 				// one below the cut goes, so that offsets stay dense.
 				drop := 0
 				for i, b := range p.batches {
-					if b.logIndex < cut {
+					if b.objKey == "" && b.logIndex < cut {
 						drop = i + 1
 					}
 				}
@@ -1218,6 +1226,9 @@ func (s *state) apply(index int64, cmd []byte) (result, error) {
 			return result{}, fmt.Errorf("%w: txn end at index %d", errBadCommand, index)
 		}
 		return s.applyTxnEnd(index, cmd), nil
+
+	case cmdTier:
+		return s.applyTier(r, index)
 
 	case cmdGroupAssignment:
 		name, generation := r.String(false), r.Int32()
