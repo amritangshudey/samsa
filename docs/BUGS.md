@@ -941,3 +941,9 @@ would happen against Kafka too (not tested against Kafka).
 - **Seeds:** 623301106, 623299220, 623229758, 623258340, 623254219, reported as `with faults stopped for 10s the nodes did not all come back, elect a leader and catch up`, with one node far behind (often `recovering true`). All with `append=1`.
 - **Root cause:** with `append=1` the leader sends one entry per AppendEntries and waits for its answer, so a follower catches up at one entry per round trip (about 110 per second). A node whose damage repair emptied its log (damage under the snapshot) needed about 25 s to refetch thousands of entries; `settled` waited `answerBound`, 10 s. The node was making progress the whole time.
 - **Fix:** `settled` waits `settleBound`, 60 s; every seed above converges within it. Seeds that agree sooner are unchanged (the wait ends as soon as they agree). With the default `MaxAppendBytes` (1 MiB) the catch-up is a few messages.
+
+### F3. An AlterUserScramCredentials request with a null salted password was not stable under re-encoding (C8b, found by CI 2026-11-20)
+
+- **Found by:** `make fuzz` on the macOS CI runner of the PR #50 merge (`FuzzDecodeMessage`: `not stable under encode/decode`, first and second both printing `SaltedPassword:[]`). A later run passes only because the fuzzer did not draw the input again.
+- **Root cause:** `Salt` and `SaltedPassword` are `bytes` without `nullableVersions` in the official schema, but the decoder read them with `r.Bytes`, which returns nil for a null. The encoder writes nil as empty, so the second decode returned an empty slice where the first had nil. Harmless on the broker (`scram.FromSalted` refuses a salted password of the wrong length), but `make fuzz` could fail any CI run.
+- **Fix:** read both as `nonNull(r.Bytes(true))`, as `sasl.go` does for its non-nullable bytes. The input is in `internal/wire/testdata/fuzz/FuzzDecodeMessage/alter-scram-null-salted-password`.
