@@ -30,6 +30,9 @@ jobs:
   # `make sim SEED=<n>` replays it anywhere.
   sim:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write # for the nightly run's failure report below
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -40,7 +43,26 @@ jobs:
       - if: github.event_name != 'schedule'
         run: make sim SEEDS=3000
       - if: github.event_name == 'schedule'
-        run: go test ./internal/sim -count=1 -v -timeout 5h -run '^TestSim$' -seeds=30000 -base-seed=$(( $(date +%s) / 86400 * 30000 ))
+        run: |
+          set -o pipefail
+          go test ./internal/sim -count=1 -v -timeout 5h -run '^TestSim$' -seeds=30000 -base-seed=$(( $(date +%s) / 86400 * 30000 )) | tee sim.log
+      # The nightly run once failed for eight nights unseen (docs/HANDOFF.md,
+      # section 6). A failure opens an issue with the failing seeds, or adds
+      # them to the one still open.
+      - if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          body="$(grep -E 'sim_test.go:[0-9]+: (seed [0-9]+|[0-9]+ seeds)' sim.log | sed -E 's/ \(nodes=[^)]*\)//; s/; totals .*//' | cut -c1-1000 | head -50)"
+          body="$body
+
+          Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. Replay a seed with \`make sim SEED=<n>\` on the commit the run tested ($GITHUB_SHA)."
+          n=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search 'in:title "Nightly simulator run failed"' --json number --jq '.[0].number // empty')
+          if [ -n "$n" ]; then
+            gh issue comment "$n" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "Nightly simulator run failed" --body "$body"
+          fi
 
   # Exhaustive search of three Raft nodes (docs/design/b2-exhaustive.md)
   # at larger bounds, and the shortest counterexample of a mutation.
