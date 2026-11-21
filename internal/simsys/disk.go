@@ -144,6 +144,14 @@ func (d *Disk) FileSize(name string) int {
 	return -1
 }
 
+// Holds reports whether file name still holds data at offset off in its
+// synced copy: whether damage that Corrupt made is still there, or went with
+// a truncation or with the file.
+func (d *Disk) Holds(name string, off int, data []byte) bool {
+	ino := d.files[clean(name)]
+	return ino != nil && off >= 0 && off+len(data) <= len(ino.durable) && bytes.Equal(ino.durable[off:off+len(data)], data)
+}
+
 // Corrupt overwrites bytes of file name, at offset off, with data: in the
 // synced copy and in the live one, as latent damage to data at rest (bit
 // rot, a misdirected write). It reports whether the file exists and is long
