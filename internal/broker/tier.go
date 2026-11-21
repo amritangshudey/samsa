@@ -41,6 +41,9 @@ func encodeTier(objKey string, entries []tierEntry) []byte {
 	return w.B
 }
 
+// tierEntryBytes is what one entry adds to encodeTier's output.
+func tierEntryBytes(topic string) int { return 2 + len(topic) + 4 + 8 + 8 + 4 + 4 + 4 }
+
 func (s *state) applyTier(r *wire.Reader, index int64) (result, error) {
 	if s.level < 8 {
 		return result{}, fmt.Errorf("%w: tier at index %d requires level 8", errBadCommand, index)
@@ -166,22 +169,27 @@ func (n *Node) objDelete(key string) {
 
 // --- Tiering closed segments ---
 
-// tierSegment packs all live local batches in [start, end) into one object,
-// uploads it to ObjectStore, and proposes cmdTier once confirmed. Returns true
-// if tiering work was started (or is already in flight).
+// tierSegment packs live local batches in [start, end) into one object,
+// uploads it to ObjectStore, and proposes cmdTier once confirmed; what does
+// not fit one object goes in the next. Returns true if tiering work was
+// started (or is already in flight).
 func (n *Node) tierSegment(start, end int64) bool {
 	if n.tiering {
 		return true
 	}
 	var buf []byte
 	var entries []tierEntry
+	entryBytes := 0
 	for _, name := range n.st.names {
 		for i, p := range n.st.topics[name].parts {
 			for _, b := range p.batches {
 				if b.objKey != "" || b.control != 0 || b.logIndex < start || b.logIndex >= end {
 					continue
 				}
-				if len(buf) >= cleanBatchBytes && len(entries) > 0 {
+				// The cmdTier must fit a log entry: its entries in
+				// MaxBatchBytes, and its header and Raft's in
+				// commandOverhead, whatever the first entry (BUGS.md S16).
+				if len(entries) > 0 && (len(buf) >= cleanBatchBytes || entryBytes+tierEntryBytes(name) > n.cfg.MaxBatchBytes) {
 					goto upload
 				}
 				data, ok := n.readBatch(b)
@@ -199,6 +207,7 @@ func (n *Node) tierSegment(start, end int64) bool {
 					objLen:      int32(len(data)),
 					objCRC:      crc32.Checksum(data, castagnoliTable),
 				})
+				entryBytes += tierEntryBytes(name)
 			}
 		}
 	}
@@ -238,12 +247,14 @@ upload:
 			n.objCache.put(ref, buf[e.objOffset:e.objOffset+e.objLen])
 		}
 		n.cleaning++
-		n.propose(encodeTier(key, entries), func(result) {
+		n.propose(encodeTier(key, entries), func(res result) {
 			n.cleaning--
 			n.tiering = false
-			n.uploadedObjs[key] = true
-			n.stats.tieredBatches += int64(len(entries))
-			n.stats.tieredBytes += int64(len(buf))
+			n.uploadedObjs[key] = true // referenced, or garbage for gcObjects
+			if res.errCode == wire.ErrNone {
+				n.stats.tieredBatches += int64(len(entries))
+				n.stats.tieredBytes += int64(len(buf))
+			}
 		})
 	})
 	return true
