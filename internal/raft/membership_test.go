@@ -334,3 +334,45 @@ func TestAloneByChangeWaits(t *testing.T) {
 		t.Fatal("a node alone in its bootstrap configuration did not lead at once")
 	}
 }
+
+// A spare that became a voter, led, and appended its own removal is still
+// needed after a restart (BUGS.md S15, nightly seed 623233840): the other
+// voter never saw the removal and needs its vote, and its longer log makes
+// it refuse that vote. Its commit index is gone, so the configuration in
+// force at it is its empty bootstrap one: the configurations after it,
+// which name the node, must count too.
+func TestRemovedSpareStandsAfterRestart(t *testing.T) {
+	c := newCluster(t, 2, nil)
+	c.startAll()
+	c.elect(1)
+	c.run(nil)
+	c.tick(0, nil)
+	c.join(3)
+	if err := c.r(1).AddLearner(3); err != nil {
+		t.Fatal(err)
+	}
+	c.run(nil)
+	c.mustChange(1, members(1, 2, 3))
+	c.mustChange(1, members(2, 3))
+	c.elect(3)
+	c.run(nil)
+	c.tick(0, nil)
+	if _, err := c.r(3).ChangeMembers(members(2)); err != nil {
+		t.Fatal(err)
+	}
+	c.settle(c.nodes[3])
+	c.queue = nil // node 2 never sees the removal
+	c.crash(3)
+	c.start(3)
+	if !c.r(3).mayStand() {
+		t.Fatal("node 3 does not stand, though node 2 needs its vote")
+	}
+	c.fire(3, TimerElection) // it wins with node 2's vote, commits its removal, and steps down
+	c.run(nil)
+	c.tick(0, nil)
+	c.fire(2, TimerElection)
+	c.run(nil)
+	if c.r(2).Role() != Leader || !slices.Equal(voterIDs(c.r(2)), []sys.NodeID{2}) {
+		t.Fatalf("node 2: role %d, voters %v; want the leader of {2}", c.r(2).Role(), voterIDs(c.r(2)))
+	}
+}
