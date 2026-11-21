@@ -257,7 +257,7 @@ Where the code differs from section 3, and why:
   check, not the broker.
 - Retention by size only, one bound for the whole log, not per topic.
 
-## 8. Addendum (2026-11-21): a transfer outlives newer snapshots (BUGS.md S21; ADR 0043)
+## 8. Addendum (2026-11-21): a transfer outlives newer snapshots (BUGS.md S21, S22; ADR 0043)
 
 **Problem.** Section 3.3 sends "the leader's newest snapshot". The code
 took the newest one at every chunk, and started again from the first byte
@@ -267,9 +267,9 @@ leader took a snapshot per entry and a transfer needed about a thousand
 round trips. A follower stayed behind with no fault active.
 
 **Decision (ADR 0043).**
-- The progress keeps the snapshot under way, with its bytes, until the
-  follower holds the log past it. The leader takes the newest only when
-  its log start has passed the one under way.
+- The progress keeps the snapshot under way, with its bytes and the log
+  start when it was taken, until the follower holds the log past it. The
+  leader takes the newest when its log start has moved since then (S22).
 - While a follower that answered within an election timeout has a snapshot
   under way, `Compact` removes nothing. The cut the follower was sent
   stays in the leader's log until the follower holds the log past the
@@ -277,15 +277,20 @@ round trips. A follower stayed behind with no fault active.
 
 **Second review.**
 - Safety does not change. Compacting less only keeps entries longer. The
-  snapshot sent may be older than the newest, but it is committed state and
-  still covers the gap to the leader's log start: that is checked before
-  every chunk. The follower installs it and catches up from the log, as it
+  snapshot sent may be older than the newest, but it is committed state,
+  and it goes with the log start the leader had when it took it, its
+  newest then. The follower installs it and catches up from the log, as it
   would have if the transfer had begun before the newer snapshot.
 - The last chunk carries the cut, the leader's log start when it is sent.
-  With the hold that is the start when the transfer began. If the hold
-  lapsed because the follower went silent, the start may have moved. It
-  is then either still at or below the snapshot's index + 1, and so valid,
-  or past it, and the transfer starts again with the newest snapshot.
+  The transfer goes on only while that start has not moved since the
+  snapshot was taken, so the cut is the one the snapshot was taken with.
+  The first version checked only that the start was at or below the
+  snapshot's index + 1, and this review called that valid. It is valid
+  for Raft. But the broker's state names record data from its own log
+  start, below the index, and the broker compacts as its newest snapshot
+  allows. After a hold lapsed, an older snapshot went with a newer cut, and
+  the follower's log lacked batches its state named (S22, found by the
+  simulator before merge).
 - The hold is bounded by the transfer, plus the follower's catch-up to the
   snapshot index. A follower that stops answering for an election timeout
   releases it. A broken follower that answers every chunk but never

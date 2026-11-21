@@ -2,7 +2,7 @@
 
 **Status:** Accepted  
 **Date:** 2026-11-21  
-**Item:** A1 (snapshots), after `docs/BUGS.md` S21; amends `docs/design/a1-snapshots.md` section 3.3
+**Item:** A1 (snapshots), after `docs/BUGS.md` S21 and S22; amends `docs/design/a1-snapshots.md` section 3.3
 
 ## Context
 
@@ -24,10 +24,13 @@ during the transfer does compact that far.
 ## Decision
 
 1. A follower's progress keeps the snapshot being sent: its index, its
-   bytes, and the next offset. The leader sends that snapshot's chunks until
-   the follower holds the log past it. It takes the newest snapshot only
-   when there is none under way, or when its log start has passed the one
-   under way.
+   bytes, the next offset, and the leader's log start when it took it, the
+   newest then. The leader sends that snapshot's chunks, with that log start
+   as the cut, until the follower holds the log past it. It takes the
+   newest snapshot when there is none under way, or when its log start has
+   moved since it took the one under way. The broker compacts only as far
+   as its newest snapshot allows, so an older one's state may name record
+   data below the new start (S22).
 2. While a follower that answered within an election timeout has a
    snapshot under way, the leader compacts nothing. That lasts from the
    first chunk until the follower holds the log past the snapshot. So the
@@ -38,6 +41,11 @@ during the transfer does compact that far.
 
 - **Start again with the newest snapshot (before).** It never ends a
   transfer longer than the interval between snapshots (S21).
+- **Go on with the snapshot under way while its index covers the log
+  start** (the first fix). That is all Raft needs, but the broker's state
+  names record data from its own log start, below the snapshot's index.
+  After a follower went silent, an older snapshot went with a newer cut,
+  and the follower's log lacked batches its state named (S22).
 - **Keep the snapshot under way, and compact as before.** A leader that
   writes a segment or more during the transfer compacts past it.
   `TestSnapshotTransferOutlivesNewerSnapshots` fails that way.

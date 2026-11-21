@@ -59,3 +59,6 @@
 4174 # S20: a follower fetch that waited for an object read was answered during a snapshot install, and the node stopped
 2595 # S20
 1668 # S21: a snapshot transfer started again with every newer snapshot, and a follower never caught up (liveness)
+690 # S22: an older snapshot went with a newer cut, and the installed state named batches below the log start
+916 # S22
+4079 # S22

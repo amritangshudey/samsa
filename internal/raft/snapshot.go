@@ -309,15 +309,17 @@ func (r *Raft) sendingSnapshot() bool {
 }
 
 // sendSnapshot sends the next chunk of a snapshot to a follower whose next
-// entry is below the log start: the one under way while it still covers the
-// gap, otherwise the newest. Starting again with each newer one would never
-// end a transfer that takes longer than the leader takes between snapshots
-// (BUGS.md S21).
+// entry is below the log start: the one under way while the log start has
+// not moved since it was taken, otherwise the newest. Starting again with
+// each newer one would never end a transfer that takes longer than the
+// leader takes between snapshots (BUGS.md S21). Going on after the log
+// start moved would send it with a cut it does not fit (S22); the hold in
+// Compact keeps the start while the follower answers.
 //
 // shortcut: a follower buffers the snapshot in memory. It holds no record
 // data, so it is small; stream it to a file if it ever is not.
 func (r *Raft) sendSnapshot(to sys.NodeID, p *progress) {
-	if p.snap == nil || p.snapIndex+1 < r.log.StartOffset() || p.snapOff >= int64(len(p.snap)) {
+	if p.snap == nil || p.snapCut != r.log.StartOffset() || p.snapOff >= int64(len(p.snap)) {
 		s, b := r.latest, r.latestBytes
 		if r.pending != nil && r.pending.index > s.index {
 			s, b = *r.pending, r.pendingBytes
@@ -328,7 +330,7 @@ func (r *Raft) sendSnapshot(to sys.NodeID, p *progress) {
 		if p.snap == nil || p.snapIndex != s.index || p.snapOff >= int64(len(b)) {
 			p.snapIndex, p.snapOff = s.index, 0
 		}
-		p.snap = b
+		p.snap, p.snapCut = b, r.log.StartOffset()
 	}
 	b := p.snap
 	// No bigger than one command, the bound every receiver checks.
