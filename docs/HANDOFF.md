@@ -5,7 +5,7 @@ Written for whoever works on Samsa next, a person or another coding tool.
 merged PR is to update this file (CLAUDE.md says so). If the date below is old,
 check `git log` and `docs/PRODUCTION.md` before trusting it.
 
-**Last updated: 2026-11-21, compacted topics stay in the log under object storage, and S19 to S22 fixed (PR "tiering: compacted topics, S18 to S22"); PR #56 (S16, S17 and T1) merged as `38f3777`.**
+**Last updated: 2026-11-21, compacted topics stay in the log under object storage, and S19 to S22 and M27 fixed (PR #57, "tiering: compacted topics, S18 to S22"); PR #56 (S16, S17 and T1) merged as `38f3777`.**
 
 ## 1. Read these first, in this order
 
@@ -97,10 +97,16 @@ full nightly run on GitHub on them yet. Until S18 the swarm never drew
 tiering together with compaction or disk rot, and no document said why.
 Allowing the pair with compaction, 9 of 600 seeds failed, on two real bugs
 (S18, S19). 5,000 seeds of that fix then found two more (S20, S21), and
-5,000 seeds of their fix one in it (S22). With all five fixed, 10,000
-seeds pass locally (1 to 5,000 and 623370000 to 623374999), and
-`make test` passes on every commit of the PR, the mutation suite and the
-regressions included.
+5,000 seeds of their fix one in it (S22). CI's 3,000 seeds then all
+passed, and the suite failed its own coverage floor for rot repair: 297
+damages found against 300. The rot injector stopped for good once
+tiering deleted its damage before anything found it (M27). With the
+injector fixed, the same 3,000 seeds find and repair 439, and 10,000
+seeds pass locally (1 to 5,000 and 623370000 to 623374999), finding and
+repairing 1,599 damages. `make test` passes on every commit of the PR,
+the mutation suite and the regressions included. `make sim` fails its
+coverage floor on the commits from the draw change to the one before
+M27's fix.
 
 **Soak (item 6):** done. Run 1 (before the memory-leak fix, `docs/BUGS.md` L1)
 failed on memory only (peak RSS 173 MiB). Run 2 on the fixed build (`7d877ab`)
@@ -141,7 +147,9 @@ OFFSET_NOT_AVAILABLE`) and passes without it: do not apply it.
    OFFSET_NOT_AVAILABLE for ever. Compacted topics now stay in the log, as
    in Kafka (KIP-405). The swarm draws tiering with compaction and rot,
    and the mutation "tier a compacted topic and rewrite its tiered
-   batches" keeps the pair drawn.
+   batches" keeps the pair drawn. Drawing rot with tiering showed that the
+   rot injector stopped for good once its damage was deleted unfound
+   (M27, fixed).
 5. **Fixed (BUGS.md S20, S21, S22; ADR 0043; design c20 section 8, a1
    section 8):** a follower fetch that waited for an object read was
    answered during a snapshot install, and the node stopped. And a snapshot
@@ -174,7 +182,13 @@ OFFSET_NOT_AVAILABLE`) and passes without it: do not apply it.
    (`.github/workflows/ci.yml`, job `sim`). Close the issue once its seeds
    are fixed or explained; the next failure then opens a new one. Not yet
    seen working: it runs only on a failing scheduled run.
-10. Optional follow-ups (not blocking v1.0): multi-Raft sharding (revisit ADR
+10. The simulator never reaches `ExpiredRefusals` (0 in 23,000 seeds, and
+   on `main` too; `make sim` logs "never reached"). That is its check that
+   an idempotent producer refused after its state expired starts again
+   (`internal/sim/idempotent.go`). Either the broker never refuses there,
+   or no producer is silent long enough: find out which, and make a seed
+   reach it.
+11. Optional follow-ups (not blocking v1.0): multi-Raft sharding (revisit ADR
    0039 if the single-Raft-group write ceiling becomes a bottleneck),
    Python/JS native client tests in CI, and automated web UI compatibility
    checks.
@@ -207,6 +221,10 @@ OFFSET_NOT_AVAILABLE`) and passes without it: do not apply it.
   given, while the broker tiered compacted topics. Drawing the pair found
   S18 and S19 at once. Every `&& !x` in the draws must give its reason
   (rot's does: design B1, section 7).
+- **When a coverage floor fails, find what stopped before touching the
+  floor.** CI's 3,000 seeds found 297 damages against a floor of 300.
+  Lowering the floor or drawing rot more often would have passed. The cause
+  was an injector that stopped for good (M27), and fixing it found 439.
 - **What fits Raft may not fit the broker.** The broker's state names
   record data in the log from its own log start, below the snapshot's
   index, and `compactTo` keeps the log only for the newest snapshot. Raft
