@@ -5,7 +5,7 @@ Written for whoever works on Samsa next, a person or another coding tool.
 merged PR is to update this file (CLAUDE.md says so). If the date below is old,
 check `git log` and `docs/PRODUCTION.md` before trusting it.
 
-**Last updated: 2026-11-21, tiering's two stalls fixed and checked (PR "tiering: S16, S17 and T1"); PR #55 (nightly 2026-11-21) merged as `4823888`.**
+**Last updated: 2026-11-21, compacted topics stay in the log under object storage, and S19 to S22 fixed (PR "tiering: compacted topics, S18 to S22"); PR #56 (S16, S17 and T1) merged as `38f3777`.**
 
 ## 1. Read these first, in this order
 
@@ -85,7 +85,7 @@ and nobody looked: 33 failing seeds in eight nights.
   623351498, held 4 GB: tiering uploaded the same segment again and
   again, and nothing checked that tiering progresses (`docs/BUGS.md` S16).
   The new check T1 then found a second stall in 8 of 3,000 seeds (S17).
-  Both are fixed in PR "tiering: S16, S17 and T1". The integration job
+  Both are fixed in PR #56 (`38f3777`). The integration job
   failed once, in the sample
   application of `TestVerdictCatchesCommitBeforeProcess` (`docs/BUGS.md`
   M26), fixed in PR "nightly 2026-11-21".
@@ -93,8 +93,14 @@ and nobody looked: 33 failing seeds in eight nights.
 Until S16 was fixed, the simulator never tiered a segment of more than
 about 70 batches, so items 20 and 21 had far less simulation than their
 seed counts say. With the fixes, 3,000 seeds pass with T1, locally; no
-full nightly run on GitHub on them yet. The swarm never draws tiering
-together with compaction or disk rot.
+full nightly run on GitHub on them yet. Until S18 the swarm never drew
+tiering together with compaction or disk rot, and no document said why.
+Allowing the pair with compaction, 9 of 600 seeds failed, on two real bugs
+(S18, S19). 5,000 seeds of that fix then found two more (S20, S21), and
+5,000 seeds of their fix one in it (S22). With all five fixed, 10,000
+seeds pass locally (1 to 5,000 and 623370000 to 623374999), and
+`make test` passes on every commit of the PR, the mutation suite and the
+regressions included.
 
 **Soak (item 6):** done. Run 1 (before the memory-leak fix, `docs/BUGS.md` L1)
 failed on memory only (peak RSS 173 MiB). Run 2 on the fixed build (`7d877ab`)
@@ -128,15 +134,47 @@ OFFSET_NOT_AVAILABLE`) and passes without it: do not apply it.
    that T1 can still fail (its first catch is seed 1139: 85 s of the
    mutation suite). Tiering now runs in far more seeds than before:
    expect the simulator to find more in that code.
-4. Watch the nightly run of 2026-11-22: the first full one on items 20 and
-   21, the first after S14, S15 and M26, and the first that can open the
-   issue of item 5.
-5. **Done:** a failed nightly run opens an issue titled "Nightly simulator
+4. **Fixed (BUGS.md S18, S19; ADR 0042; design c20 section 7):** with
+   object storage, compaction rewrote tiered batches and snapshots stopped
+   decoding, so a node could neither restart nor install one. Also, a fetch
+   in a compaction gap before a tiered batch was answered
+   OFFSET_NOT_AVAILABLE for ever. Compacted topics now stay in the log, as
+   in Kafka (KIP-405). The swarm draws tiering with compaction and rot,
+   and the mutation "tier a compacted topic and rewrite its tiered
+   batches" keeps the pair drawn.
+5. **Fixed (BUGS.md S20, S21, S22; ADR 0043; design c20 section 8, a1
+   section 8):** a follower fetch that waited for an object read was
+   answered during a snapshot install, and the node stopped. And a snapshot
+   transfer started again with every newer snapshot, so a follower that
+   needed one never caught up. The fetch now checks again when its reads
+   complete. The leader finishes the snapshot it began, and compacts
+   nothing while a follower that still answers installs it. The first
+   version of that went on after the log start moved, and sent an older
+   snapshot with a newer cut (S22, found before merge). None of the three
+   has a mutation: the simulator met each in 1 to 3 of 5,000 seeds. Unit
+   tests guard them.
+6. **The owner's decision:** S18 and S20 are in `v1.0.0`, and S21 is in
+   every release since `v0.1.0`. S18 touches only clusters with object
+   storage and a compacted topic.
+   - Cut `v1.0.1` with the fixes?
+   - Repair logs that S18 already damaged? That means decoding a batch that
+     is both in an object and at a log index as tiered. It changes the
+     snapshot decoder and the state hash: design it first. Until then,
+     such a log still breaks its snapshots once trimmed past.
+7. Refuse `cleanup.policy=compact` for a diskless topic, and for a topic
+   that was already tiered, as KIP-405 does (ADR 0042, alternative 3). For
+   now both are accepted, their batches in objects are never compacted,
+   and nothing tells the user.
+8. Watch the nightly run of 2026-11-22. It is the first full one on items
+   20 and 21, the first with tiering drawn with compaction and rot, the
+   first after S14 to S22 and M26, and the first that can open the issue
+   of item 9.
+9. **Done:** a failed nightly run opens an issue titled "Nightly simulator
    run failed" with its failing seeds, or comments on the one still open
    (`.github/workflows/ci.yml`, job `sim`). Close the issue once its seeds
    are fixed or explained; the next failure then opens a new one. Not yet
    seen working: it runs only on a failing scheduled run.
-6. Optional follow-ups (not blocking v1.0): multi-Raft sharding (revisit ADR
+10. Optional follow-ups (not blocking v1.0): multi-Raft sharding (revisit ADR
    0039 if the single-Raft-group write ceiling becomes a bottleneck),
    Python/JS native client tests in CI, and automated web UI compatibility
    checks.
@@ -164,6 +202,21 @@ OFFSET_NOT_AVAILABLE`) and passes without it: do not apply it.
   invariant; it showed only as one seed that took 2 minutes and 4 GB (a
   heap profile named the code). A check that the system makes progress,
   not only that what it does is right, is what made it a failure (T1).
+- **A combination the swarm never draws is a claim that it cannot fail.**
+  The draws said `tier = Chance(0.35) && !rot && !compact` with no reason
+  given, while the broker tiered compacted topics. Drawing the pair found
+  S18 and S19 at once. Every `&& !x` in the draws must give its reason
+  (rot's does: design B1, section 7).
+- **What fits Raft may not fit the broker.** The broker's state names
+  record data in the log from its own log start, below the snapshot's
+  index, and `compactTo` keeps the log only for the newest snapshot. Raft
+  sees only the index. S21's first fix sent an older snapshot with a cut
+  that fit Raft and not the broker (S22). Check any change to what Raft
+  sends or keeps against `compactTo`.
+- **A request that waits must check again before it answers.** S13's check
+  ran when a fetch arrived. Item 20 added a wait after it, and a follower
+  answered from a log that an install had reset meanwhile (S20).
+  `completeFetch`, the older wait, already checked again.
 - **Seeds change** when a feature adds a random draw to every client; the
   seeds in `internal/sim/regressions.txt` still run but may no longer show their
   original bug.
