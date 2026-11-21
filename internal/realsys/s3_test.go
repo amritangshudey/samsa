@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -89,5 +91,58 @@ func TestS3StoreHTTPAndFile(t *testing.T) {
 	}
 	if !sawAuth {
 		t.Fatal("expected SigV4 Authorization header on HTTP requests")
+	}
+}
+
+// The file backend holds tiered records: private, like the data directory.
+func TestS3StoreFileIsPrivate(t *testing.T) {
+	root := t.TempDir()
+	st, err := NewS3Store(S3Config{Endpoint: "file://" + root, Bucket: "bkt"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.putSync("tier/1-0-10.obj", []byte("data")); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]os.FileMode{
+		filepath.Join(root, "bkt"):                       0o700,
+		filepath.Join(root, "bkt", "tier"):               0o700,
+		filepath.Join(root, "bkt", "tier", "1-0-10.obj"): 0o600,
+	} {
+		info, err := os.Stat(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Errorf("%s: mode %o, want %o", name, got, want)
+		}
+	}
+}
+
+// A server that ignores Range, or sends less, is refused without reading
+// more than one byte past what was asked for (rule 4).
+func TestS3StoreGetChecksTheSize(t *testing.T) {
+	size := 1 << 20
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(make([]byte, size))
+	}))
+	defer srv.Close()
+	st, err := NewS3Store(S3Config{Endpoint: srv.URL, Bucket: "bkt"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := st.getSync("k", 0, 4); err == nil {
+		t.Fatal("a body larger than the range was accepted")
+	}
+	if _, err := st.getSync("k", 0, int64(size)+1); err == nil {
+		t.Fatal("a body shorter than the range was accepted")
+	}
+	if got, err := st.getSync("k", 0, int64(size)); err != nil || len(got) != size {
+		t.Fatalf("exact size: %d bytes, %v", len(got), err)
+	}
+	if _, err := st.getSync("k", 0, 0); err == nil {
+		t.Fatal("an empty range was accepted")
 	}
 }
