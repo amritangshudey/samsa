@@ -41,3 +41,5 @@
 623229758  # M24, nightly 2026-11-17
 623258340  # M24, nightly 2026-11-18
 623254219  # M24, nightly 2026-11-18
+623263227  # S14, nightly 2026-11-18: a truncation into a sealed segment made rot in it look like a torn tail
+623265521  # S14, nightly 2026-11-18

@@ -270,3 +270,56 @@ What differs from sections 3 to 7:
   checksum still refuses to start); misdirected writes are modelled as
   overwritten bytes only; damage on more than a minority; no repair for a
   cluster of one.
+
+## 9. Addendum, 2026-11-21: a truncation into a sealed segment
+
+**Found by** the nightly simulator run (seeds 623263227, 623265521; BUGS.md
+S14): `recovery of node 1 failed: raft: snapshot file is corrupt or does not
+match the log: snapshot at 15, log holds 0 to 12`.
+
+**Problem.** `TruncateSuffix` at an offset inside a sealed segment removed
+the later segments and made that segment the active one again. From then
+on its old frames, synced when it was sealed, were in the active segment,
+which this design leaves out of scope (section 6): every start scans it as
+a possible torn tail. Damage in those old frames, met after a crash, was
+cut away as a tear: synced, committed entries were gone without the
+`recovering` marker, and with a snapshot above the cut the node could not
+start at all. The simulator damages sealed segments only, so it damaged
+the segment while it was sealed, and the truncation then moved the damage
+out of scope.
+
+**Decision.** A truncation into a sealed segment, at a frame other than its
+first, leaves it sealed: it is cut at the frame, its index is rewritten to
+end there, and a new, empty active segment starts at the cut offset. The
+old frames stay where the scrub reads them and where a bad frame is damage.
+A cut at a segment's first frame leaves nothing old in it, and that segment
+is reused as before. No format change: a sealed segment is still valid to
+its last byte and its successor starts where it ends.
+
+**Alternatives.**
+- *Keep reusing the segment, and rewrite its index to mark the synced
+  prefix.* Recovery would then have to treat the indexed prefix of the
+  active segment as damage and the rest as a possible tear. The index is
+  sparse, so the boundary is inexact unless the index format changes, and
+  it puts two rules into one segment.
+- *Tell damage from a tear by content* (a valid frame after the bad one):
+  rejected in section 7, item 1; the simulated disk produces exactly that
+  after a torn write.
+
+**Second review.**
+1. *A crash in the middle of the truncation.* After the cut and its sync,
+   and before the new segment's name is synced, the cut segment is the last
+   one and is scanned as active at the next start: the old behaviour, for
+   the length of a few system calls, not until the next roll. A crash
+   between the index rewrite and the new segment leaves an index that
+   matches the cut file. Neither loses a synced frame.
+2. *More segments.* A truncation below the active segment happens only when
+   a follower drops a suffix that began in an older segment: rare, and each
+   one adds a single small segment, which `TruncatePrefix` removes like any
+   other.
+3. *Readers of the cut segment.* Its size, index and file handle are those
+   of any sealed segment; `Read` opens it on demand, `FirstDamage` and the
+   scrub read it.
+4. *A mutation.* `reactivateSealed` brings the old behaviour back, and
+   `TestTruncateIntoSealedSegmentKeepsItSealed` fails with it: synced
+   entries are cut after the crash.

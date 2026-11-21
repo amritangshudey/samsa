@@ -45,6 +45,9 @@ type Config struct {
 	// crash-safety protocol. Tests set them to prove that the crash tests
 	// notice.
 	skipRollDirSync, skipRecoverySync, skipTruncateSync bool
+	// reactivateSealed brings back BUGS.md S14: a truncation into a sealed
+	// segment makes it the active segment again.
+	reactivateSealed bool
 }
 
 func (c Config) withDefaults() (Config, error) {
@@ -495,7 +498,8 @@ func (l *Log) TruncateSuffix(offset int64) error {
 		l.end = s.base
 	}
 	s := l.active()
-	if s.file == nil { // it was sealed; it is the active segment again
+	sealed := s.file == nil
+	if sealed {
 		f, err := l.disk.Open(segName(l.dir, s.base, ".log"), sys.ReadWrite)
 		if err != nil {
 			return l.fail(fmt.Errorf("reopen segment %d: %w", s.base, err))
@@ -529,6 +533,24 @@ func (l *Log) TruncateSuffix(offset int64) error {
 		s.index = s.index[:len(s.index)-1]
 	}
 	s.size, l.end, l.durable, l.unsynced = pos, offset, offset, 0
+	if sealed && pos > 0 && !l.cfg.reactivateSealed {
+		// What it holds below the cut was synced when it was sealed. As the
+		// active segment again, every start would scan it as a possible torn
+		// tail and cut away damage in it unseen (BUGS.md S14). It stays
+		// sealed, with an index that ends at the cut, and appends go to a
+		// new segment.
+		if err := l.writeIndex(s); err != nil {
+			return l.fail(err)
+		}
+		file := s.file
+		s.file = nil
+		if err := file.Close(); err != nil {
+			return l.fail(fmt.Errorf("close segment %d: %w", s.base, err))
+		}
+		if err := l.addSegment(offset); err != nil {
+			return l.fail(err)
+		}
+	}
 	return nil
 }
 

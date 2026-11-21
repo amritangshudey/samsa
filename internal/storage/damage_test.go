@@ -142,3 +142,58 @@ func TestTornTailIsNotDamage(t *testing.T) {
 		t.Fatalf("torn tail: found %v err %v, end %d want %d", found, err, l2.EndOffset(), end)
 	}
 }
+
+// A truncation into a sealed segment leaves it sealed. What it holds below
+// the cut was synced long ago, so rot there, met after a crash, is damage
+// that the scrub finds: it is never cut away as if it were a torn tail
+// (BUGS.md S14). With the old behaviour back (reactivateSealed), the same
+// history loses synced entries: the test can fail.
+func TestTruncateIntoSealedSegmentKeepsItSealed(t *testing.T) {
+	for _, broken := range []bool{false, true} {
+		cfg := small
+		cfg.reactivateSealed = broken
+		disk := simsys.NewDisk(simsys.NewRand(3), simsys.DiskConfig{})
+		l := open(t, disk, cfg)
+		for i := range 60 {
+			if _, err := l.Append(payload(i), 1); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := l.Sync(); err != nil {
+			t.Fatal(err)
+		}
+		pos, bases := frameStarts(t, l, 1)
+		if len(pos) < 4 {
+			t.Fatalf("segment 1 has %d frames", len(pos))
+		}
+		seg1 := segName(l.dir, l.segs[1].base, ".log")
+		// A new leader's entries replace everything from the fourth frame of
+		// segment 1 on; they are not synced yet when the power goes.
+		if err := l.TruncateSuffix(bases[3]); err != nil {
+			t.Fatal(err)
+		}
+		for i := range 3 {
+			if _, err := l.Append(payload(100+i), 1); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if !disk.Corrupt(seg1, int(pos[1])+headerSize+3, []byte{0xFF}) {
+			t.Fatal("could not damage the segment")
+		}
+		disk.Restart()
+		l2 := open(t, disk, cfg)
+		cut := l2.EndOffset() < bases[3]
+		if broken {
+			if !cut {
+				t.Fatal("with the segment reactivated, the damage was not cut away: the test cannot catch S14")
+			}
+			continue
+		}
+		if cut {
+			t.Fatalf("the log ends at %d after the crash: entries synced below %d were cut", l2.EndOffset(), bases[3])
+		}
+		if off, found, err := l2.FirstDamage(0); err != nil || !found || off != bases[1] {
+			t.Fatalf("FirstDamage: offset %d found %v err %v, want damage at %d", off, found, err, bases[1])
+		}
+	}
+}
