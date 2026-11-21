@@ -324,16 +324,27 @@ func (r *Raft) ChangeMembers(ms []Member) (int64, error) {
 	return index, nil
 }
 
-// mayStand reports whether this node should stand for election: unless the
-// configuration in force and the committed one both leave it out. A node
-// whose removal is only appended may still be needed (thesis 4.2.2); once
-// the removal commits, the remaining voters can always elect a leader
-// among themselves, and a removed node that kept winning would only make
-// way again (design, section 6, finding 10).
+// mayStand reports whether this node should stand for election: whether a
+// configuration that may still be in force names it, the one in force at
+// its commit index or any later one in its log. A node whose removal is
+// only appended may still be needed (thesis 4.2.2). After a restart the
+// commit index is only a lower bound, so a configuration between it and
+// the last one may be the one the other voters use (BUGS.md S15). Once the
+// removal is known to commit, the remaining voters can always elect a
+// leader among themselves, and a removed node that kept winning would only
+// make way again (design, section 6, finding 10).
 func (r *Raft) mayStand() bool {
-	if r.isVoter(r.cfg.ID) {
+	named := func(c confAt) bool {
+		_, ok := slices.BinarySearchFunc(c.members, r.cfg.ID, func(m Member, id sys.NodeID) int { return cmp.Compare(m.ID, id) })
+		return ok
+	}
+	if named(r.confAsOf(r.commit)) {
 		return true
 	}
-	_, ok := slices.BinarySearchFunc(r.confAsOf(r.commit).members, r.cfg.ID, func(m Member, id sys.NodeID) int { return cmp.Compare(m.ID, id) })
-	return ok
+	for _, c := range r.confs { // the one in force, isVoter, is among them
+		if c.index > r.commit && c.index > r.base.index && named(c) {
+			return true
+		}
+	}
+	return false
 }

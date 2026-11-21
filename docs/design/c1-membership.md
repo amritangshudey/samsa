@@ -89,7 +89,9 @@ Read on 2026-11-14.
   which authenticates peers (mutual TLS, C5). Raft still drops a message
   whose sender id is its own.
 - **A node that is not a voter in its own configuration still stands for
-  election, unless its committed configuration also leaves it out,** and
+  election, unless every configuration that may still be in force leaves
+  it out** (the one in force at its commit index and every later one in
+  its log; finding 10, and BUGS.md S15 for why the later ones count), and
   it does not count its own vote (thesis 4.2.2: "it might
   still be needed until the C_new entry is committed"). The first draft
   said it never stands. The random-schedule test found the deadlock that
@@ -257,6 +259,18 @@ changes, because it faults harder than the world does.
     stands unless both the configuration in force and its committed one
     leave it out. Once a removal commits, the remaining voters can always
     elect a leader among themselves (thesis 4.2.2).
+    *Amended 2026-11-21 (BUGS.md S15, nightly seeds 623233840 and
+    623282885):* "its committed one" was the configuration in force at
+    the node's commit index, and after a restart that index is only a
+    lower bound: -1, where a spare's configuration is empty. A spare that
+    had been added, led, and appended its own removal came back naming
+    nobody it was in, and never stood, while the other voter needed its
+    vote and could not have it. **Rule now:** a node stands unless every
+    configuration that may still be in force leaves it out: the one at its
+    commit index and every later one in its log. Seed 174's extreme stays
+    away: a removed node that wins after a restart commits an entry of its
+    term, learns that its removal committed, steps down, and stands no
+    more. `TestRemovedSpareStandsAfterRestart` builds the history.
 11. **Found by the random-schedule test, seed 181: a leader elected
     alone had no heartbeat.** A leader that is the only voter set no
     heartbeat timer, because nobody needed one. After it added a learner

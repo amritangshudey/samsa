@@ -5,7 +5,7 @@ Written for whoever works on Samsa next, a person or another coding tool.
 merged PR is to update this file (CLAUDE.md says so). If the date below is old,
 check `git log` and `docs/PRODUCTION.md` before trusting it.
 
-**Last updated: 2026-11-21, review of the nightly simulator runs.**
+**Last updated: 2026-11-21, the two real bugs of the nightly runs fixed (PR "review findings, part 2"); PR #53 (part 1) merged as `fb6fd51`.**
 
 ## 1. Read these first, in this order
 
@@ -64,14 +64,18 @@ check `git log` and `docs/PRODUCTION.md` before trusting it.
 green (build, unit, race, fuzz, lint, 3,000 simulator seeds, exhaustive
 Raft search, real clients).
 
-**The nightly run (30,000 seeds) has failed every night since 2026-11-15**
-and nobody looked: 28 failing seeds in six nights. A review on 2026-11-21
-replayed the 24 that the logs print on `v1.0.0`: 15 still fail with the same
-schedule. Of those:
+**The nightly run (30,000 seeds) has failed every night since 2026-11-13**
+and nobody looked: 33 failing seeds in eight nights.
 
-- 11 were the simulator's own mistakes, fixed in PR "review findings, part 1"
-  (`docs/BUGS.md` M22, M23, M24; seeds in `internal/sim/regressions.txt`).
-- **4 are two real bugs, open**: 2 seeds each (section 5, items 1 and 2).
+- 2026-11-13 (4 seeds) and 2026-11-14 (1): three were the old S6 checker
+  (M10) and one the transfer-lease bug (S8), both fixed on 2026-11-14,
+  before the next run; the fifth was the first sighting of S15.
+- 2026-11-15 to 2026-11-20 (28 seeds): a review on 2026-11-21 replayed the
+  24 that the logs print on `v1.0.0`; 15 still failed with the same
+  schedule. 11 were the simulator's own mistakes (`docs/BUGS.md` M22, M23,
+  M24), fixed in PR #53. **4 were two real bugs**, 2 seeds each: storage
+  (S14) and membership (S15), both fixed in PR "review findings, part 2".
+  Every seed is in `internal/sim/regressions.txt`.
 
 The tiered and diskless code (items 20, 21) merged after the last nightly
 run, so it has had 3,000 seeds per push and no nightly run yet.
@@ -90,32 +94,24 @@ OFFSET_NOT_AVAILABLE`) and passes without it: do not apply it.
 
 ## 5. Next, in order
 
-1. **Storage cuts synced entries after a lost segment** (seeds 623263227,
-   623265521: `recovery of node 1 failed: raft: snapshot file is corrupt or
-   does not match the log: snapshot at 15, log holds 0 to 12`). A crash loses
-   the newest segment (legitimately: Raft had cut and rewritten that suffix and
-   the new file was not yet synced), so the sealed segment before it becomes
-   the active one again. `storage.recoverActive` then reads latent damage in
-   it as a torn tail and truncates entries that were synced long ago, against
-   the promise of `storage.Open` ("it never discards a record that was
-   synced"). With a snapshot above the cut the node cannot start; without one
-   it would forget entries it may have acknowledged, without the `recovering`
-   marker that keeps it from voting. Direction: a last segment that has an
-   index file was sealed and synced, so a bad frame in it is damage; report it
-   and repair through `cutAt` (marker first, snapshot dropped when above the
-   cut) instead of truncating. Needs a design note, a mutation and a BUGS.md
-   S entry.
-2. **No leader after membership changes** (seeds 623233840, 623282885, both
-   `changes=true`): with faults stopped the cluster elects nobody for 60 s;
-   in 623233840 every node stays in term 3 while only the node with the
-   shortest log keeps asking for votes. Root cause unknown: start with
-   `make sim SEED=623233840 TIMELINE=t.html`.
+1. **Fixed (BUGS.md S14, design b1 section 9):** a truncation into a sealed
+   segment made it the active segment again, so rot in its old, synced
+   frames was cut at the next start as a torn tail (seeds 623263227,
+   623265521). The segment now stays sealed and appends go to a new one.
+2. **Fixed (BUGS.md S15, design c1 finding 10 amended):** a spare that was
+   added, led, and appended its own removal did not stand after a restart,
+   because its commit index was gone and the configuration in force at -1
+   is empty for a spare; the other voter needed its vote (seeds 623233840,
+   623282885). A node now stands while any configuration from its commit
+   index on names it.
 3. Watch tonight's nightly run, the first on items 20 and 21. A local run of
    30,000 seeds on `v1.0.0` was killed by the machine (16 GB, other load)
    after 54 minutes, so it says nothing.
-4. Make a failed nightly run impossible to miss (an issue opened by the
-   workflow, or a check of `gh run list --event schedule` at the start of
-   every session).
+4. **Done:** a failed nightly run opens an issue titled "Nightly simulator
+   run failed" with its failing seeds, or comments on the one still open
+   (`.github/workflows/ci.yml`, job `sim`). Close the issue once its seeds
+   are fixed or explained; the next failure then opens a new one. Not yet
+   seen working: it runs only on a failing scheduled run.
 5. Optional follow-ups (not blocking v1.0): multi-Raft sharding (revisit ADR
    0039 if the single-Raft-group write ceiling becomes a bottleneck),
    Python/JS native client tests in CI, and automated web UI compatibility
@@ -124,7 +120,7 @@ OFFSET_NOT_AVAILABLE`) and passes without it: do not apply it.
 ## 6. Lessons that are not in the code
 
 - **A green push is not a green project.** The nightly run (30,000 seeds) failed
-  for six nights while every push was green, because only the nightly run
+  for eight nights while every push was green, because only the nightly run
   draws enough seeds to meet one-in-ten-thousand bugs. Look at
   `gh run list --workflow CI --event schedule` at the start of every session,
   and replay every failing seed on the current commit before trusting it.
