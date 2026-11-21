@@ -923,3 +923,21 @@ would happen against Kafka too (not tested against Kafka).
 - **Found by:** Simulator seeds 924 and 1473 (`I2: the leader answered OFFSET_NOT_AVAILABLE`).
 - **Root cause:** (1) A concurrent `cmdTier` or `cmdAppendRef` applying while `fetchRemoteBatches` was in flight introduced a new uncached remote batch before `finishFetch` ran; (2) under `SyncInterval`/`SyncNever`, `gcObjects` deleted an object after `DeleteRecords` before a crash rolled back the unsynced `DeleteRecords`, resurrecting a `batchRef` to a deleted object.
 - **Fix:** `prefetchAndFetch` re-checks `missingRemoteBatches` (up to 4 passes) after a successful prefetch; `gcObjects` runs only under `SyncAlways`.
+
+### M22. C2 and I1/I3 identified a tombstone by a slot that a power loss had cut (nightly, found 2026-11-21)
+
+- **Seeds:** 623297379, 623335888 (nightly 2026-11-16 to 2026-11-20, also 623217199 on an older commit), reported as `C2: tc/0 offset 3: record 1221 was sent with key "key-6" and read with key "key-7"`; 623232890, reported as `I1/I3: tc/0 offset 1069 holds record 9852 but held record 9390`. All on one node with `sync` interval or never, after power losses or failed syncs.
+- **Root cause:** a tombstone has no value, so `observeCompacted` names a tombstone it reads by the record the model last placed at that offset (`p.at[off]`). It did so even when that slot was confirmed before a power loss that may have cut the log there, which `place` itself treats as replaceable. Another tombstone legitimately took the offset after the cut: with a different key the checker reported C2; with the same key it re-stamped the stale slot with the current epoch, and the acknowledgement of the real tombstone then looked like a change of an offset within one epoch (I1/I3). The broker was right both times.
+- **Fix:** a tombstone read at a slot from an earlier epoch (under a policy that permits loss) is not identified, like a record nobody acknowledged. The five compaction mutations are still caught (scores 58, 64, 10, 23, 79 of 200 seeds).
+
+### M23. The final share-group drain counted acknowledgements the broker had refused (nightly, found 2026-11-21)
+
+- **Seeds:** 623221682 (no faults at all), 623226614, 623265692, reported as `S8: t0/0 offset 1477 was already acknowledged/rejected and was delivered again`.
+- **Root cause:** `drainShareGroup` told the model that every acknowledgement it sent was accepted, without reading the response's per-partition `AckErrorCode`. Its own acquisition lock had expired, so the broker correctly refused the ACCEPT (`INVALID_RECORD_STATE`) and delivered the record again; the model, believing it accepted, reported S8. The clients' own path (`sgFetch`) already checked the code.
+- **Fix:** the drain counts its acknowledgements only when no partition reports an acknowledgement error. The mutation "drop a share-group lock without redelivery" is still caught (97 of 200 seeds).
+
+### M24. `settled` gave a node that lost its whole log ten seconds to refetch it (nightly, found 2026-11-21)
+
+- **Seeds:** 623301106, 623299220, 623229758, 623258340, 623254219, reported as `with faults stopped for 10s the nodes did not all come back, elect a leader and catch up`, with one node far behind (often `recovering true`). All with `append=1`.
+- **Root cause:** with `append=1` the leader sends one entry per AppendEntries and waits for its answer, so a follower catches up at one entry per round trip (about 110 per second). A node whose damage repair emptied its log (damage under the snapshot) needed about 25 s to refetch thousands of entries; `settled` waited `answerBound`, 10 s. The node was making progress the whole time.
+- **Fix:** `settled` waits `settleBound`, 60 s; every seed above converges within it. Seeds that agree sooner are unchanged (the wait ends as soon as they agree). With the default `MaxAppendBytes` (1 MiB) the catch-up is a few messages.

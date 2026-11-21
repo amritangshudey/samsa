@@ -162,7 +162,9 @@ func (m *Model) observeCompacted(tp TP, base int64, recs []wire.StoredRecord) (p
 			// A tombstone says nothing of itself: the model knows where it
 			// was acknowledged. A slot holding something else may be left
 			// over from before a power loss.
-			if id = p.at[off].id; id != 0 && !Tombstone(id) {
+			if s := p.at[off]; !m.strict && s.epoch != m.epoch {
+				id = 0 // confirmed before a power loss that may have cut it: another tombstone may sit there now
+			} else if id = s.id; id != 0 && !Tombstone(id) {
 				id = 0
 			}
 		}
