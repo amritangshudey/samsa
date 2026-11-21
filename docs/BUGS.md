@@ -947,3 +947,9 @@ would happen against Kafka too (not tested against Kafka).
 - **Found by:** `make fuzz` on the macOS CI runner of the PR #50 merge (`FuzzDecodeMessage`: `not stable under encode/decode`, first and second both printing `SaltedPassword:[]`). A later run passes only because the fuzzer did not draw the input again.
 - **Root cause:** `Salt` and `SaltedPassword` are `bytes` without `nullableVersions` in the official schema, but the decoder read them with `r.Bytes`, which returns nil for a null. The encoder writes nil as empty, so the second decode returned an empty slice where the first had nil. Harmless on the broker (`scram.FromSalted` refuses a salted password of the wrong length), but `make fuzz` could fail any CI run.
 - **Fix:** read both as `nonNull(r.Bytes(true))`, as `sasl.go` does for its non-nullable bytes. The input is in `internal/wire/testdata/fuzz/FuzzDecodeMessage/alter-scram-null-salted-password`.
+
+### M25. Two cluster tests created their topic before the cluster had raised its format level (found 2026-11-21)
+
+- **Found by:** `make integration` on the developer's machine: `TestFetchFromTheNearestReplica` and `TestStorageRotRepair` failed at once with `create topic: ... ErrorCode:35` (UNSUPPORTED_VERSION). They pass on CI by timing.
+- **Root cause:** a new cluster runs below its format level until the leader has heard every voter report (once a second), and refuses CreateTopics v7 with UNSUPPORTED_VERSION until then. Both tests sent CreateTopics once, as soon as a leader was known; the other tests that create topics on a new cluster already retried (`createTopicWith`, the diskless test).
+- **Fix:** the shared `createTopic` helper retries UNSUPPORTED_VERSION for up to 15 seconds, and both tests use it. Also seen: the whole run took more than go test's default limit of 10 minutes on that machine (`panic: test timed out after 10m0s`), so `make integration` now passes `-timeout 30m`.

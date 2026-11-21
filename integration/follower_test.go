@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
-	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
 // TestFetchFromTheNearestReplica (KIP-392, docs/design/c19-follower-fetch.md):
@@ -22,13 +21,7 @@ func TestFetchFromTheNearestReplica(t *testing.T) {
 	})
 	cl := c.client()
 	leader := c.leader(cl)
-	req := kmsg.NewPtrCreateTopicsRequest()
-	rt := kmsg.NewCreateTopicsRequestTopic()
-	rt.Topic, rt.NumPartitions, rt.ReplicationFactor = "near", 3, -1
-	req.Topics = append(req.Topics, rt)
-	if resp, err := req.RequestWith(context.Background(), cl); err != nil || resp.Topics[0].ErrorCode != 0 {
-		t.Fatalf("create topic: %v %+v", err, resp)
-	}
+	createTopic(t, cl, "near", 3)
 	const n = 3000
 	if err := c.produce(cl, "near", "r", n, 30*time.Second); err != nil {
 		t.Fatal(err)
