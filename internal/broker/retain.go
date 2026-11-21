@@ -114,6 +114,12 @@ func (n *Node) expireRecords(now sys.Instant) {
 	}
 }
 
+// HeadSegmentEnd returns the end of the segment where the log starts, the
+// one clean works on, or -1 while it is the segment being written. With
+// object storage, a serving leader tiers and trims every segment before
+// that one (the simulator's T1).
+func (n *Node) HeadSegmentEnd() int64 { return n.raft.SegmentEnd(n.st.logStart) }
+
 // liveBytes returns the bytes on disk of the log entries holding every
 // batch a partition references.
 func (n *Node) liveBytes() int64 {

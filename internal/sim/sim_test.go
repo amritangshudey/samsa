@@ -309,6 +309,7 @@ var mutations = []mutationCase{
 	{"drop a share-group lock without redelivery", func(c *broker.Config) { c.UnsafeDropShareLock = true }},
 	{"ignore LSO in READ_COMMITTED fetch", func(c *broker.Config) { c.UnsafeReadUncommittedInReadCommitted = true }},
 	{"delete local segment before upload confirmed", func(c *broker.Config) { c.UnsafeDeleteBeforeUpload = true }},
+	{"keep the tiering flag when serving again", func(c *broker.Config) { c.UnsafeKeepTiering = true }},
 }
 
 // addStats adds every counter of s to total.

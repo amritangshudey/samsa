@@ -131,3 +131,56 @@ type ObjectHandler interface {
   segment trim) *before* `ObjectStore.Put` is confirmed (and drops the upload on
   injected loss), causing subsequent reads of tiered offsets to fail or lose
   committed records — caught by the simulator.
+
+## 6. Addendum (2026-11-21): a `cmdTier` must fit a log entry, and a round must end (BUGS.md S16, S17)
+
+**Problem.** Section 2, Q1 packs a sealed segment's live batches into one
+object, named by one `cmdTier` with an entry per batch. The command grew
+with the number of batches, and a log entry holds `MaxBatchBytes +
+commandOverhead`. Past that, Raft refused it as too large, the refusal
+ended the round as an applied command does, and the next round uploaded
+the same batches again: for ever, with nothing tiered or trimmed. The
+simulator did not notice, because an untiered segment reads like a tiered
+one. Reading the code for it showed a second way for tiering to stop: a
+leader that stopped serving while its `cmdTier` waited never learned how
+the round ended, and its `tiering` flag stayed set (S17).
+
+**Decision.**
+- An object takes batches while their entries fit in `MaxBatchBytes`; the
+  rest of the segment goes in the next object, one round each. The
+  command's header (at most 92 bytes: the type, a key of at most 85
+  bytes, two lengths) and Raft's (9) fit in `commandOverhead` (512), so
+  one entry (at most 283 bytes, for a topic name of 249) always fits: the
+  first entry goes in whatever the limit. `TestTierEntryBytes` ties the
+  size of an entry to `encodeTier`.
+- `tiering` is state of one time as serving leader, like the counters of
+  proposals that are never answered: serving again clears it with them.
+- The simulator checks progress, T1: with object storage, the settled
+  leader tiers and trims every segment but the one being written, within
+  10 s. The node reports the end of its head segment
+  (`HeadSegmentEnd`) for it.
+
+**Alternatives rejected.**
+- *A larger log entry for `cmdTier`.* The limit bounds every reader of
+  the log: followers, snapshots, AppendEntries chunks, recovery. One
+  command type above it would need its own bound in each.
+- *One object named by several commands.* A crash between them leaves the
+  object half referenced; GC and the read path would need to know which
+  part. Several objects cost more uploads only for small batches: in
+  production at most one per 1 MiB of entries, about 24,000 batches.
+- *Backing off after a refused `cmdTier`.* It would slow the loop, not end
+  it, and with the bound a refusal cannot happen.
+
+**Second review.**
+- At the simulator's 2 KB limit an object holds about 50 batches, so a
+  1 MiB segment of 625 batches takes 13 rounds: one upload (at most
+  20 ms) and one commit each, well inside T1's 10 s.
+- More objects mean more keys in `uploadedObjs`, one an object.
+- After S17's reset, an upload of the earlier round can complete and
+  propose its command while a new round runs. `applyTier` tiers only
+  batches still local and unmoved, so the data is tiered once and the
+  other object is garbage for `gcObjects`. Ignoring such uploads, by
+  round number, would save one upload a leadership change, and is not
+  worth the state.
+- T1 could not tell S16 from any other stall, and should not: any stall
+  is a failure there.

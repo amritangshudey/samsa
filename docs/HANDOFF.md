@@ -5,7 +5,7 @@ Written for whoever works on Samsa next, a person or another coding tool.
 merged PR is to update this file (CLAUDE.md says so). If the date below is old,
 check `git log` and `docs/PRODUCTION.md` before trusting it.
 
-**Last updated: 2026-11-21, the nightly run of 2026-11-21 read (PR "nightly 2026-11-21"): its integration failure was the sample application (M26, fixed), and GitHub cut its simulator job off, so its seeds ran locally; PR #54 (part 2) merged as `28978aa`.**
+**Last updated: 2026-11-21, tiering's two stalls fixed and checked (PR "tiering: S16, S17 and T1"); PR #55 (nightly 2026-11-21) merged as `4823888`.**
 
 ## 1. Read these first, in this order
 
@@ -81,18 +81,20 @@ and nobody looked: 33 failing seeds in eight nights.
   runner down after 17 minutes (`The runner has received a shutdown
   signal`, exit 143), and the job prints its seeds only at the end. The
   same 30,000 seeds (base 623340000) ran locally on `28978aa`, in six
-  processes of 5,000: the first 20,000 passed, and the rest was still
-  running when this was written. No invariant failed, but one seed,
+  processes of 5,000: all passed. No invariant failed, but one seed,
   623351498, held 4 GB: tiering uploaded the same segment again and
-  again, and nothing checked that tiering progresses (`docs/BUGS.md` S16,
-  fixed in the next PR). The integration job failed once, in the sample
+  again, and nothing checked that tiering progresses (`docs/BUGS.md` S16).
+  The new check T1 then found a second stall in 8 of 3,000 seeds (S17).
+  Both are fixed in PR "tiering: S16, S17 and T1". The integration job
+  failed once, in the sample
   application of `TestVerdictCatchesCommitBeforeProcess` (`docs/BUGS.md`
   M26), fixed in PR "nightly 2026-11-21".
 
-The tiered and diskless code (items 20, 21) has had 3,000 seeds per push
-and 20,000 of the nightly's, run locally, but S16 kept most of it idle: a
-segment of more than about 70 batches was never tiered, so the tiered read
-path was hardly simulated. No full nightly run on GitHub yet.
+Until S16 was fixed, the simulator never tiered a segment of more than
+about 70 batches, so items 20 and 21 had far less simulation than their
+seed counts say. With the fixes, 3,000 seeds pass with T1, locally; no
+full nightly run on GitHub on them yet. The swarm never draws tiering
+together with compaction or disk rot.
 
 **Soak (item 6):** done. Run 1 (before the memory-leak fix, `docs/BUGS.md` L1)
 failed on memory only (peak RSS 173 MiB). Run 2 on the fixed build (`7d877ab`)
@@ -118,10 +120,14 @@ OFFSET_NOT_AVAILABLE`) and passes without it: do not apply it.
    is empty for a spare; the other voter needed its vote (seeds 623233840,
    623282885). A node now stands while any configuration from its commit
    index on names it.
-3. **In progress, the next PR (BUGS.md S16):** a `cmdTier` too large for a
-   log entry was refused, and the segment uploaded again for ever. With it
-   fixed, tiering will run in far more seeds than before: expect the
-   simulator to find more in that code.
+3. **Fixed (BUGS.md S16, S17; design c20 section 6):** a `cmdTier` too
+   large for a log entry was refused and the segment uploaded again for
+   ever; and a leader cut off while its `cmdTier` waited never tiered
+   again. T1 now checks that the settled leader tiers every sealed
+   segment, and the mutation "keep the tiering flag when serving again"
+   that T1 can still fail (its first catch is seed 1139: 85 s of the
+   mutation suite). Tiering now runs in far more seeds than before:
+   expect the simulator to find more in that code.
 4. Watch the nightly run of 2026-11-22: the first full one on items 20 and
    21, the first after S14, S15 and M26, and the first that can open the
    issue of item 5.
@@ -154,6 +160,10 @@ OFFSET_NOT_AVAILABLE`) and passes without it: do not apply it.
   by it, a few by real-process tests, a few of its own bugs (the M entries in
   BUGS.md) by false alarms: investigate a false alarm before changing the
   check, and record it.
+- **Watch what a run costs, not only what it reports.** S16 failed no
+  invariant; it showed only as one seed that took 2 minutes and 4 GB (a
+  heap profile named the code). A check that the system makes progress,
+  not only that what it does is right, is what made it a failure (T1).
 - **Seeds change** when a feature adds a random draw to every client; the
   seeds in `internal/sim/regressions.txt` still run but may no longer show their
   original bug.
