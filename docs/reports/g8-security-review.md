@@ -61,3 +61,19 @@ what was fixed, and what is left.
    iteration count with a measured cost.
 2. Sign the release checksums.
 3. An independent review, which this one is not.
+
+## Addendum, 2026-11-21: object storage
+
+Object storage (items 20 and 21) was merged after this review, so its code
+had not been read. A second pass over `internal/realsys/s3.go` found three
+problems, fixed on 2026-11-21:
+
+| # | Finding | Severity | Status |
+|---|---|---|---|
+| 11 | The `file://` backend created its directory 0755 and objects 0644: any local user could read tiered records, which finding 1 had made private in the data directory | medium on a shared machine | **Fixed:** 0700 and 0600 (`TestS3StoreFileIsPrivate`) |
+| 12 | The `file://` backend renamed an object into place without syncing the file or the directory. Once a Put succeeds the broker commits a reference to the object and every replica drops its local copy, so a power loss could leave the only copy empty or missing | data loss after a power loss | **Fixed:** file synced before the rename, directory after it. Not tested: no test can cut the power of the real disk |
+| 13 | A GET read the whole response body whatever its size (architecture rule 4): a faulty or hostile endpoint could make the broker allocate without bound | low (the endpoint is configured by the operator) | **Fixed:** reads at most one byte more than the range asked for and refuses any other size (`TestS3StoreGetChecksTheSize`); the unused whole-object read was removed |
+
+Still not reviewed: the diskless produce forwarding between brokers (it
+travels on the peer connection, so finding 2 applies to it), and the S3
+signing against a real AWS endpoint (tested against a local server only).

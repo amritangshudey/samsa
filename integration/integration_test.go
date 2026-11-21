@@ -161,20 +161,30 @@ func franz(t *testing.T, b *broker, opts ...kgo.Opt) *kgo.Client {
 	return cl
 }
 
+// createTopic creates topic on every node. A cluster that has just started
+// runs below its format level until every node has reported (about a
+// second), and answers CreateTopics v7 with UNSUPPORTED_VERSION until then,
+// so that error is tried again for a while.
 func createTopic(t *testing.T, cl *kgo.Client, topic string, partitions int32) {
 	t.Helper()
 	req := kmsg.NewPtrCreateTopicsRequest()
 	rt := kmsg.NewCreateTopicsRequestTopic()
 	rt.Topic, rt.NumPartitions, rt.ReplicationFactor = topic, partitions, -1 // the broker default: every node
 	req.Topics = append(req.Topics, rt)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	resp, err := req.RequestWith(ctx, cl)
-	if err != nil {
-		t.Fatalf("create topic: %v", err)
-	}
-	if code := resp.Topics[0].ErrorCode; code != 0 {
-		t.Fatalf("create topic: error code %d", code)
+	for deadline := time.Now().Add(15 * time.Second); ; time.Sleep(100 * time.Millisecond) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		resp, err := req.RequestWith(ctx, cl)
+		cancel()
+		if err != nil {
+			t.Fatalf("create topic: %v", err)
+		}
+		code := resp.Topics[0].ErrorCode
+		if code == 0 {
+			return
+		}
+		if code != 35 || time.Now().After(deadline) { // 35: UNSUPPORTED_VERSION
+			t.Fatalf("create topic: error code %d", code)
+		}
 	}
 }
 

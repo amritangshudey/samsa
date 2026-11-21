@@ -82,7 +82,7 @@ func NewS3Store(cfg S3Config, loop *Loop) (*S3Store, error) {
 		if cfg.Bucket != "" {
 			dir = filepath.Join(dir, cfg.Bucket)
 		}
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil { // tiered records: private, like the data directory
 			return nil, fmt.Errorf("s3 file backend: %w", err)
 		}
 		s.fileDir = dir
@@ -108,7 +108,8 @@ func (s *S3Store) Put(id sys.ObjOpID, key string, data []byte) {
 	s.enqueue(objReq{kind: 1, id: id, key: key, data: cp})
 }
 
-// Get asynchronously fetches the byte range [offset, offset+length) of key (or the full object if length <= 0).
+// Get asynchronously fetches the byte range [offset, offset+length) of key;
+// length must be positive.
 func (s *S3Store) Get(id sys.ObjOpID, key string, offset, length int64) {
 	s.enqueue(objReq{kind: 2, id: id, key: key, offset: offset, length: length})
 }
@@ -160,15 +161,41 @@ func (s *S3Store) objectURL(key string) string {
 
 func (s *S3Store) putSync(key string, data []byte) error {
 	if s.fileDir != "" {
+		// The caller commits a reference to the object and may drop its
+		// local copy once Put succeeds, so the object must be durable first:
+		// the file synced before the rename, the directory after it.
 		path := filepath.Join(s.fileDir, filepath.FromSlash(key))
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			return err
 		}
 		tmp := path + ".tmp"
-		if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+		if err != nil {
 			return err
 		}
-		return os.Rename(tmp, path)
+		if _, err := f.Write(data); err != nil {
+			f.Close() //nolint:errcheck // the write error is the one to report
+			return err
+		}
+		if err := f.Sync(); err != nil {
+			f.Close() //nolint:errcheck // the sync error is the one to report
+			return fmt.Errorf("sync object %s: %w", key, err)
+		}
+		if err := f.Close(); err != nil {
+			return err
+		}
+		if err := os.Rename(tmp, path); err != nil {
+			return err
+		}
+		dir, err := os.Open(filepath.Dir(path))
+		if err != nil {
+			return err
+		}
+		defer dir.Close() //nolint:errcheck // nothing was written through this handle
+		if err := dir.Sync(); err != nil {
+			return fmt.Errorf("sync object directory of %s: %w", key, err)
+		}
+		return nil
 	}
 	req, err := http.NewRequest(http.MethodPut, s.objectURL(key), bytes.NewReader(data))
 	if err != nil {
@@ -189,6 +216,9 @@ func (s *S3Store) putSync(key string, data []byte) error {
 }
 
 func (s *S3Store) getSync(key string, offset, length int64) ([]byte, error) {
+	if length <= 0 || offset < 0 {
+		return nil, fmt.Errorf("s3 get %s: bad range at %d of length %d", key, offset, length)
+	}
 	if s.fileDir != "" {
 		path := filepath.Join(s.fileDir, filepath.FromSlash(key))
 		f, err := os.Open(path)
@@ -199,14 +229,6 @@ func (s *S3Store) getSync(key string, offset, length int64) ([]byte, error) {
 			return nil, err
 		}
 		defer f.Close() //nolint:errcheck
-		if length <= 0 {
-			if offset > 0 {
-				if _, err := f.Seek(offset, io.SeekStart); err != nil {
-					return nil, err
-				}
-			}
-			return io.ReadAll(f)
-		}
 		buf := make([]byte, length)
 		if _, err := f.ReadAt(buf, offset); err != nil {
 			return nil, err
@@ -217,11 +239,7 @@ func (s *S3Store) getSync(key string, offset, length int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if length > 0 {
-		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, offset+length-1))
-	} else if offset > 0 {
-		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
-	}
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, offset+length-1))
 	s.sign(req, emptySHA256, time.Now().UTC())
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -236,12 +254,14 @@ func (s *S3Store) getSync(key string, offset, length int64) ([]byte, error) {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		return nil, fmt.Errorf("s3 get %s: HTTP %d", key, resp.StatusCode)
 	}
-	b, err := io.ReadAll(resp.Body)
+	// Never trust the server's size (rule 4): one byte more than asked
+	// shows that it sent too much.
+	b, err := io.ReadAll(io.LimitReader(resp.Body, length+1))
 	if err != nil {
 		return nil, err
 	}
-	if length > 0 && int64(len(b)) != length {
-		return nil, fmt.Errorf("s3 get %s: short read %d != %d", key, len(b), length)
+	if int64(len(b)) != length {
+		return nil, fmt.Errorf("s3 get %s: got %d bytes, want %d", key, len(b), length)
 	}
 	return b, nil
 }

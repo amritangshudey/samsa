@@ -133,7 +133,8 @@ func (m *AlterUserScramCredentialsRequest) Decode(r *Reader, _ int16) {
 		return d
 	})
 	m.Upsertions = Array(r, true, func() CredentialUpsertion {
-		u := CredentialUpsertion{Name: r.String(true), Mechanism: r.Int8(), Iterations: r.Int32(), Salt: r.Bytes(true), SaltedPassword: r.Bytes(true)}
+		// Salt and SaltedPassword are not nullable: a null on the wire is read as empty.
+		u := CredentialUpsertion{Name: r.String(true), Mechanism: r.Int8(), Iterations: r.Int32(), Salt: nonNull(r.Bytes(true)), SaltedPassword: nonNull(r.Bytes(true))}
 		r.Tags(true)
 		return u
 	})

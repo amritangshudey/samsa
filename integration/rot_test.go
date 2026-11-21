@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
-	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
 // TestStorageRotRepair (docs/design/b1-storage-faults.md): one node of three
@@ -26,13 +25,7 @@ func TestStorageRotRepair(t *testing.T) {
 	c := startCluster(t, 3, "-log-level", "warn", "-scrub-interval", "1s", "-scrub-bytes-per-second", "268435456")
 	cl := c.client(kgo.MaxBufferedRecords(10000))
 	first := c.leader(cl)
-	req := kmsg.NewPtrCreateTopicsRequest()
-	rt := kmsg.NewCreateTopicsRequestTopic()
-	rt.Topic, rt.NumPartitions, rt.ReplicationFactor = "rot", 3, -1
-	req.Topics = append(req.Topics, rt)
-	if resp, err := req.RequestWith(context.Background(), cl); err != nil || resp.Topics[0].ErrorCode != 0 {
-		t.Fatalf("create topic: %v %+v", err, resp)
-	}
+	createTopic(t, cl, "rot", 3)
 
 	// More than two 64 MiB segments of 1 KiB records, so that two are sealed.
 	const n = 150_000

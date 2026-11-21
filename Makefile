@@ -84,8 +84,9 @@ shrink:
 
 # Real clients (franz-go, sarama, kafka-go, kcat, Java 4.4.0, Kafka CLI) against the built binary.
 # Needs kcat and a JDK; set SAMSA_REQUIRE_CLIENTS=1 to fail when one is missing.
+# The whole run takes 8 to 11 minutes, past go test's default limit of 10.
 integration: build $(JARS) $(KAFKA_DIST)
-	cd integration && SAMSA_BIN=$(CURDIR)/bin/samsa go test -count=1 -v ./...
+	cd integration && SAMSA_BIN=$(CURDIR)/bin/samsa go test -count=1 -v -timeout 30m ./...
 
 # Regenerate docs/compatibility.md from live client matrix test results (Item 16, G9).
 matrix: build $(JARS) $(KAFKA_DIST)

@@ -517,6 +517,14 @@ func (w *world) writable(leader *simNode) bool {
 	return acked && w.err == nil
 }
 
+// settleBound is how long settled waits. Catching up is the slow part: a
+// node that lost its whole log to damage, in a run with append=1 (one entry
+// per AppendEntries), refetches at one entry per round trip, which took
+// longer than answerBound in nightly seeds (BUGS.md M24).
+// shortcut: a fixed bound, not progress-aware; if a seed still catches up
+// too slowly, wait while the slowest node's log keeps growing.
+const settleBound = 6 * answerBound
+
 // settled waits, with no faults and no clients, until every node is up,
 // one of them serves as leader, and all have applied the same entries. It
 // then checks that they agree (S2 on whole logs, S4) and returns the
@@ -548,7 +556,7 @@ func (w *world) settled() *simNode {
 		}
 		return true
 	}
-	w.runUntil(w.now+sys.Instant(answerBound), agree)
+	w.runUntil(w.now+sys.Instant(settleBound), agree)
 	if w.err != nil {
 		return nil
 	}
@@ -562,7 +570,7 @@ func (w *world) settled() *simNode {
 			r := nd.inc.n.Raft()
 			state = append(state, fmt.Sprintf("node %d %v term %d last %d commit %d recovering %v serving %v", nd.id, r.Role(), r.Term(), r.LastIndex(), r.Committed(), r.Recovering(), nd.inc.n.Serving()))
 		}
-		w.fail("with faults stopped for %v the nodes did not all come back, elect a leader and catch up (rot %d): %v", answerBound, w.rot.state, state)
+		w.fail("with faults stopped for %v the nodes did not all come back, elect a leader and catch up (rot %d): %v", settleBound, w.rot.state, state)
 		return nil
 	}
 	lr := leader.inc.n.Raft()

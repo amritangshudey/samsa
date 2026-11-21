@@ -378,8 +378,16 @@ func (w *world) drainShareGroup(leader *simNode) {
 				return
 			}
 			sess++
+			ackErr := wire.ErrNone
+			for _, t := range resp.Responses {
+				for _, p := range t.Partitions {
+					if p.AckErrorCode != wire.ErrNone {
+						ackErr = p.AckErrorCode
+					}
+				}
+			}
 			for _, b := range acks {
-				for off := b.FirstOffset; off <= b.LastOffset; off++ {
+				for off := b.FirstOffset; off <= b.LastOffset && ackErr == wire.ErrNone; off++ {
 					w.model.ShareAcked(tp, off, wire.AckAccept, 1, epoch)
 				}
 			}

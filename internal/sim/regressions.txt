@@ -30,3 +30,14 @@
 1537
 1553
 951  # M20, C18a: C1 ordered an unacknowledged tombstone by send id instead of in-flight window
+623297379  # M22, nightly 2026-11-19: C2 read another tombstone at an offset a power loss had cut
+623335888  # M22, nightly 2026-11-20
+623232890  # M22, nightly 2026-11-17: I1/I3 from the same stale tombstone slot
+623221682  # M23, nightly 2026-11-17: S8, the final drain counted refused acknowledgements
+623226614  # M23, nightly 2026-11-17
+623265692  # M23, nightly 2026-11-18
+623301106  # M24, nightly 2026-11-19: settled gave a node refetching its log one entry per round trip 10 s
+623299220  # M24, nightly 2026-11-19
+623229758  # M24, nightly 2026-11-17
+623258340  # M24, nightly 2026-11-18
+623254219  # M24, nightly 2026-11-18
