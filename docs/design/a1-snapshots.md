@@ -256,3 +256,46 @@ Where the code differs from section 3, and why:
   the suite reported that as a violation (seeds 55, 498, 975); it was the
   check, not the broker.
 - Retention by size only, one bound for the whole log, not per topic.
+
+## 8. Addendum (2026-11-21): a transfer outlives newer snapshots (BUGS.md S21; ADR 0043)
+
+**Problem.** Section 3.3 sends "the leader's newest snapshot". The code
+took the newest one at every chunk, and started again from the first byte
+whenever it was not the one under way. A transfer that lasts longer than
+the time between two snapshots therefore never ended. In seed 1668 the
+leader took a snapshot per entry and a transfer needed about a thousand
+round trips. A follower stayed behind with no fault active.
+
+**Decision (ADR 0043).**
+- The progress keeps the snapshot under way, with its bytes, until the
+  follower holds the log past it. The leader takes the newest only when
+  its log start has passed the one under way.
+- While a follower that answered within an election timeout has a snapshot
+  under way, `Compact` removes nothing. The cut the follower was sent
+  stays in the leader's log until the follower holds the log past the
+  snapshot.
+
+**Second review.**
+- Safety does not change. Compacting less only keeps entries longer. The
+  snapshot sent may be older than the newest, but it is committed state and
+  still covers the gap to the leader's log start: that is checked before
+  every chunk. The follower installs it and catches up from the log, as it
+  would have if the transfer had begun before the newer snapshot.
+- The last chunk carries the cut, the leader's log start when it is sent.
+  With the hold that is the start when the transfer began. If the hold
+  lapsed because the follower went silent, the start may have moved. It
+  is then either still at or below the snapshot's index + 1, and so valid,
+  or past it, and the transfer starts again with the newest snapshot.
+- The hold is bounded by the transfer, plus the follower's catch-up to the
+  snapshot index. A follower that stops answering for an election timeout
+  releases it. A broken follower that answers every chunk but never
+  finishes would hold the log without end. A failed decode sends no answer,
+  so a garbled transfer does not do that.
+- `sendingSnapshot` looks at every follower's progress, in any order: the
+  answer is only whether one exists, so map order cannot reach a decision.
+- A deposed leader keeps its progress, and so the bytes, until it leads
+  again and builds new progress. That is one snapshot of memory, at most.
+- The Raft random schedules cannot meet this bug: their snapshots are a few
+  bytes and go in one chunk. `TestSnapshotTransferOutlivesNewerSnapshots`
+  guards it. It fails without the hold too.
+

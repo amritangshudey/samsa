@@ -171,9 +171,12 @@ func (r *Raft) Installing() bool { return r.pending != nil }
 
 // Compact removes log entries below offset, as far as whole segments allow.
 // It never removes an entry the newest snapshot does not cover (unless
-// MutTrimPastSnapshot): offset is clamped to the snapshot index + 1.
+// MutTrimPastSnapshot): offset is clamped to the snapshot index + 1. A
+// leader removes nothing while it installs a snapshot on a follower that
+// still answers: that follower continues from the log start it was sent
+// (BUGS.md S21).
 func (r *Raft) Compact(offset int64) {
-	if r.err != nil || r.pending != nil {
+	if r.err != nil || r.pending != nil || r.sendingSnapshot() {
 		return
 	}
 	if !r.mut(MutTrimPastSnapshot) {
@@ -290,28 +293,50 @@ func (r *Raft) maybePromote() {
 	r.pending, r.pendingBytes = nil, nil
 }
 
-// sendSnapshot sends the next chunk of the newest snapshot to a follower
-// whose next entry is below the log start.
+// sendingSnapshot reports whether this leader sends a snapshot, or the log
+// after it, to a follower that answered within an election timeout. One
+// that stopped answering does not hold the log: it may be gone for good.
+func (r *Raft) sendingSnapshot() bool {
+	if r.role != Leader {
+		return false
+	}
+	for _, p := range r.peers { // any order: only whether one exists
+		if p.snap != nil && r.env.Now() < p.acked+sys.Instant(r.cfg.ElectionTimeout) {
+			return true
+		}
+	}
+	return false
+}
+
+// sendSnapshot sends the next chunk of a snapshot to a follower whose next
+// entry is below the log start: the one under way while it still covers the
+// gap, otherwise the newest. Starting again with each newer one would never
+// end a transfer that takes longer than the leader takes between snapshots
+// (BUGS.md S21).
 //
 // shortcut: a follower buffers the snapshot in memory. It holds no record
 // data, so it is small; stream it to a file if it ever is not.
 func (r *Raft) sendSnapshot(to sys.NodeID, p *progress) {
-	s, b := r.latest, r.latestBytes
-	if r.pending != nil && r.pending.index > s.index {
-		s, b = *r.pending, r.pendingBytes
+	if p.snap == nil || p.snapIndex+1 < r.log.StartOffset() || p.snapOff >= int64(len(p.snap)) {
+		s, b := r.latest, r.latestBytes
+		if r.pending != nil && r.pending.index > s.index {
+			s, b = *r.pending, r.pendingBytes
+		}
+		if len(b) == 0 || s.index+1 < r.log.StartOffset() {
+			return // nothing that covers the gap; cannot happen while Compact clamps
+		}
+		if p.snap == nil || p.snapIndex != s.index || p.snapOff >= int64(len(b)) {
+			p.snapIndex, p.snapOff = s.index, 0
+		}
+		p.snap = b
 	}
-	if len(b) == 0 || s.index+1 < r.log.StartOffset() {
-		return // nothing that covers the gap; cannot happen while Compact clamps
-	}
-	if p.snapIndex != s.index || p.snapOff >= int64(len(b)) {
-		p.snapIndex, p.snapOff = s.index, 0
-	}
+	b := p.snap
 	// No bigger than one command, the bound every receiver checks.
 	chunk := min(max(r.cfg.MaxAppendBytes, 256), r.cfg.Log.MaxPayloadBytes-entryHeader)
 	n := min(int64(len(b))-p.snapOff, int64(chunk))
 	p.inflight = true
 	cut := r.log.StartOffset()
-	r.send(to, message{typ: msgInstallSnapshot, stamp: int64(r.env.Now()), cut: cut, prevTerm: r.terms.at(cut - 1), snapIndex: s.index,
+	r.send(to, message{typ: msgInstallSnapshot, stamp: int64(r.env.Now()), cut: cut, prevTerm: r.terms.at(cut - 1), snapIndex: p.snapIndex,
 		total: int64(len(b)), offset: p.snapOff, data: b[p.snapOff : p.snapOff+n]})
 }
 

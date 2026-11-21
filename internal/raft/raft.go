@@ -151,8 +151,11 @@ type progress struct {
 	// answered: it will not vote for anyone until ElectionTimeout after.
 	acked sys.Instant
 	// snapIndex and snapOff track a snapshot being sent: which one, and
-	// the next byte to send.
+	// the next byte to send. snap is its bytes, kept until the follower
+	// holds the log past it: a newer snapshot does not start the transfer
+	// again (BUGS.md S21).
 	snapIndex, snapOff int64
+	snap               []byte
 }
 
 // Raft is one node's consensus state. It is driven by exactly one caller,
@@ -1032,6 +1035,9 @@ func (r *Raft) onAppendResponse(from sys.NodeID, m message) {
 	case m.ok && m.index <= r.LastIndex():
 		p.match = max(p.match, m.index) // responses can arrive out of order
 		p.next = max(p.next, p.match+1)
+		if p.snap != nil && p.match >= p.snapIndex {
+			p.snap = nil // installed: the log may be compacted again (Compact)
+		}
 		p.inflight = false
 		r.advanceCommit()
 		if p.next <= r.LastIndex() {
