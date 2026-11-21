@@ -5,7 +5,7 @@ Written for whoever works on Samsa next, a person or another coding tool.
 merged PR is to update this file (CLAUDE.md says so). If the date below is old,
 check `git log` and `docs/PRODUCTION.md` before trusting it.
 
-**Last updated: 2026-11-21, the two real bugs of the nightly runs fixed (PR "review findings, part 2"); PR #53 (part 1) merged as `fb6fd51`.**
+**Last updated: 2026-11-21, the nightly run of 2026-11-21 read (PR "nightly 2026-11-21"): its integration failure was the sample application (M26, fixed), and GitHub cut its simulator job off, so its seeds ran locally; PR #54 (part 2) merged as `28978aa`.**
 
 ## 1. Read these first, in this order
 
@@ -76,9 +76,23 @@ and nobody looked: 33 failing seeds in eight nights.
   M24), fixed in PR #53. **4 were two real bugs**, 2 seeds each: storage
   (S14) and membership (S15), both fixed in PR "review findings, part 2".
   Every seed is in `internal/sim/regressions.txt`.
+- 2026-11-21, the first run on items 20 and 21 (`fb6fd51`, before the S14
+  and S15 fixes), failed without a seed. GitHub shut the simulator job's
+  runner down after 17 minutes (`The runner has received a shutdown
+  signal`, exit 143), and the job prints its seeds only at the end. The
+  same 30,000 seeds (base 623340000) ran locally on `28978aa`, in six
+  processes of 5,000: the first 20,000 passed, and the rest was still
+  running when this was written. No invariant failed, but one seed,
+  623351498, held 4 GB: tiering uploaded the same segment again and
+  again, and nothing checked that tiering progresses (`docs/BUGS.md` S16,
+  fixed in the next PR). The integration job failed once, in the sample
+  application of `TestVerdictCatchesCommitBeforeProcess` (`docs/BUGS.md`
+  M26), fixed in PR "nightly 2026-11-21".
 
-The tiered and diskless code (items 20, 21) merged after the last nightly
-run, so it has had 3,000 seeds per push and no nightly run yet.
+The tiered and diskless code (items 20, 21) has had 3,000 seeds per push
+and 20,000 of the nightly's, run locally, but S16 kept most of it idle: a
+segment of more than about 70 batches was never tiered, so the tiered read
+path was hardly simulated. No full nightly run on GitHub yet.
 
 **Soak (item 6):** done. Run 1 (before the memory-leak fix, `docs/BUGS.md` L1)
 failed on memory only (peak RSS 173 MiB). Run 2 on the fixed build (`7d877ab`)
@@ -104,15 +118,19 @@ OFFSET_NOT_AVAILABLE`) and passes without it: do not apply it.
    is empty for a spare; the other voter needed its vote (seeds 623233840,
    623282885). A node now stands while any configuration from its commit
    index on names it.
-3. Watch tonight's nightly run, the first on items 20 and 21. A local run of
-   30,000 seeds on `v1.0.0` was killed by the machine (16 GB, other load)
-   after 54 minutes, so it says nothing.
-4. **Done:** a failed nightly run opens an issue titled "Nightly simulator
+3. **In progress, the next PR (BUGS.md S16):** a `cmdTier` too large for a
+   log entry was refused, and the segment uploaded again for ever. With it
+   fixed, tiering will run in far more seeds than before: expect the
+   simulator to find more in that code.
+4. Watch the nightly run of 2026-11-22: the first full one on items 20 and
+   21, the first after S14, S15 and M26, and the first that can open the
+   issue of item 5.
+5. **Done:** a failed nightly run opens an issue titled "Nightly simulator
    run failed" with its failing seeds, or comments on the one still open
    (`.github/workflows/ci.yml`, job `sim`). Close the issue once its seeds
    are fixed or explained; the next failure then opens a new one. Not yet
    seen working: it runs only on a failing scheduled run.
-5. Optional follow-ups (not blocking v1.0): multi-Raft sharding (revisit ADR
+6. Optional follow-ups (not blocking v1.0): multi-Raft sharding (revisit ADR
    0039 if the single-Raft-group write ceiling becomes a bottleneck),
    Python/JS native client tests in CI, and automated web UI compatibility
    checks.
@@ -147,4 +165,6 @@ OFFSET_NOT_AVAILABLE`) and passes without it: do not apply it.
 `make build test lint`; `make sim SEEDS=1000` (or `SEED=n` to replay, with a
 trace); `go test ./internal/sim -run TestMutationSuite -v`; `make integration`;
 `make image`; `make soak`; `make release VERSION=vX.Y.Z`. Full list in
-`CLAUDE.md`.
+`CLAUDE.md`. To rerun a night's seeds: `go test ./internal/sim -count=1
+-run '^TestSim$' -timeout 2h -seeds=5000 -base-seed=B` for B, B+5000, …,
+B+25000, where B is that night's `-base-seed` (days since 1970 × 30,000).
