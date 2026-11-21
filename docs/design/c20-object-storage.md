@@ -184,3 +184,90 @@ the round ended, and its `tiering` flag stayed set (S17).
   worth the state.
 - T1 could not tell S16 from any other stall, and should not: any stall
   is a failure there.
+
+## 7. Addendum (2026-11-21): compacted topics stay in the log (BUGS.md S18, S19; ADR 0042)
+
+**Problem.** This design did not consider compaction. `docs/PRODUCTION.md`
+asked it to say how the cleaner's rewrites meet stored objects, and it
+never did. The tierer took a compacted topic like any other. Compaction
+then rewrote tiered batches: it matched them by log index 0, gave them a
+log index and left them their objects. Once the trim passed such a batch,
+the snapshot holding it did not decode, and a node could neither restart
+nor install a snapshot (S18). The simulator never drew tiering together
+with compaction. Allowing the pair, 9 of 600 seeds failed. Three of them
+were a second bug, in the prefetch of tiered reads: a fetch inside a gap
+that compaction left before a tiered batch was answered
+OFFSET_NOT_AVAILABLE at every retry (S19).
+
+**Decision (ADR 0042).**
+- The tierer skips a topic whose `cleanup.policy` includes `compact`, as
+  KIP-405 does.
+- The cleaner copies what tiering leaves forward, by its rule without
+  object storage, with only that counted as live. A head segment that holds
+  none of it is tiered and trimmed at once.
+- Compaction never rewrites a batch that is in an object.
+- The prefetch counts nothing for a first batch that begins before the fetch
+  offset, so it also fetches the batch after it.
+- The simulator draws tiering with compaction and with rot. T1 passes for a
+  head segment that holds a compacted topic's batches (`HeadSegmentEnd`
+  returns -1 for it). The mutation `UnsafeTierCompacted` brings S18 back.
+
+**Alternatives rejected.** These are in ADR 0042: compacting objects by
+making them local again, and relocating without the rule. For S19, the
+prefetch could read the first batch's last offset to see whether the read
+skips it. That needs the batch itself, which may not be cached yet, and a
+second pass. Fetching one batch too many costs one ranged read, and that
+batch is usually the next one the consumer asks for.
+
+**Second review.**
+- The change is in what a leader proposes, and no apply changes. Nodes on
+  the old and the new code apply the same log alike, so no format level is
+  needed. In a rolling upgrade, an old leader can still propose the bad
+  `cmdCompact` until every node runs the new code.
+- The fix does not repair a log that already holds such a rewrite. `v1.0.0`
+  shipped the bug. A cluster that tiered a compacted topic on it can hold a
+  batch that is in an object and at a log index. Once trimmed past, that
+  batch still breaks snapshots on the new code. Repair would mean decoding
+  such a batch as tiered (index 0), which changes the decoder and the state
+  hash. Whether to do that, and whether to cut a release, is the
+  developer's call (`docs/HANDOFF.md`).
+- `keepsLocal` and `liveBytes(true)` scan every compacted partition's
+  batches, once a round. The cleaner's loops already scan every batch.
+- A fetch that starts in the middle of a batch, after a seek or a commit
+  inside one, now prefetches one batch more when the partition limit would
+  have stopped it. The read puts it in the cache for the next fetch.
+- With compacted topics, the local log holds their live data, up to
+  `RetentionSlack` times it plus a segment, as without object storage.
+  Tiering waits behind a head segment that holds some of it, until the log
+  exceeds that bound. T1 cannot see that wait, and should not fail it. A
+  stall like S16 or S17 still fails T1 in every seed whose head has no
+  compacted batches.
+- Not covered: a diskless compacted topic, and a topic made `compact`
+  after it was tiered. Their batches in objects are never compacted, and
+  nothing refuses the setting. Both are in ADR 0042's consequences.
+
+## 8. Addendum (2026-11-21): a fetch that waited for objects checks again (BUGS.md S20)
+
+**Problem.** A fetch that needs batches in objects reads them into the
+cache first, and is answered when the last read completes. The node's role
+can change meanwhile. A follower may begin to install a snapshot, a
+follower may lose its leader, or a leader may lose its lease. S13's rule
+that an installing node answers no fetch was checked only when the fetch
+arrived. In seeds 4174 and 2595 a follower answered during an install,
+from a state that named batches its reset log no longer held, and stopped.
+
+**Decision.** When its object reads complete, the fetch checks again, as
+`completeFetch` does for a fetch that waited for new records. If the node
+may no longer serve it, it answers NOT_LEADER_OR_FOLLOWER, and the client
+asks for metadata and fetches elsewhere.
+
+**Second review.**
+- Both waits now end in the same check (`canRead() || canServeFetch()`). A
+  third wait added to the fetch path must end in it too.
+- A refusal costs the client a metadata round trip. It happens only when
+  the node's role changed during the read, which is what the client must
+  learn anyway.
+- `stopServing` already drops a connection with a request in progress, so
+  a leader that stops serving never answers. The new check matters for a
+  follower, and for a leader whose lease ran out while it stays leader.
+
