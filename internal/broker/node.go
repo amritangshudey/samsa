@@ -125,6 +125,10 @@ type Config struct {
 	// UnsafeKeepTiering brings back BUGS.md S17: a leader serving again
 	// keeps the tiering flag of a round that was cut off (mutation).
 	UnsafeKeepTiering bool
+	// UnsafeTierCompacted brings back BUGS.md S18: the tierer takes a
+	// compacted topic's batches, and compaction rewrites batches in objects
+	// (mutation).
+	UnsafeTierCompacted bool
 	// ProducerExpiry is how long an idempotent producer may write nothing
 	// before every partition forgets it (docs/design/a2-idempotent-producer.md,
 	// section 7). Default 24 h; negative never expires.

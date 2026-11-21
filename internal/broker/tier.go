@@ -181,6 +181,9 @@ func (n *Node) tierSegment(start, end int64) bool {
 	var entries []tierEntry
 	entryBytes := 0
 	for _, name := range n.st.names {
+		if compacts(n.st.topics[name]) && !n.cfg.UnsafeTierCompacted {
+			continue // compaction rewrites its batches in place, and an object cannot be (BUGS.md S18)
+		}
 		for i, p := range n.st.topics[name].parts {
 			for _, b := range p.batches {
 				if b.objKey != "" || b.control != 0 || b.logIndex < start || b.logIndex >= end {

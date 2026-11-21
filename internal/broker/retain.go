@@ -115,16 +115,45 @@ func (n *Node) expireRecords(now sys.Instant) {
 }
 
 // HeadSegmentEnd returns the end of the segment where the log starts, the
-// one clean works on, or -1 while it is the segment being written. With
-// object storage, a serving leader tiers and trims every segment before
-// that one (the simulator's T1).
-func (n *Node) HeadSegmentEnd() int64 { return n.raft.SegmentEnd(n.st.logStart) }
+// one clean works on, or -1 while it is the segment being written or holds
+// a compacted topic's batches. With object storage, a serving leader tiers
+// and trims every other segment (the simulator's T1); those batches stay
+// in the log, and wait for it to grow (BUGS.md S18).
+func (n *Node) HeadSegmentEnd() int64 {
+	end := n.raft.SegmentEnd(n.st.logStart)
+	if end >= 0 && n.keepsLocal(n.st.logStart, end) {
+		return -1
+	}
+	return end
+}
+
+// keepsLocal reports whether the log's segment [start, end) holds a batch
+// of a compacted topic, which compaction rewrites in place and tiering so
+// leaves in the log (BUGS.md S18).
+func (n *Node) keepsLocal(start, end int64) bool {
+	for _, name := range n.st.names {
+		if t := n.st.topics[name]; compacts(t) {
+			for _, p := range t.parts {
+				for _, b := range p.batches {
+					if b.objKey == "" && b.control == 0 && b.logIndex >= start && b.logIndex < end {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
 
 // liveBytes returns the bytes on disk of the log entries holding every
-// batch a partition references.
-func (n *Node) liveBytes() int64 {
+// batch a partition references, or with compacted only the compacted
+// topics' batches.
+func (n *Node) liveBytes(compacted bool) int64 {
 	var live int64
 	for _, name := range n.st.names {
+		if compacted && !compacts(n.st.topics[name]) {
+			continue
+		}
 		for _, p := range n.st.topics[name].parts {
 			for _, b := range p.batches {
 				if b.objKey == "" {
@@ -144,7 +173,7 @@ func (n *Node) liveBytes() int64 {
 // proposed anything, and so whether another round may follow.
 func (n *Node) clean() bool {
 	start := n.st.logStart
-	disk, live := n.raft.LogBytesFrom(start), n.liveBytes()
+	disk, live := n.raft.LogBytesFrom(start), n.liveBytes(false)
 	segment := n.cfg.SegmentBytes
 	if segment <= 0 {
 		segment = 64 << 20 // the storage default
@@ -158,22 +187,21 @@ func (n *Node) clean() bool {
 	if end < 0 {
 		return false // the head is the segment being written
 	}
-	if n.obj != nil && n.st.level >= 8 && !n.cfg.UnsafeTrimLive && !n.cfg.CompactionOff {
+	tiers := n.obj != nil && n.st.level >= 8 && !n.cfg.UnsafeTrimLive && !n.cfg.CompactionOff
+	if tiers {
 		if n.tierSegment(start, end) {
 			return true
 		}
-		if end > n.trimProposed {
-			n.trimProposed = end
-			n.cleaning++
-			n.propose(encodeTrim(end), func(result) { n.cleaning-- })
-			return true
-		}
-		return false
+		// What tiering leaves, a compacted topic's batches, is copied
+		// forward as without object storage, with only it live (BUGS.md
+		// S18); a segment without any is trimmed at once.
+		live = n.liveBytes(true)
 	}
 	// One segment more than the budget: then, either way, more than a
 	// segment of the log is dead, and every round frees some of it. Without
 	// that margin, a log of live data only could be copied around for ever.
-	if float64(disk) <= n.cfg.RetentionSlack*float64(max(live, segment))+float64(segment) && (limit <= 0 || disk <= limit) {
+	if float64(disk) <= n.cfg.RetentionSlack*float64(max(live, segment))+float64(segment) && (limit <= 0 || disk <= limit) &&
+		(!tiers || n.keepsLocal(start, end)) {
 		return false
 	}
 	copied := 0

@@ -102,7 +102,7 @@ func TestCleanerCopiesForward(t *testing.T) {
 	if m.ForcedRetentionBytes != 0 {
 		t.Fatalf("forced %d bytes without a safety limit", m.ForcedRetentionBytes)
 	}
-	disk, live := h.node.raft.LogBytesFrom(h.node.st.logStart), h.node.liveBytes()
+	disk, live := h.node.raft.LogBytesFrom(h.node.st.logStart), h.node.liveBytes(false)
 	t.Logf("log %d bytes, live %d, relocated %d, log start %d", disk, live, m.RelocatedBytes, h.node.st.logStart)
 	if float64(disk) > 2*float64(max(live, 4096))+4096 {
 		t.Fatalf("log %d bytes for %d live", disk, live)

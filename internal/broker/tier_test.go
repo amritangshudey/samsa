@@ -2,6 +2,7 @@ package broker
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -210,5 +211,180 @@ func TestTieringAgainWhenServingAgain(t *testing.T) {
 	}
 	if end := h.node.HeadSegmentEnd(); end >= 0 {
 		t.Fatalf("serving again, the leader's log still starts with a sealed segment, up to index %d (tiering %v)", end, h.node.tiering)
+	}
+}
+
+// fetchAt sends one fetch of topic's partition 0 at offset, with partMax
+// bytes for the partition, and completes the object reads it needs.
+func fetchAt(t *testing.T, h *harness, drain func(), topic string, offset int64, partMax int32) wire.FetchPartitionResponse {
+	t.Helper()
+	req := fetchReq(topic, 0, offset, 0, 1)
+	req.Topics[0].Partitions[0].MaxBytes = partMax
+	corr := h.send(1, wire.KeyFetch, 11, req)
+	h.run()
+	drain()
+	var resp wire.FetchResponse
+	if !h.recv(1, wire.KeyFetch, 11, corr, &resp) {
+		t.Fatalf("no fetch response at offset %d", offset)
+	}
+	return resp.Topics[0].Partitions[0]
+}
+
+// readTopic fetches every record of topic's partition 0 from offset 0, as
+// "offset:key=value" (see fold). A compacted partition has gaps: each fetch
+// goes on after the last batch read.
+func readTopic(t *testing.T, h *harness, drain func(), topic string) []string {
+	t.Helper()
+	var out []string
+	for off, next := int64(0), h.node.st.topics[topic].parts[0].next; off < next; {
+		pr := fetchAt(t, h, drain, topic, off, 1<<20)
+		if pr.ErrorCode != wire.ErrNone || len(pr.Records) == 0 {
+			t.Fatalf("fetch of %s at offset %d: error %d, %d bytes", topic, off, pr.ErrorCode, len(pr.Records))
+		}
+		from := off
+		for rest := pr.Records; len(rest) > 0; {
+			info, code := wire.ParseCompacted(rest, len(rest))
+			if code != wire.ErrNone {
+				t.Fatalf("fetched batch is invalid: error %d", code)
+			}
+			batch := rest[:info.Size]
+			base, _, err := wire.DecodeBatch(batch)
+			recs, err2 := wire.SplitBatch(batch)
+			if err != nil || err2 != nil {
+				t.Fatal(errors.Join(err, err2))
+			}
+			for _, r := range recs {
+				if o := base + int64(r.OffsetDelta); o >= from {
+					v := string(r.Value)
+					if r.Value == nil {
+						v = "<tombstone>"
+					}
+					out = append(out, fmt.Sprintf("%d:%s=%s", o, r.Key, v))
+				}
+			}
+			off = base + int64(wire.BatchLastOffsetDelta(batch)) + 1
+			rest = rest[info.Size:]
+		}
+	}
+	return out
+}
+
+// TestTieringLeavesCompactedTopicsLocal: compaction rewrites a batch in
+// place, which a batch in an object cannot be. Before BUGS.md S18 the
+// tierer took a compacted topic's batches too, and compaction then
+// rewrote tiered ones: each kept its object for reads and took the log
+// index of the rewrite, which the trim left behind, and the next snapshot
+// did not decode. A compacted topic's batches now stay in the log, copied
+// forward as without object storage, while the other topics are tiered.
+func TestTieringLeavesCompactedTopicsLocal(t *testing.T) {
+	h, _, _, drain := tierHarness(t, Config{SegmentBytes: 4096, MaxBatchBytes: 2048, SnapshotEvery: 20})
+	h.open(1)
+	for _, name := range []string{"c", "d"} {
+		if code := h.createTopic(1, name, 1); code != wire.ErrNone {
+			t.Fatalf("create topic %s: %d", name, code)
+		}
+	}
+	h.alterTopic("c", setConfig("cleanup.policy", "compact"))
+	want, pad, sent, other := map[string]string{}, strings.Repeat("v", 60), 0, 0
+	for round := range 15 { // a compaction sweep every 30 s
+		for i := range 30 {
+			// Two keys written again later and one that is not: compaction
+			// keeps a third of the batch.
+			k, j, u := fmt.Sprintf("k%d", i%7), fmt.Sprintf("j%d", i%5), fmt.Sprintf("u%d-%d", round, i)
+			v := fmt.Sprintf("%s%d-%d", pad, round, i)
+			if code := h.produceKV("c", k, v, j, v, u, v); code != wire.ErrNone {
+				t.Fatalf("produce: %d", code)
+			}
+			want[k], want[j], want[u] = v, v, v
+			sent += 3
+			h.produce(1, "d", 0, v)
+			other++
+		}
+		readTopic(t, h, drain, "c") // what is in objects comes into the cache, where compaction reads
+		for range 4 {
+			h.advance(retainEvery)
+			drain()
+		}
+	}
+	for range 5 {
+		h.advance(retainEvery)
+		drain()
+	}
+	if _, err := decodeState(h.node.st.encode()); err != nil {
+		t.Fatalf("the snapshot of the state does not decode: %v", err)
+	}
+	for _, b := range h.node.st.topics["c"].parts[0].batches {
+		if b.objKey != "" {
+			t.Fatalf("the batch at %d of the compacted topic is in object %s (log index %d)", b.base, b.objKey, b.logIndex)
+		}
+	}
+	if m := h.node.Metrics(); m.TieredBatches == 0 || h.node.st.logStart == 0 {
+		t.Fatalf("the other topic was not tiered, or the log not trimmed: %+v, log start %d", m, h.node.st.logStart)
+	}
+	h.node.objCache = newObjCache(32 << 20) // read from the objects
+	records := readTopic(t, h, drain, "c")
+	if got := fold(records); fmt.Sprint(got) != fmt.Sprint(want) || len(records) >= sent {
+		t.Fatalf("compacted topic: %d of %d records left, final state\n got %v\nwant %v", len(records), sent, got, want)
+	}
+	if d := readTopic(t, h, drain, "d"); len(d) != other {
+		t.Fatalf("the other topic: %d records, want %d", len(d), other)
+	}
+	hash := h.node.st.hash()
+	h.start()
+	if h.node.st.hash() != hash {
+		t.Fatal("state after restart differs")
+	}
+}
+
+// TestCompactionLeavesTieredBatches: a topic tiered before it became
+// compacted keeps its batches in objects, which compaction cannot rewrite.
+// Before BUGS.md S18 it rewrote them as if they were in the log, and the
+// next snapshot did not decode.
+func TestCompactionLeavesTieredBatches(t *testing.T) {
+	h, _, _, drain := tierHarness(t, Config{SegmentBytes: 4096, MaxBatchBytes: 2048, SnapshotEvery: 20})
+	h.open(1)
+	if code := h.createTopic(1, "t", 1); code != wire.ErrNone {
+		t.Fatalf("create topic: %d", code)
+	}
+	pad := strings.Repeat("v", 60)
+	produce := func(round int) {
+		for i := range 30 {
+			v := fmt.Sprintf("%s%d-%d", pad, round, i)
+			if code := h.produceKV("t", fmt.Sprintf("k%d", i%7), v, fmt.Sprintf("j%d", i%5), v, fmt.Sprintf("u%d-%d", round, i), v); code != wire.ErrNone {
+				t.Fatalf("produce: %d", code)
+			}
+		}
+		for range 4 {
+			h.advance(retainEvery)
+			drain()
+		}
+	}
+	for round := range 3 {
+		produce(round)
+	}
+	tiered := 0
+	for _, b := range h.node.st.topics["t"].parts[0].batches {
+		if b.objKey != "" {
+			tiered++
+		}
+	}
+	if tiered == 0 {
+		t.Fatal("setup: nothing tiered")
+	}
+	h.alterTopic("t", setConfig("cleanup.policy", "compact"))
+	for round := 3; round < 15; round++ { // a compaction sweep every 30 s
+		readTopic(t, h, drain, "t") // what is in objects comes into the cache, where compaction reads
+		produce(round)
+	}
+	if m := h.node.Metrics(); m.CompactedRecords == 0 {
+		t.Fatalf("setup: nothing compacted: %+v", m)
+	}
+	if _, err := decodeState(h.node.st.encode()); err != nil {
+		t.Fatalf("the snapshot of the state does not decode: %v", err)
+	}
+	for _, b := range h.node.st.topics["t"].parts[0].batches {
+		if b.objKey != "" && b.logIndex != 0 {
+			t.Fatalf("the batch at %d is in object %s and at log index %d", b.base, b.objKey, b.logIndex)
+		}
 	}
 }

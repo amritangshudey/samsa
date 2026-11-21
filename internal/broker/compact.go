@@ -293,6 +293,12 @@ func (n *Node) sweep(name string, part int, t *topic, p *partition, km *keyMap, 
 			km.scanned = b.base + 1
 			continue
 		}
+		if b.objKey != "" && !n.cfg.UnsafeTierCompacted {
+			// In an object, which cannot be rewritten: a topic tiered or
+			// diskless before it was compacted. Rewritten here, it would
+			// keep the object and take a log index (BUGS.md S18).
+			continue
+		}
 		data, ok := n.readBatch(b)
 		if !ok {
 			return false
