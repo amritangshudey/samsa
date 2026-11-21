@@ -228,6 +228,9 @@ func Run(cfg Config) Result {
 				w.opts.rcConsumers = 1
 			}
 		}
+		if w.bcfg.UnsafeKeepTiering {
+			w.opts.tier = !w.opts.rot && !w.opts.compact // the combinations a seed draws
+		}
 		if w.bcfg.UnsafeDeleteBeforeUpload {
 			w.opts.tier = true
 			w.bcfg.SegmentBytes = 16384
@@ -374,6 +377,18 @@ func (w *world) finalChecks() {
 	if c, b := leader.inc.n.Level(); c != b {
 		w.fail("U1: the settled cluster is at format level %d, below its build's %d", c, b)
 		return
+	}
+	// T1: with object storage, the settled leader tiers and trims every
+	// segment but the one being written (BUGS.md S16).
+	if w.objs != nil {
+		tiered := func() bool { return leader.inc.n.HeadSegmentEnd() < 0 }
+		if w.runUntil(w.now+sys.Instant(10*time.Second), tiered); w.err != nil {
+			return
+		}
+		if !tiered() {
+			w.fail("T1: 10 s after settling, the leader's log still starts with a sealed segment, up to index %d: tiering does not progress", leader.inc.n.HeadSegmentEnd())
+			return
+		}
 	}
 	var tps []TP
 	for _, t := range catalogue {

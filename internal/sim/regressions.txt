@@ -45,3 +45,9 @@
 623265521  # S14, nightly 2026-11-18
 623233840  # S15, nightly 2026-11-17: a removed spare that led did not stand after a restart; the other voter needed its vote
 623282885  # S15, nightly 2026-11-19
+623351498 # S16, nightly 2026-11-21: a cmdTier too large for the log, so the segment was uploaded again and again (T1)
+1139 # S17: a leader cut off while its cmdTier waited never tiered again (T1)
+1194 # S17
+1196 # S17
+1476 # S17
+2135 # S17
