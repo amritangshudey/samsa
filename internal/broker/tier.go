@@ -181,6 +181,9 @@ func (n *Node) tierSegment(start, end int64) bool {
 	var entries []tierEntry
 	entryBytes := 0
 	for _, name := range n.st.names {
+		if compacts(n.st.topics[name]) && !n.cfg.UnsafeTierCompacted {
+			continue // compaction rewrites its batches in place, and an object cannot be (BUGS.md S18)
+		}
 		for i, p := range n.st.topics[name].parts {
 			for _, b := range p.batches {
 				if b.objKey != "" || b.control != 0 || b.logIndex < start || b.logIndex >= end {
@@ -341,6 +344,12 @@ func (n *Node) missingRemoteBatches(c *conn, v int16, req *wire.FetchRequest) []
 				bLen := int(ref.objLen)
 				if bLen <= 0 {
 					bLen = int(ref.size)
+				}
+				if ref.base < q.Offset {
+					// The read skips it if q.Offset lies in a gap after it,
+					// left by compaction, and starts with the next one
+					// whatever its size (BUGS.md S19).
+					bLen = 0
 				}
 				if partBytes > 0 && partBytes+bLen > partLimit {
 					break

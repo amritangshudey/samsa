@@ -51,3 +51,14 @@
 1196 # S17
 1476 # S17
 2135 # S17
+148 # S18: compaction rewrote a tiered batch; the next snapshot did not decode (tiering drawn with compaction)
+247 # S18
+13 # S19: a fetch in a compaction gap before a tiered batch answered OFFSET_NOT_AVAILABLE (I2)
+267 # S19
+283 # S19
+4174 # S20: a follower fetch that waited for an object read was answered during a snapshot install, and the node stopped
+2595 # S20
+1668 # S21: a snapshot transfer started again with every newer snapshot, and a follower never caught up (liveness)
+690 # S22: an older snapshot went with a newer cut, and the installed state named batches below the log start
+916 # S22
+4079 # S22

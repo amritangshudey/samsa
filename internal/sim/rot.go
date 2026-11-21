@@ -13,15 +13,25 @@ import (
 // Nothing acknowledged may be lost: the checks that judge the whole run
 // judge this too, and S7 adds that a recovering node casts no vote.
 
-// rotInfo is the damage in flight.
+// rotInfo is the damage in flight: where it was made, to see whether it is
+// still there.
 type rotInfo struct {
 	state rotState
 	node  *simNode
+	file  string
+	at    int
+	data  []byte
 }
 
 // rotOne damages one sealed segment of nd's log, if no damage is in flight,
 // all the nodes are up, and the cluster is large enough to repair a node.
 func (w *world) rotOne(nd *simNode) {
+	if w.rot.state == rotInjected && !w.rot.node.disk.Holds(w.rot.file, w.rot.at, w.rot.data) {
+		// A trim, an install or a truncation deleted it before any read or
+		// scrub found it. Nothing is left to repair; waiting for it to be
+		// found stopped rot for the rest of the run (BUGS.md M27).
+		w.rot = rotInfo{}
+	}
 	if w.rot.state != rotNone || w.opts.nodes < 3 || nd.inc == nil {
 		return
 	}
@@ -63,7 +73,7 @@ func (w *world) rotOne(nd *simNode) {
 	}
 	w.note(nd.tag(fmt.Sprintf("rot: %d bytes of %s at %d", len(data), name, at)), 0, nil)
 	w.stats.DamageInjected++
-	w.rot = rotInfo{state: rotInjected, node: nd}
+	w.rot = rotInfo{state: rotInjected, node: nd, file: name, at: at, data: data}
 }
 
 // checkRot runs with every monitor call: S7, and the end of recovery.

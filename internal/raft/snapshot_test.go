@@ -166,6 +166,102 @@ func TestSnapshotChunksDoNotMultiply(t *testing.T) {
 	}
 }
 
+// A transfer that takes longer than the leader takes between snapshots
+// still ends. Before BUGS.md S21 every newer snapshot started it again from
+// its first byte, so a follower that needed one never caught up while the
+// leader kept writing (simulator seed 1668, with a snapshot per entry).
+func TestSnapshotTransferOutlivesNewerSnapshots(t *testing.T) {
+	c := newCluster(t, 3, nil)
+	c.startAll()
+	c.elect(1)
+	for i := range 60 {
+		c.propose(1, fmt.Sprintf("command %d", i))
+		c.run(cutOff(3))
+	}
+	l := c.r(1)
+	snap := func() { // what the broker does after it applies entries, with a snapshot per entry
+		l.SaveSnapshot(l.Committed()-1, bytes.Repeat([]byte("s"), 3000))
+		l.Compact(l.Committed())
+	}
+	snap()
+	if l.LogStart() == 0 {
+		t.Fatal("nothing compacted")
+	}
+	l.OnTimer(TimerHeartbeat)
+	c.settle(c.nodes[1])
+	chunks, writes := 0, 0
+	for step := 0; len(c.queue) > 0; step++ {
+		if step == 20000 {
+			t.Fatalf("node 3 holds %d, installing %v, after %d chunks and %d writes", c.r(3).LastIndex(), c.r(3).Installing(), chunks, writes)
+		}
+		m := c.queue[0]
+		c.step(0)
+		switch m.raw[1] {
+		case msgInstallSnapshot:
+			chunks++
+		case msgInstallResponse: // the leader writes on while node 3 takes each chunk
+			writes++
+			c.propose(1, fmt.Sprintf("later %d", writes))
+		}
+		if l.Committed()-1 > l.SnapshotIndex() {
+			snap()
+		}
+	}
+	if f := c.r(3); f.Installing() || f.LastIndex() != l.LastIndex() {
+		t.Fatalf("node 3 holds %d, installing %v; the leader %d", f.LastIndex(), f.Installing(), l.LastIndex())
+	}
+	if chunks > 60 { // one transfer is about 26
+		t.Fatalf("%d chunks sent: the transfer started again", chunks)
+	}
+	snap() // node 3 holds the log past the snapshot: the leader compacts again
+	if l.LogStart() != l.SnapshotIndex()+1 && l.LogStart() < l.LastIndex()-20 {
+		t.Fatalf("the leader's log still starts at %d, snapshot %d, last %d", l.LogStart(), l.SnapshotIndex(), l.LastIndex())
+	}
+}
+
+// A transfer that no hold protects starts again once the leader compacts.
+// The caller compacts as its newest snapshot allows (the broker's
+// compactTo), and an older snapshot may need entries from below the new log
+// start. The first fix of S21 went on with the older snapshot and sent it
+// with the newer cut (BUGS.md S22, simulator seeds 690, 916 and 4079).
+func TestSnapshotTransferStartsAgainAfterCompaction(t *testing.T) {
+	c := newCluster(t, 3, nil)
+	c.startAll()
+	c.elect(1)
+	for i := range 60 {
+		c.propose(1, fmt.Sprintf("command %d", i))
+		c.run(cutOff(3))
+	}
+	l := c.r(1)
+	for range 8 { // node 3, away, no longer holds the log; node 2 keeps the leader
+		c.now += sys.Instant(50 * time.Millisecond)
+		l.OnTimer(TimerHeartbeat)
+		c.run(cutOff(3))
+	}
+	l.SaveSnapshot(l.Committed()-1, []byte("first"))
+	first := l.SnapshotIndex()
+	l.Compact(25) // what the caller keeps for this snapshot
+	cut := l.LogStart()
+	l.OnTimer(TimerHeartbeat) // the snapshot goes to node 3, which is away
+	c.run(cutOff(3))
+	c.propose(1, "later")
+	c.run(cutOff(3))
+	l.SaveSnapshot(l.Committed()-1, []byte("second"))
+	l.Compact(first) // the newer snapshot needs less of the log
+	if l.LogStart() <= cut || l.LogStart() > first+1 {
+		t.Fatalf("setup: the log starts at %d, before at %d; the first snapshot is at %d", l.LogStart(), cut, first)
+	}
+	l.OnTimer(TimerHeartbeat)
+	c.run(nil) // node 3 is back
+	f := c.r(3)
+	if f.SnapshotIndex() == first && f.LogStart() > cut {
+		t.Fatalf("node 3 has the snapshot at %d with its log from %d; the leader's log started at %d while that snapshot was its newest", first, f.LogStart(), cut)
+	}
+	if f.Installing() || f.LastIndex() != l.LastIndex() {
+		t.Fatalf("node 3 holds %d, installing %v; the leader %d", f.LastIndex(), f.Installing(), l.LastIndex())
+	}
+}
+
 // runsOf compresses terms[0..index] into runs.
 func runsOf(terms []int64, index int64) []termRun {
 	var runs []termRun

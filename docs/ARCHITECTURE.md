@@ -115,7 +115,10 @@ segments only below its newest snapshot's log start
 (`raft.Compact`). A follower whose next entry was deleted gets the
 leader's snapshot by InstallSnapshot (`raft/snapshot.go`), in chunks,
 keeps it as an `install` marker until its log is durable past it, and
-meanwhile applies nothing.
+meanwhile applies nothing. The leader finishes the snapshot it began even
+when it has a newer one, and compacts nothing while that follower answers
+and does not yet hold the log past it. If its log start moves all the same,
+it starts again with the newest (ADR 0043).
 
 The rules that keep it correct (roadmap R1–R7): apply reads no clock, no
 randomness and no unordered map, and anything time- or chance-dependent is

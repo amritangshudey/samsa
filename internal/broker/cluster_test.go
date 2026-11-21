@@ -10,19 +10,24 @@ import (
 )
 
 // trio is three nodes joined by a network the test operates by hand: a
-// peer message moves only when the test says so.
+// peer message moves only when the test says so. configure, if given,
+// changes each node's configuration before it starts.
 type trio struct {
 	t *testing.T
 	h map[sys.NodeID]*harness
 }
 
-func newTrio(t *testing.T) *trio {
+func newTrio(t *testing.T, configure ...func(*Config)) *trio {
 	tr := &trio{t: t, h: map[sys.NodeID]*harness{}}
 	peers := []Peer{{ID: 1, Host: "host1", Port: 9092, PeerAddr: "host1:9192", Rack: "r1"}, {ID: 2, Host: "host2", Port: 9092, PeerAddr: "host2:9192", Rack: "r2"}, {ID: 3, Host: "host3", Port: 9092, PeerAddr: "host3:9192", Rack: "r3"}}
 	for _, p := range peers {
-		tr.h[sys.NodeID(p.ID)] = &harness{t: t, cfg: Config{NodeID: p.ID, Host: p.Host, Port: p.Port, Peers: peers},
+		h := &harness{t: t, cfg: Config{NodeID: p.ID, Host: p.Host, Port: p.Port, Peers: peers},
 			disk: simsys.NewDisk(simsys.NewRand(uint64(p.ID)), simsys.DiskConfig{}), rand: simsys.NewRand(uint64(10 + p.ID))}
-		tr.h[sys.NodeID(p.ID)].start()
+		for _, f := range configure {
+			f(&h.cfg)
+		}
+		tr.h[sys.NodeID(p.ID)] = h
+		h.start()
 	}
 	return tr
 }

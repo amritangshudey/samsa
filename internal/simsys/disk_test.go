@@ -176,3 +176,35 @@ func TestPathsCannotEscape(t *testing.T) {
 		t.Fatalf("List = %v, %v; want [up]", names, err)
 	}
 }
+
+// Holds tells the rot injector whether its damage is still on disk: gone
+// with the file even when a file of the same name comes back (BUGS.md M27).
+func TestHoldsSeesDamageGo(t *testing.T) {
+	d := NewDisk(NewRand(1), DiskConfig{})
+	write := func(s string) {
+		t.Helper()
+		f := mustOpen(t, d, "seg", sys.Create)
+		f.WriteAt([]byte(s), 0)
+		if err := errors.Join(f.Sync(), d.SyncDir(".")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("a sealed segment")
+	bad := []byte("XX")
+	if !d.Corrupt("seg", 2, bad) || !d.Holds("seg", 2, bad) {
+		t.Fatal("damage made but not held")
+	}
+	if d.Holds("seg", 15, bad) || d.Holds("seg", -1, bad) || d.Holds("other", 2, bad) {
+		t.Fatal("held where nothing was damaged")
+	}
+	if err := d.Remove("seg"); err != nil {
+		t.Fatal(err)
+	}
+	if d.Holds("seg", 2, bad) {
+		t.Fatal("damage held after its file was removed")
+	}
+	write("a new segment, same name")
+	if d.Holds("seg", 2, bad) {
+		t.Fatal("damage held in a new file of the same name")
+	}
+}

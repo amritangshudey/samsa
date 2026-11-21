@@ -341,7 +341,16 @@ type parkedFetch struct {
 }
 
 func (n *Node) fetch(c *conn, h wire.RequestHeader, req *wire.FetchRequest) {
-	n.prefetchAndFetch(c, h, req, 0, func() { n.finishFetch(c, h, req) })
+	n.prefetchAndFetch(c, h, req, 0, func() {
+		// It may have waited for object reads, and stopped serving meanwhile:
+		// a follower installing a snapshot no longer holds the log its state
+		// names (BUGS.md S20), as completeFetch knows.
+		if !n.canRead() && !n.canServeFetch() {
+			n.respond(c, h, refusal(req))
+			return
+		}
+		n.finishFetch(c, h, req)
+	})
 }
 
 func (n *Node) prefetchAndFetch(c *conn, h wire.RequestHeader, req *wire.FetchRequest, pass int, finish func()) {
