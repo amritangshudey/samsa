@@ -345,6 +345,12 @@ func (n *Node) missingRemoteBatches(c *conn, v int16, req *wire.FetchRequest) []
 				if bLen <= 0 {
 					bLen = int(ref.size)
 				}
+				if ref.base < q.Offset {
+					// The read skips it if q.Offset lies in a gap after it,
+					// left by compaction, and starts with the next one
+					// whatever its size (BUGS.md S19).
+					bLen = 0
+				}
 				if partBytes > 0 && partBytes+bLen > partLimit {
 					break
 				}

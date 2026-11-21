@@ -336,6 +336,50 @@ func TestTieringLeavesCompactedTopicsLocal(t *testing.T) {
 	}
 }
 
+// TestTieredFetchInACompactionGap: compaction can remove whole batches, and
+// a fetch at an offset they held starts with the next batch. Before BUGS.md
+// S19 the prefetch counted the batch before the gap, which the read skips,
+// and stopped short of the one it starts with: the fetch was answered
+// OFFSET_NOT_AVAILABLE, the same at every retry.
+func TestTieredFetchInACompactionGap(t *testing.T) {
+	h, _, _, drain := tierHarness(t, Config{SegmentBytes: 4096, MaxBatchBytes: 2048})
+	h.open(1)
+	if code := h.createTopic(1, "g", 1); code != wire.ErrNone {
+		t.Fatalf("create topic: %d", code)
+	}
+	h.alterTopic("g", setConfig("cleanup.policy", "compact"))
+	h.produceKV("g", "z", "0")                               // offset 0
+	h.produceKV("g", "a", "1")                               // offset 1, a batch compaction removes
+	h.produceKV("g", "b", strings.Repeat("b", 500))          // offset 2
+	h.produceKV("g", "a", "2", "a", "3", "a", "4", "a", "5") // offsets 3 to 6
+	for range 4 {
+		h.advance(retainEvery)
+		drain()
+	}
+	p := h.node.st.topics["g"].parts[0]
+	if len(p.batches) != 3 || p.batches[1].base != 2 {
+		t.Fatalf("setup: compaction left batches %+v", p.batches)
+	}
+	// A compacted topic stays in the log: it stops being one, and is tiered.
+	h.alterTopic("g", setConfig("cleanup.policy", "delete"))
+	for range 60 {
+		h.produce(1, "g", 0, strings.Repeat("f", 100))
+	}
+	for range 5 {
+		h.advance(retainEvery)
+		drain()
+	}
+	if p.batches[0].objKey == "" || p.batches[1].objKey == "" {
+		t.Fatalf("setup: not tiered: %+v", p.batches[:2])
+	}
+	h.node.objCache = newObjCache(32 << 20)
+	pr := fetchAt(t, h, drain, "g", 1, 1) // in the gap; the first batch is sent whatever its size
+	first, values := h.values(pr)
+	if pr.ErrorCode != wire.ErrNone || first != 2 || len(values) != 1 {
+		t.Fatalf("fetch at 1: error %d, first offset %d, %d records; want the batch at 2", pr.ErrorCode, first, len(values))
+	}
+}
+
 // TestCompactionLeavesTieredBatches: a topic tiered before it became
 // compacted keeps its batches in objects, which compaction cannot rewrite.
 // Before BUGS.md S18 it rewrote them as if they were in the log, and the
