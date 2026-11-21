@@ -122,6 +122,9 @@ type Config struct {
 	// UnsafeDeleteBeforeUpload makes the tierer propose cmdTier (allowing local
 	// segment trim) before ObjectStore.Put is confirmed (Item 20 mutation).
 	UnsafeDeleteBeforeUpload bool
+	// UnsafeKeepTiering brings back BUGS.md S17: a leader serving again
+	// keeps the tiering flag of a round that was cut off (mutation).
+	UnsafeKeepTiering bool
 	// ProducerExpiry is how long an idempotent producer may write nothing
 	// before every partition forgets it (docs/design/a2-idempotent-producer.md,
 	// section 7). Default 24 h; negative never expires.
@@ -768,7 +771,10 @@ func (n *Node) lead() {
 		n.serving, n.servingTerm = true, term
 		n.trimProposed = n.st.logStart // a Trim proposed in an earlier term may have been lost
 		n.expirySamples = nil
-		n.expiring, n.cleaning, n.compacting = 0, 0, 0 // proposals of an earlier term are never answered
+		// Proposals made before serving again are never answered, so
+		// nothing would bring these back down (tiering: BUGS.md S17).
+		n.expiring, n.cleaning, n.compacting = 0, 0, 0
+		n.tiering = n.tiering && n.cfg.UnsafeKeepTiering
 		n.keyMaps, n.compactActive = nil, false
 		n.startGroups()
 		n.armTxnTimer()

@@ -182,3 +182,33 @@ func TestTierEntryBytes(t *testing.T) {
 		t.Fatalf("two entries encode to %d bytes, tierEntryBytes says %d", got, want)
 	}
 }
+
+// TestTieringAgainWhenServingAgain: a leader that stops serving while its
+// cmdTier waits for commit is never told how it ended. When it serves
+// again it must tier again. Before BUGS.md S17 its tiering flag stayed
+// set, and it never tiered or trimmed again.
+func TestTieringAgainWhenServingAgain(t *testing.T) {
+	h, _, ops, drain := tierHarness(t, Config{SegmentBytes: 16384, MaxBatchBytes: 8192})
+	h.open(1)
+	if code := h.createTopic(1, "tier", 1); code != wire.ErrNone {
+		t.Fatalf("create topic: %d", code)
+	}
+	val := strings.Repeat("x", 512)
+	for range 45 {
+		h.produce(1, "tier", 0, val)
+	}
+	h.advance(time.Second) // retain: a round's upload starts
+	ops()                  // it completes, and the round proposes its cmdTier
+	if !h.node.tiering || len(h.node.waiters) == 0 {
+		t.Fatalf("setup: tiering %v, %d waiters", h.node.tiering, len(h.node.waiters))
+	}
+	h.node.serving = false // what lead does when the node stops leading:
+	h.node.stopServing()   // the cmdTier's waiter is dropped
+	for range 5 {
+		h.advance(time.Second) // lead serves again, in the same term, as after a handover that failed
+		drain()
+	}
+	if end := h.node.HeadSegmentEnd(); end >= 0 {
+		t.Fatalf("serving again, the leader's log still starts with a sealed segment, up to index %d (tiering %v)", end, h.node.tiering)
+	}
+}
