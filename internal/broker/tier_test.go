@@ -432,3 +432,68 @@ func TestCompactionLeavesTieredBatches(t *testing.T) {
 		}
 	}
 }
+
+// TestFollowerFetchWaitingForAnObjectChecksAgain: a fetch that waits for an
+// object read is answered later, when the node may no longer serve reads:
+// here a follower stopped hearing from its leader. Before BUGS.md S20 it
+// was answered from the node's state all the same. A follower that began
+// to install a snapshot meanwhile, which also ends canServeFetch, read log
+// entries the install had removed, and stopped (simulator seed 4174).
+func TestFollowerFetchWaitingForAnObjectChecksAgain(t *testing.T) {
+	shared := simsys.NewSharedObjects(simsys.ObjFaults{MaxDelay: 5 * time.Millisecond})
+	pending := map[int32][]func(){}
+	var tr *trio
+	tr = newTrio(t, func(c *Config) {
+		id := c.NodeID
+		c.SegmentBytes, c.MaxBatchBytes = 4096, 2048
+		c.ObjectStore = simsys.NewNodeObjectStore(shared, simsys.NewRand(uint64(20+id)),
+			func(_ time.Duration, fn func()) { pending[id] = append(pending[id], fn) },
+			func(op sys.ObjOpID, data []byte, err error) {
+				if err := tr.h[sys.NodeID(id)].node.OnObjectDone(op, data, err); err != nil {
+					t.Errorf("node %d: OnObjectDone: %v", id, err)
+				}
+			})
+	})
+	ops := func(id int32) {
+		q := pending[id]
+		pending[id] = nil
+		for _, fn := range q {
+			fn()
+		}
+	}
+	tr.elect(1, 1, 2, 3)
+	lead := tr.h[1]
+	lead.open(1)
+	lead.send(1, wire.KeyCreateTopics, 4, &wire.CreateTopicsRequest{Topics: []wire.CreateTopic{{Name: "f", NumPartitions: 1, ReplicationFactor: 3}}})
+	tr.deliver(1, 2, 3)
+	for range 60 {
+		lead.send(1, wire.KeyProduce, 8, produceReq("f", 0, batch(strings.Repeat("x", 100))))
+		tr.deliver(1, 2, 3)
+	}
+	for range 60 { // the leader tiers, and the followers apply its commands
+		lead.advance(100 * time.Millisecond)
+		ops(1)
+		tr.deliver(1, 2, 3)
+	}
+	f := tr.h[2]
+	if f.node.st.topics["f"].parts[0].batches[0].objKey == "" {
+		t.Fatalf("setup: the follower holds no tiered batch (the leader serving %v, %+v)", lead.node.serving, lead.node.Metrics())
+	}
+	f.open(5)
+	req := fetchReq("f", 0, 0, 0, 1)
+	req.Topics[0].Partitions[0].MaxBytes = 1 // one batch, one object read
+	corr := f.send(5, wire.KeyFetch, 11, req)
+	f.run()
+	if len(pending[2]) == 0 {
+		t.Fatal("setup: the follower's fetch did not wait for an object read")
+	}
+	f.clock.now += sys.Instant(time.Second) // it hears nothing from the leader
+	ops(2)
+	var resp wire.FetchResponse
+	if !f.recv(5, wire.KeyFetch, 11, corr, &resp) {
+		t.Fatal("no fetch response")
+	}
+	if pr := resp.Topics[0].Partitions[0]; pr.ErrorCode != wire.ErrNotLeaderOrFollower || len(pr.Records) > 0 {
+		t.Fatalf("a follower that may no longer serve answered: error %d, %d bytes", pr.ErrorCode, len(pr.Records))
+	}
+}
