@@ -206,7 +206,7 @@ func Run(cfg Config) Result {
 	w.opts.sgMembers = pick.Intn(4) // drawn last
 	w.opts.txnProducers = pick.Intn(3)
 	w.opts.rcConsumers = pick.Intn(2)
-	w.opts.tier = pick.Chance(0.35) && !w.opts.rot && !w.opts.compact
+	w.opts.tier = pick.Chance(0.35) // with compaction and rot too, since S18
 	if cfg.Calm {
 		w.opts.drop, w.opts.dup = 0, 0
 	}
@@ -229,7 +229,10 @@ func Run(cfg Config) Result {
 			}
 		}
 		if w.bcfg.UnsafeKeepTiering {
-			w.opts.tier = !w.opts.rot && !w.opts.compact // the combinations a seed draws
+			w.opts.tier = true
+		}
+		if w.bcfg.UnsafeTierCompacted {
+			w.opts.tier, w.opts.compact = true, true
 		}
 		if w.bcfg.UnsafeDeleteBeforeUpload {
 			w.opts.tier = true
@@ -379,7 +382,8 @@ func (w *world) finalChecks() {
 		return
 	}
 	// T1: with object storage, the settled leader tiers and trims every
-	// segment but the one being written (BUGS.md S16).
+	// segment but the one being written (BUGS.md S16), except one that holds
+	// a compacted topic's batches: those stay, by the cleaner's rule (S18).
 	if w.objs != nil {
 		tiered := func() bool { return leader.inc.n.HeadSegmentEnd() < 0 }
 		if w.runUntil(w.now+sys.Instant(10*time.Second), tiered); w.err != nil {
